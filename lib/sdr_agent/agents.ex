@@ -441,16 +441,18 @@ defmodule SdrAgent.Agents do
   # The admission instant is read only once every lock is held, and is used
   # for the daily limit, eligibility, the grant's UTC day and `reserved_at`.
   defp reserve_admitted(run, attrs, request, actor, gate) do
-    with {:ok, locked} <- lock_run(run.id, actor),
-         {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
-         {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
-         now = SdrAgent.Clock.utc_now(),
-         {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
-         :ok <- check_daily_limit(run.tenant_id, now),
-         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
-      context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
-      create_reserved(run, attrs, request, actor, context)
-    end
+    AdmissionContext.with_owned_registrations(fn ->
+      with {:ok, locked} <- lock_run(run.id, actor),
+           {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
+           {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
+           now = SdrAgent.Clock.utc_now(),
+           {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
+           :ok <- check_daily_limit(run.tenant_id, now),
+           {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
+        context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
+        create_reserved(run, attrs, request, actor, context)
+      end
+    end)
   end
 
   defp reserve(run, attrs, request, actor, context) do

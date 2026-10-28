@@ -80,6 +80,9 @@ defmodule SdrAgent.Agents.Admission do
   alias SdrAgent.Repo
 
   @run_resource "SdrAgent.Agents.AgentRun"
+  # D-237: prototype runtime exists only in builds with the prototype
+  # authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   defmodule Refusal do
     @moduledoc """
@@ -253,19 +256,63 @@ defmodule SdrAgent.Agents.Admission do
          {:ok, tuple} <- admission_gate(refusal, run, gate),
          :ok <- switch_fence(refusal),
          {:ok, candidate_ids} <- bound_candidates(refusal, candidate_ids, binding, now),
+         {:ok, candidate_ids} <- prototype_candidates(refusal, candidate_ids),
          {:ok, grants} <- eligible_grants(refusal, candidate_ids, now),
          {:ok, grant, allocation} <- one_allocation(refusal, grants, now),
          :ok <- bound_allocation(refusal, allocation, binding),
-         :ok <- room(%{refusal | grant_id: grant.id, allocation_id: allocation.id}, grant, now) do
+         charged = %{refusal | grant_id: grant.id, allocation_id: allocation.id},
+         :ok <- room(charged, grant, now),
+         {:ok, prototype} <- prototype_registration(charged, run, {grant, allocation}, now) do
       {:ok,
-       %{
-         grant_id: grant.id,
-         allocation_id: allocation.id,
-         calibration_tuple: tuple,
-         calibration_claim: claim_record(tuple, gate),
-         calibration_binding: binding_record(tuple, binding)
-       }}
+       Map.merge(
+         %{
+           grant_id: grant.id,
+           allocation_id: allocation.id,
+           calibration_tuple: tuple,
+           calibration_claim: claim_record(tuple, gate),
+           calibration_binding: binding_record(tuple, binding)
+         },
+         prototype
+       )}
     end
+  end
+
+  ## D-237 partition (interfaces r6 IF-4; Codex ff812f6d rulings a-c)
+
+  if @prototype_compiled do
+    # Prototype runtime: only this binding's provenance grant is a candidate.
+    defp prototype_candidates(refusal, candidate_ids) do
+      if SdrAgent.Prototype.runtime() == :prototype do
+        case SdrAgent.Prototype.Admission.candidates(candidate_ids) do
+          {:ok, ids} -> {:ok, ids}
+          {:error, reason, check} -> {:error, %{refusal | reason: reason, check: check}}
+        end
+      else
+        {:ok, candidate_ids}
+      end
+    end
+
+    # Prototype runtime, after the room check: the validated authority and the
+    # registration it is recorded under (mechanism note r3 B).
+    defp prototype_registration(refusal, run, charge, now) do
+      if SdrAgent.Prototype.runtime() == :prototype do
+        call = %{profile_id: refusal.profile_id, purpose: refusal.purpose}
+
+        case SdrAgent.Prototype.Admission.register(run, call, charge, now) do
+          {:ok, registration, authority} ->
+            {:ok, %{registration: registration, prototype_authority: authority}}
+
+          {:error, reason, check} ->
+            {:error, %{refusal | reason: reason, check: check}}
+        end
+      else
+        {:ok, %{}}
+      end
+    end
+  else
+    # The production build has no prototype runtime.
+    defp prototype_candidates(_refusal, candidate_ids), do: {:ok, candidate_ids}
+    defp prototype_registration(_refusal, _run, _charge, _now), do: {:ok, %{}}
   end
 
   # C2-02b1: a fresh read of the tenant's open switch, after the head

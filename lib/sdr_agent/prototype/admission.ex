@@ -22,29 +22,51 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         store (`witness_mode_mismatch`: the snapshot says absent, no root is
         configured and none was observed); the run's origin, the call's
         explicit purpose and its profile in the policy entry and the funded
-        scope (`scope_mismatch`). Passing these does not by itself admit a
-        charge: `SdrAgent.Agents.Changes.AdmissionCharge` refuses every
-        prototype-runtime charge that does not carry the recorded authority.
+        scope (`scope_mismatch`).
+      * **This binding's grant** (`candidates/1`, then `register/4` from
+        `Admission.admit/5` after the room check; Codex ff812f6d rulings
+        a-b): the only candidate is the grant the ORIGINAL provisioned event
+        links (`Provisioning.lookup/1`; none or untrusted is
+        `grant_not_eligible`); then, in order, its status
+        (`grant_not_eligible`), the anchor as creator and updater
+        (`operator_mismatch`) and the exact funding-entry terms and
+        allocation set (`grant_not_eligible`). The 14-key authority is built
+        here, never taken from a caller, and recorded under a registration.
+      * **The registry** (mechanism note r3 section B): `register/4` owns
+        the entry in this process, bound to the reservation it may fund and
+        to the transaction id and a transaction-local marker.
+        `verify/2` and `registered?/1` are read-only: the entry and the
+        reservation facts are compared before any SQL, then the
+        transaction state. `AdmissionCharge` verifies at build time and
+        `consume/2`s once, immediately before the insert. `pending/0`
+        counts owned live, stale and consumed entries; `discard/1` removes
+        only the caller's own equal entry; `with_owned_registrations/1`
+        discards exactly the entries made during its call. A trusted
+        in-process convention, not a capability against server code.
       * **Launch** (`launch/3`, under `Admission.lock_charge/1` and the head,
         so a refusal keeps its charge): a `:proof` run, the live binding, the
         active gate and the absent store as above, then the
         `prototype_authority` recorded by the invocation's one original
         `model.invocation.reserved` event: a missing, duplicated or non-map
-        record is `authority_unrecorded`. No reservation records an authority
-        yet, so a recorded one was not recorded by this admission and is
-        refused `authority_mismatch`; the comparison of its 14 keys and the
-        charged grant's checks come with the recording.
+        record is `authority_unrecorded`. A present record is refused
+        `authority_mismatch` until the launch increment adds its 14-key
+        comparison and the charged grant's current checks (staged after
+        this admission increment; Codex 3b2e8c61).
 
     The release decision (`SdrAgent.Prototype.Release`) reuses `live/0` and
     `recorded/1`.
     """
 
     alias SdrAgent.Agents.Admission.Gate
+    alias SdrAgent.Agents.Checks.AdmissionContext.Registration
     alias SdrAgent.Agents.Witness
     alias SdrAgent.Audit.Canonical
     alias SdrAgent.Prototype
+    alias SdrAgent.Prototype.Provisioning
+    alias SdrAgent.Repo
 
     @reason :prototype_not_authorized
+    @registry {__MODULE__, :admission_registry}
 
     ## Reservation
 
@@ -84,6 +106,231 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            {:ok, _recorded} <- recorded(invocation) do
         refuse(:authority_mismatch)
       end
+    end
+
+    ## This binding's grant (C2 r2 provenance; Codex ff812f6d ruling a)
+
+    @doc """
+    The admission candidates in prototype runtime: of the locked
+    `candidate_ids`, only this binding's grant, the one the ORIGINAL
+    `model.grant.provisioned` event links (`Provisioning.lookup/1`), never one
+    found by its name. `{:ok, ids}` (empty when that grant is not a current
+    candidate, so the ordinary grant-window reasons stay), or
+    `{:error, reason, :grant_not_eligible}` when the binding has no trusted
+    provisioned grant.
+    """
+    def candidates(candidate_ids) do
+      with {:ok, live} <- live() do
+        case Provisioning.lookup(live.binding) do
+          {:one, grant_id, _event} -> {:ok, Enum.filter(candidate_ids, &(&1 == grant_id))}
+          _none_or_untrusted -> refuse(:grant_not_eligible)
+        end
+      end
+    end
+
+    @doc """
+    After the room check, for the admitted `call` in the locked `run` charged
+    to `grant` (its allocations loaded) and `allocation` at `admitted_at`:
+    validates the grant (this binding's provenance grant; then status, the
+    anchor as creator and updater, the exact funding-entry terms and
+    allocation set), builds the 14-key authority and registers the charge
+    (mechanism note r3 B). `{:ok, registration, authority}` or
+    `{:error, reason, check}` (`grant_not_eligible`, `operator_mismatch`,
+    `binding_mismatch`). The authority is never a caller input.
+    """
+    def register(run, call, {grant, allocation}, admitted_at) do
+      with {:ok, live} <- live(),
+           :ok <- same_tenant(run, live),
+           :ok <- provenance(grant, live),
+           :ok <- provisioned(grant, live) do
+        authority = expected(live, call, grant, allocation.id)
+        marker = "sdr_admission.r" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+        Repo.query!("SELECT set_config($1, '1', true)", [marker])
+
+        registration = %Registration{
+          ref: make_ref(),
+          tenant_id: run.tenant_id,
+          agent_run_id: run.id,
+          provider: :claude_cli,
+          profile_id: call.profile_id,
+          purpose: call.purpose,
+          grant_id: grant.id,
+          allocation_id: allocation.id,
+          reserved_at: admitted_at,
+          authority_sha256: sha256(authority),
+          xact_id: transaction_state(marker) |> elem(0),
+          savepoint_marker: marker
+        }
+
+        put_entry(registration.ref, %{
+          registration: registration,
+          authority: authority,
+          consumed?: false
+        })
+
+        {:ok, registration, authority}
+      end
+    end
+
+    defp provenance(grant, live) do
+      case Provisioning.lookup(live.binding) do
+        {:one, grant_id, _event} when grant_id == grant.id -> :ok
+        _other -> refuse(:grant_not_eligible)
+      end
+    end
+
+    # Status, then the anchor as creator and updater, then the exact terms
+    # and allocation set (Codex ff812f6d ruling b; the revision is recorded).
+    defp provisioned(grant, %{binding: binding}) do
+      cond do
+        grant.status != :active ->
+          refuse(:grant_not_eligible)
+
+        grant.created_by_id != binding.operator_user_id or
+            grant.updated_by_id != binding.operator_user_id ->
+          refuse(:operator_mismatch)
+
+        not Provisioning.unchanged?(grant, grant.allocations) ->
+          refuse(:grant_not_eligible)
+
+        true ->
+          :ok
+      end
+    end
+
+    @doc false
+    # The 14-key authority of `call` charged to `grant` and `allocation_id`,
+    # from the boot snapshot.
+    def expected(%{binding: binding}, call, grant, allocation_id) do
+      %{
+        "policy_id" => binding.policy_id,
+        "entry_sha256" => binding.policy_entry_sha256,
+        "funding_id" => binding.funding_id,
+        "binding_id" => binding.id,
+        "instance_id" => binding.instance_id,
+        "tenant_id" => binding.tenant_id,
+        "operator_user_id" => binding.operator_user_id,
+        "dataset_class" => binding.dataset_class,
+        "witness_mode" => binding.witness_mode,
+        "profile_id" => Atom.to_string(call.profile_id),
+        "purpose" => Atom.to_string(call.purpose),
+        "grant_id" => grant.id,
+        "grant_revision" => grant.revision,
+        "allocation_id" => allocation_id
+      }
+    end
+
+    ## The registry (mechanism note r3 section B)
+
+    @doc """
+    Read-only: `{:ok, authority}` when `registration` is equal to this
+    process's own unconsumed entry and agrees with `facts` (the reservation
+    being written; every given key must match), both compared BEFORE any
+    SQL, and the current transaction id and the entry's transaction-local
+    marker still match. Otherwise `:error`. Nothing is consumed.
+    """
+    def verify(registration, facts \\ %{})
+
+    def verify(%Registration{ref: ref} = registration, facts) when is_reference(ref) do
+      with %{registration: ^registration, consumed?: false, authority: authority} <-
+             Map.get(registry(), ref),
+           true <- facts_match?(registration, facts),
+           true <- Repo.in_transaction?(),
+           true <-
+             transaction_state(registration.savepoint_marker) ==
+               {registration.xact_id, "1"} do
+        {:ok, authority}
+      else
+        _refused -> :error
+      end
+    end
+
+    def verify(_registration, _facts), do: :error
+
+    @doc """
+    Verifies `registration` against the reservation being written (`facts`)
+    and consumes it, once: `{:ok, authority}` or `:error`. Only the
+    authorized `:reserve` action calls this, immediately before its insert.
+    """
+    def consume(registration, facts) do
+      with {:ok, authority} <- verify(registration, facts) do
+        put_entry(registration.ref, %{Map.fetch!(registry(), registration.ref) | consumed?: true})
+        {:ok, authority}
+      end
+    end
+
+    @doc "Whether `registration` is live, unconsumed and owned here (read-only)."
+    def registered?(registration), do: match?({:ok, _}, verify(registration))
+
+    @doc "Every registration this process owns: live, stale and consumed ones."
+    def pending, do: map_size(registry())
+
+    @doc "Removes this process's own entry equal to `registration`; nothing else."
+    def discard(%Registration{ref: ref} = registration) when is_reference(ref) do
+      case Map.get(registry(), ref) do
+        %{registration: ^registration} -> delete_entry(ref)
+        _other -> :ok
+      end
+    end
+
+    def discard(_registration), do: :ok
+
+    @doc """
+    Runs `fun`, then discards ONLY the registrations this process created
+    during it (by owned ref), whatever `fun` returns or raises: its result is
+    returned and its raise re-raised unchanged.
+    """
+    def with_owned_registrations(fun) when is_function(fun, 0) do
+      before = registry() |> Map.keys() |> MapSet.new()
+
+      try do
+        fun.()
+      after
+        for ref <- Map.keys(registry()), not MapSet.member?(before, ref), do: delete_entry(ref)
+      end
+    end
+
+    @facts [
+      :tenant_id,
+      :agent_run_id,
+      :provider,
+      :profile_id,
+      :purpose,
+      :grant_id,
+      :allocation_id,
+      :reserved_at
+    ]
+
+    defp facts_match?(registration, facts) when is_map(facts) do
+      Enum.all?(Map.take(facts, @facts), fn {key, value} ->
+        Map.fetch!(registration, key) == value
+      end)
+    end
+
+    defp facts_match?(_registration, _facts), do: false
+
+    # The current transaction id and a marker's value, in one query (no lock
+    # clause); as `ReleaseDecision.Prelocked`.
+    defp transaction_state(marker) do
+      %{rows: [[id, value]]} =
+        Repo.query!("SELECT pg_current_xact_id()::text, current_setting($1, true)", [marker])
+
+      {id, value}
+    rescue
+      _aborted -> {nil, nil}
+    end
+
+    defp registry, do: Process.get(@registry, %{})
+
+    defp put_entry(ref, entry), do: Process.put(@registry, Map.put(registry(), ref, entry))
+
+    defp delete_entry(ref) do
+      case Map.delete(registry(), ref) do
+        empty when empty == %{} -> Process.delete(@registry)
+        rest -> Process.put(@registry, rest)
+      end
+
+      :ok
     end
 
     ## Shared checks (also used by the release decision)

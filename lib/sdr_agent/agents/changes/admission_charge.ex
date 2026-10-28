@@ -21,19 +21,26 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
   runtime, before the insert, so the reservation transaction (run counter,
   request Payload, invocation and event) rolls back.
 
-  D-237 partition (interfaces r6 IF-4; amendment item 4): a ClaudeCLI charge
-  is made here only in ordinary runtime and only without a
-  `prototype_authority`. In prototype runtime the prototype gate
-  (`SdrAgent.Prototype.Admission`) admits no charge without the authority it
-  records, and no reservation records one yet, so every prototype-runtime
-  ClaudeCLI charge is refused (Forbidden): it never falls back to an
-  ordinary grant.
+  D-237 partition (interfaces r6 IF-4; amendment item 4; mechanism note r3
+  section B): in ordinary runtime a ClaudeCLI charge carries no
+  `prototype_authority` and no registration. In prototype runtime it is made
+  only under the registration `Admission.admit/5` returned for it: at build
+  time (which also serves `Ash.can?/2`) the registration is verified
+  read-only against the reservation (run, provider, profile, purpose,
+  charge, instant); immediately before the insert, after authorization, a
+  `before_action` verifies it against the ACTUAL changeset (tenant
+  included) and consumes it, once, then records the authority it was
+  registered with. A missing, forged, copied, consumed, stale, cross-process
+  or rolled-back registration, or one for another reservation, is
+  Forbidden: a prototype call never falls back to an ordinary grant. The
+  production build has the ordinary rule only.
   """
   use Ash.Resource.Change
 
   alias Ash.Error.Forbidden
   alias SdrAgent.Agents.Checks.AdmissionContext
-  alias SdrAgent.Prototype
+
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   # Arguments a caller may never supply (each is set only from an admitted
   # charge): any non-nil value is refused, for every provider and runtime.
@@ -58,9 +65,7 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
 
       {:claude_cli, %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at} = charge} ->
-        if partitioned?(charge),
-          do: charged(changeset, charge, {grant_id, allocation_id, at}),
-          else: Ash.Changeset.add_error(changeset, Forbidden.exception([]))
+        runtime_charge(changeset, charge, {grant_id, allocation_id, at})
 
       {:claude_cli, _missing} ->
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
@@ -73,9 +78,69 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
     end
   end
 
-  # D-237 IF-4: ordinary runtime only, and no prototype authority.
-  defp partitioned?(charge),
-    do: Prototype.runtime() == :ordinary and is_nil(Map.get(charge, :prototype_authority))
+  ## D-237 partition
+
+  if @prototype_compiled do
+    alias SdrAgent.Agents.Checks.AdmissionContext.Registration
+    alias SdrAgent.Prototype.Admission, as: PrototypeAdmission
+
+    @build_facts [:agent_run_id, :provider, :profile_id, :purpose]
+    @insert_facts [:tenant_id | @build_facts] ++ [:grant_id, :allocation_id, :reserved_at]
+
+    defp runtime_charge(changeset, charge, ids) do
+      case {SdrAgent.Prototype.runtime(), Map.get(charge, :registration),
+            Map.get(charge, :prototype_authority)} do
+        {:ordinary, nil, nil} ->
+          charged(changeset, charge, ids)
+
+        {:prototype, %Registration{} = registration, _context_authority} ->
+          if match?(
+               {:ok, _},
+               PrototypeAdmission.verify(registration, build_facts(changeset, ids))
+             ),
+             do:
+               changeset
+               |> charged(charge, ids)
+               |> Ash.Changeset.before_action(&consume(&1, registration)),
+             else: forbidden(changeset)
+
+        _other ->
+          forbidden(changeset)
+      end
+    end
+
+    # Pure verification at build time: the registration's own entry, then
+    # the reservation's run, provider, profile, purpose and the charge.
+    defp build_facts(changeset, {grant_id, allocation_id, at}) do
+      changeset
+      |> attributes(@build_facts)
+      |> Map.merge(%{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at})
+    end
+
+    # Immediately before the insert, after authorization: the ACTUAL
+    # changeset, then the one consumption and the registered authority.
+    defp consume(changeset, registration) do
+      case PrototypeAdmission.consume(registration, attributes(changeset, @insert_facts)) do
+        {:ok, authority} ->
+          Ash.Changeset.force_set_argument(changeset, :prototype_authority, authority)
+
+        :error ->
+          forbidden(changeset)
+      end
+    end
+
+    defp attributes(changeset, keys),
+      do: Map.new(keys, &{&1, Ash.Changeset.get_attribute(changeset, &1)})
+  else
+    # The production build has no prototype runtime: the ordinary rule only.
+    defp runtime_charge(changeset, charge, ids) do
+      if is_nil(Map.get(charge, :registration)) and is_nil(Map.get(charge, :prototype_authority)),
+        do: charged(changeset, charge, ids),
+        else: forbidden(changeset)
+    end
+  end
+
+  defp forbidden(changeset), do: Ash.Changeset.add_error(changeset, Forbidden.exception([]))
 
   defp charged(changeset, charge, {grant_id, allocation_id, at}) do
     changeset
