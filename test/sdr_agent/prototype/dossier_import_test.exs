@@ -15,6 +15,7 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   alias SdrAgent.DossierFixtures, as: F
 
   @import SdrAgent.Prototype.DossierImport
+  @business_events "event_type LIKE 'sales.%' OR event_type LIKE 'research.%'"
 
   setup do
     fixture = bound!()
@@ -228,6 +229,8 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       [row] = rows!([F.company(1)], ["row-1"])
       broken = put_in(row, [:plan, :sources], [%{hd(row.plan.sources) | source_id: "s!"}])
       payloads = count("payloads")
+      accesses = count("audit_accesses")
+      events = count("audit_events", @business_events)
 
       assert {:error, %{failed_row: "row-1", imported: []}} =
                call(@import, :import, [[broken], ctx.actor])
@@ -238,6 +241,10 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       assert count("dossier_entries") == 0
       assert count("dossier_sources") == 0
       assert count("payloads") == payloads
+      # No access record and none of the row's business events survive.
+      assert count("audit_accesses") == accesses
+
+      assert count("audit_events", @business_events) == events
 
       # The slot was not consumed: three fresh rows still fit.
       rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
