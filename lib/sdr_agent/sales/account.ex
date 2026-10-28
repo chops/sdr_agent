@@ -138,7 +138,8 @@ defmodule SdrAgent.Sales.Account do
 
     attribute :source, :atom do
       allow_nil? false
-      constraints one_of: [:fixture, :crm, :manual]
+      # D-237 (interfaces r6 IF-6): `:dossier` marks a prototype dossier import.
+      constraints one_of: [:fixture, :crm, :manual, :dossier]
       public? true
     end
 

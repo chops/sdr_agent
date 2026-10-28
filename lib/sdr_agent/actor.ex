@@ -17,6 +17,10 @@ defmodule SdrAgent.Actor do
     * `:auditor_cli` (AUD) — read-only verify/export CLI
     * `:kernel` (KRN) — boot-time registration and the audit kernel itself
     * `:seeder` (SEED) — `:dev`/`:test` fixtures only
+    * `:prototype_operator` (OPR) — the D-237 prototype operator: one
+      agent session's `PrototypeDelegation`, whose id is the actor id; it is
+      authority only when `SdrAgent.Prototype.operator_actor/1` resolves it
+      against the live binding (never by the struct alone)
   """
 
   @types [
@@ -29,7 +33,8 @@ defmodule SdrAgent.Actor do
     :anchorer,
     :auditor_cli,
     :kernel,
-    :seeder
+    :seeder,
+    :prototype_operator
   ]
 
   @enforce_keys [:type]
@@ -46,6 +51,7 @@ defmodule SdrAgent.Actor do
           | :auditor_cli
           | :kernel
           | :seeder
+          | :prototype_operator
 
   @type t :: %__MODULE__{type: type(), id: String.t() | nil, tenant_id: Ecto.UUID.t() | nil}
 

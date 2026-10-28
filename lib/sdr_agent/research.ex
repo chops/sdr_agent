@@ -34,6 +34,9 @@ defmodule SdrAgent.Research do
     resource SdrAgent.Research.EvidenceClaim
     resource SdrAgent.Research.Qualification
     resource SdrAgent.Research.QualificationEvidence
+    # D-237 (interfaces r6 IF-6): imported prototype dossier rows and sources.
+    resource SdrAgent.Research.DossierEntry
+    resource SdrAgent.Research.DossierSource
   end
 
   @doc "AGT: records a retrieved source; `content` is stored in full as a Payload."

@@ -4,8 +4,10 @@ defmodule SdrAgent.Accounts.User do
   "Roles and actors").
 
   Attributes: `email` (ci_string, globally unique — the sign-in identity),
-  `hashed_password` (bcrypt, sensitive), `role` (`:admin`, `:reviewer`,
-  `:auditor`; default reviewer), `status` (`:active`, `:disabled`),
+  `hashed_password` (bcrypt, sensitive; NULL exactly for the D-237
+  `:agent_operator` anchor, by the `users_agent_operator_password` CHECK),
+  `role` (`:admin`, `:reviewer`, `:auditor`, and the D-237 machine anchor
+  `:agent_operator`, a foreign-key value only; default reviewer), `status` (`:active`, `:disabled`),
   `display_name`, `tenant_id` (set from the creating actor, immutable),
   `inserted_at`/`updated_at`. The id stays the generated UUIDv4.
 
@@ -54,7 +56,10 @@ defmodule SdrAgent.Accounts.User do
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
 
-  @roles [:admin, :reviewer, :auditor]
+  @human_roles [:admin, :reviewer, :auditor]
+  # D-237 (interfaces r6 IF-3): the credential-less operator anchor, a
+  # foreign-key value only, never an actor.
+  @roles @human_roles ++ [:agent_operator]
   @statuses [:active, :disabled]
 
   authentication do
@@ -92,6 +97,10 @@ defmodule SdrAgent.Accounts.User do
 
     check_constraints do
       check_constraint :role, "users_role", check: SdrAgent.Audit.SQL.one_of("role", @roles)
+
+      # D-237 IF-3: exactly the anchor role has no password.
+      check_constraint :hashed_password, "users_agent_operator_password",
+        check: "(role = 'agent_operator') = (hashed_password IS NULL)"
 
       check_constraint :status, "users_status",
         check: SdrAgent.Audit.SQL.one_of("status", @statuses)
@@ -323,7 +332,8 @@ defmodule SdrAgent.Accounts.User do
     end
 
     attribute :hashed_password, :string do
-      allow_nil? false
+      # Null exactly for the D-237 anchor (users_agent_operator_password).
+      allow_nil? true
       sensitive? true
     end
 
@@ -368,10 +378,12 @@ defmodule SdrAgent.Accounts.User do
 
   identities do
     identity :unique_email, [:email]
+    # D-237 IF-2: the composite FK target of the prototype binding's users.
+    identity :unique_id_tenant, [:id, :tenant_id]
   end
 
   @doc "Human roles (ADR-0009)."
-  def roles, do: @roles
+  def roles, do: @human_roles
 
   @doc false
   def __sdr_audited__, do: true
