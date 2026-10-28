@@ -403,6 +403,61 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     refute Map.has_key?(event.payload["arguments"] || %{}, "prototype")
   end
 
+  # ------------------------------------------------------------------ replay
+  #
+  # Codex 845d0959 / e9688dca: a genuine existing captured receipt replays
+  # (the stored row, identified by the upsert from the authoritative tenant
+  # row, never by a caller flag) without the current window, suppression or
+  # binding checks and without another event; normal caller authorization
+  # still applies (the delivery worker records it).
+
+  defp captured_once!(ctx) do
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    deliver!()
+    assert [receipt] = captured(ctx, delivery)
+    assert [event] = captured_events(ctx)
+    assert event.payload["arguments"]["prototype"] == block!()
+    {delivery, receipt, event}
+  end
+
+  defp replays_unchanged!(ctx, delivery, receipt, event) do
+    replay = record_captured(ctx, delivery)
+    assert match?({:ok, %{id: _}}, replay), "the replay was refused: #{inspect(replay, limit: 3)}"
+    {:ok, again} = replay
+    assert again.id == receipt.id
+    assert again.rendered_sha256 == receipt.rendered_sha256
+    assert [stored] = captured(ctx, delivery)
+    assert stored.id == receipt.id
+    assert captured_events(ctx) == [event], "a replay appended another receipt event"
+  end
+
+  test "replay after the window end: the original captured receipt, no new event" do
+    ctx = prototype_drafted!()
+    {delivery, receipt, event} = captured_once!(ctx)
+
+    Clock.freeze(window_end())
+    replays_unchanged!(ctx, delivery, receipt, event)
+  end
+
+  test "replay after the recipient is suppressed: the original captured receipt, no new event" do
+    ctx = prototype_drafted!()
+    {delivery, receipt, event} = captured_once!(ctx)
+
+    {:ok, _} =
+      Outreach.suppress(%{scope: :email, value: to_string(ctx.contact.email)}, actor: ctx.admin)
+
+    replays_unchanged!(ctx, delivery, receipt, event)
+  end
+
+  test "replay after a binding drift: the original captured receipt, no new event" do
+    ctx = prototype_drafted!()
+    {delivery, receipt, event} = captured_once!(ctx)
+
+    assert :ok = PrototypeFixtures.put_live_identity(%{system_identifier: 1})
+    replays_unchanged!(ctx, delivery, receipt, event)
+  end
+
   # ------------------------------------------------------------------ signed export
 
   test "the signed export payload carries the block as the key prototype" do

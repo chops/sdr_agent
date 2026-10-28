@@ -195,25 +195,35 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
+  Records a `captured` receipt for `delivery` directly, as the delivery
+  worker (DLV), with its stored operation fields, exactly as the capture
+  adapter does; returns the action result.
+  """
+  def record_captured(ctx, delivery) do
+    operation = OutreachFixtures.outreach!(ctx, delivery)
+
+    Outreach.record_receipt(
+      %{
+        delivery_operation_id: operation.id,
+        idempotency_key: operation.idempotency_key,
+        kind: :captured,
+        provider: :capture,
+        provider_message_id:
+          SdrAgent.Outreach.Delivery.CaptureAdapter.provider_message_id(operation.idempotency_key),
+        rendered_sha256: operation.rendered_sha256
+      },
+      actor: Actor.system(:delivery_worker, ctx.tenant.id)
+    )
+  end
+
+  @doc """
   The refusal text of a direct `captured` receipt record for `delivery`, as
   the delivery worker (DLV), with its stored operation fields: the full
   inspection of the raised or returned error, or `"recorded"` when the
   receipt was recorded.
   """
   def capture_refusal(ctx, delivery) do
-    operation = OutreachFixtures.outreach!(ctx, delivery)
-
-    attrs = %{
-      delivery_operation_id: operation.id,
-      idempotency_key: operation.idempotency_key,
-      kind: :captured,
-      provider: :capture,
-      provider_message_id:
-        SdrAgent.Outreach.Delivery.CaptureAdapter.provider_message_id(operation.idempotency_key),
-      rendered_sha256: operation.rendered_sha256
-    }
-
-    case Outreach.record_receipt(attrs, actor: Actor.system(:delivery_worker, ctx.tenant.id)) do
+    case record_captured(ctx, delivery) do
       {:ok, _receipt} -> "recorded"
       {:error, error} -> inspect(error, limit: :infinity, printable_limit: :infinity)
     end
