@@ -35,6 +35,10 @@ defmodule SdrAgent.Agents.SettingsRevision do
   Reads of rows and of the content and note: admin, reviewer (read-only,
   OQ-6), auditor (audited by the views), `agent_runtime`, `auditor_cli`,
   kernel, each in its own tenant.
+
+  Action `:seed_prototype` (D-237, S3): the prototype operator's revision 1
+  of the GTM seed's profile or guide. At this stage it is declared only and
+  refused for every actor; its body and policy come with its reviewed GREEN.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -178,9 +182,26 @@ defmodule SdrAgent.Agents.SettingsRevision do
               category: :domain_change,
               arguments: [:expected_number]}
     end
+
+    # D-237 S3 slice A, reached-RED stage (Codex b8d624fe): the operator's
+    # seed revision is DECLARED only, deny-only (its policy below refuses
+    # every actor), so its tests reach it. Its body (the anchor, the
+    # provenance note, the unchanged shared chain) and the narrowing of the
+    # create policy come with its reviewed GREEN.
+    create :seed_prototype do
+      description "OPR (D-237): revision 1 of a seed setting; deny-only until its GREEN."
+      accept [:kind]
+      argument :content, :term, allow_nil?: false, sensitive?: true
+      argument :note, :term, allow_nil?: false, sensitive?: true
+    end
   end
 
   policies do
+    # D-237 S3 slice A, reached-RED stage: no actor may run :seed_prototype.
+    policy action(:seed_prototype) do
+      forbid_if always()
+    end
+
     policy action_type([:create, :update, :destroy, :action]) do
       authorize_if CurrentAdmin
     end
