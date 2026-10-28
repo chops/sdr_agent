@@ -14,7 +14,10 @@ defmodule SdrAgent.Prototype.BoundedJson do
      of that one snapshot must equal the argument (the path is never
      reread). Refusals are `{"(file)", rule}` with `:unreadable`,
      `:not_regular`, `:too_large`, `:changed` or `:digest_mismatch`.
-     `decode/2` refuses invalid UTF-8.
+     `read_private/4` is the private-evidence variant (a lexical relative
+     path under a checked 0700 root, a 0600 leaf, the directory chain
+     rechecked before any byte); see its doc. `decode/2` refuses invalid
+     UTF-8.
   2. **Syntax vs content.** JSON whitespace between tokens is ignored; text
      rules apply only to decoded string values.
   3. **Decode.** `Jason.decode(bin, objects: :ordered_objects)`, then one
@@ -196,34 +199,193 @@ defmodule SdrAgent.Prototype.BoundedJson do
   (Codex a6850b13 D4, S1's IF-2 worksheet evidence), in one pass:
 
   - `path` matches `^[A-Za-z0-9._/-]{1,200}$`, is relative and has no
-    empty, `.` or `..` segment (`:invalid_path`); it is walked lexically
-    and never resolved;
+    empty, `.` or `..` segment (`:invalid_path`), checked on the raw
+    string before any path operation; it is walked lexically and never
+    resolved;
   - `root` is absolute and, by `lstat`, a real directory (not a symlink)
-    of mode 0700 (`:root_mode`); its own ancestors are not checked;
+    of mode 0700 (`:root_mode`); the caller supplies a trusted canonical
+    root, whose own ancestors are outside this boundary;
   - each intermediate directory of `path`, by `lstat`, is a real directory
-    (`:not_directory`) that neither group nor other can write (`:dir_mode`);
+    (`:not_directory`; absent: `:unreadable`) that neither group nor other
+    can write (`:dir_mode`), so 0755 is accepted;
   - the leaf, by `lstat`, is a regular file (`:not_regular`; absent:
     `:unreadable`) of mode 0600 (`:file_mode`) within `max_bytes`
     (`:too_large`);
   - then ONE raw handle: before any byte is read, the opened object (fstat)
-    must be that checked leaf (`:changed`), still 0600 (`:file_mode`) and
-    within the bound (`:too_large`), and the root and every intermediate
-    directory must still be the checked objects (`:changed`) meeting their
-    requirements; the read stops at `max_bytes` plus one sentinel byte;
-    the sha256 of exactly those bytes must equal `sha256_hex`
-    (`:digest_mismatch`); the handle is closed on every path.
+    must be that checked leaf by type, device and inode (`:changed`), still
+    0600 (`:file_mode`) and within the bound (`:too_large`); and the root
+    and every intermediate directory must still be the checked objects
+    (`:changed`), the root still 0700 (`:root_mode`) and no directory
+    writable by group or other (`:dir_mode`); the read stops at
+    `max_bytes` plus one sentinel byte; the sha256 of exactly those bytes
+    must equal `sha256_hex` (`:digest_mismatch`); the handle is closed on
+    every path.
 
   Refusals are `{"(file)", rule}`, value-free. Nothing is chmod-ed,
-  repaired or adopted. Residuals: the open blocks on a FIFO substituted
-  after the checks; after the final check a same-uid process can still
-  change a mode or an entry (no atomic guarantee); the owner uid is not
-  checked. Test builds call the same hooks as `read_file/3`.
+  repaired or adopted. Test builds call the same hooks as `read_file/3`.
 
-  RED stage (D-237 S1b): returns `{:error, :not_implemented}`.
+  Residuals, explicit: the open blocks on a FIFO substituted after the
+  checks; after the final check a same-uid process can still change a mode
+  or an entry (no atomic guarantee); the root's own ancestors are not
+  checked. No uid is verified: `File.Stat` carries a uid, but there is no
+  trusted current euid here, and the IF-2 contract asks for none. The
+  leaf's link count is not checked: no hard-link exclusion, path-unique
+  provenance or immutability is claimed. This read-only, hash-pinned
+  contract is not the SafeLog writer's.
   """
-  @spec read_private(Path.t(), String.t(), String.t(), pos_integer()) ::
-          {:ok, binary()} | error() | {:error, :not_implemented}
-  def read_private(_root, _path, _sha256_hex, _max_bytes), do: {:error, :not_implemented}
+  @spec read_private(Path.t(), String.t(), String.t(), pos_integer()) :: {:ok, binary()} | error()
+  def read_private(root, path, sha256_hex, max_bytes)
+      when is_binary(root) and is_binary(path) and is_binary(sha256_hex) and
+             is_integer(max_bytes) and max_bytes > 0 do
+    with {:ok, segments} <- lexical(path),
+         {:ok, chain} <- private_chain(root, segments),
+         full = Path.join([root | segments]),
+         {:ok, leaf} <- private_leaf(full, max_bytes) do
+      hook(:after_precheck, full)
+      open_private(full, chain, leaf, sha256_hex, max_bytes)
+    end
+  end
+
+  # On the raw string, before any Path operation could normalize it away.
+  defp lexical(path) do
+    segments = String.split(path, "/")
+
+    if byte_size(path) in 1..200 and path_chars?(path) and
+         Enum.all?(segments, &(&1 not in ["", ".", ".."])),
+       do: {:ok, segments},
+       else: file_failure(:invalid_path)
+  end
+
+  defp path_chars?(path), do: path |> :binary.bin_to_list() |> Enum.all?(&path_char?/1)
+
+  defp path_char?(c),
+    do: c in ?A..?Z or c in ?a..?z or c in ?0..?9 or c in [?., ?_, ?/, ?-]
+
+  # The root and every intermediate directory, by lstat, in order:
+  # `[{path, :root | :dir, stat}]`.
+  defp private_chain(root, segments) do
+    with {:ok, root_stat} <- private_root(root) do
+      segments
+      |> Enum.drop(-1)
+      |> Enum.reduce_while({:ok, root, [{root, :root, root_stat}]}, &chain_link/2)
+      |> case do
+        {:ok, _dir, chain} -> {:ok, Enum.reverse(chain)}
+        error -> error
+      end
+    end
+  end
+
+  defp chain_link(segment, {:ok, dir, chain}) do
+    next = Path.join(dir, segment)
+
+    case private_dir(next) do
+      {:ok, stat} -> {:cont, {:ok, next, [{next, :dir, stat} | chain]}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp private_root(root) do
+    with :absolute <- Path.type(root),
+         {:ok, %File.Stat{type: :directory} = stat} <- File.lstat(root),
+         0o700 <- mode_bits(stat) do
+      {:ok, stat}
+    else
+      _other -> file_failure(:root_mode)
+    end
+  end
+
+  defp private_dir(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        if others_write?(stat), do: file_failure(:dir_mode), else: {:ok, stat}
+
+      {:ok, %File.Stat{}} ->
+        file_failure(:not_directory)
+
+      {:error, _reason} ->
+        file_failure(:unreadable)
+    end
+  end
+
+  defp private_leaf(path, max_bytes) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular} = stat} -> private_bounds(stat, max_bytes)
+      {:ok, %File.Stat{}} -> file_failure(:not_regular)
+      {:error, _reason} -> file_failure(:unreadable)
+    end
+  end
+
+  defp private_bounds(stat, max_bytes) do
+    cond do
+      mode_bits(stat) != 0o600 -> file_failure(:file_mode)
+      stat.size > max_bytes -> file_failure(:too_large)
+      true -> {:ok, stat}
+    end
+  end
+
+  # The one handle: closed on every path after a successful open.
+  defp open_private(path, chain, leaf, sha256_hex, max_bytes) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, handle} ->
+        try do
+          hook(:after_open, handle)
+          read_private_checked(handle, chain, leaf, sha256_hex, max_bytes)
+        after
+          :file.close(handle)
+        end
+
+      {:error, _reason} ->
+        file_failure(:unreadable)
+    end
+  end
+
+  # Before any byte: the opened leaf, then the whole directory chain.
+  defp read_private_checked(handle, chain, leaf, sha256_hex, max_bytes) do
+    with :ok <- same_private_leaf(handle, leaf, max_bytes),
+         :ok <- Enum.find_value(chain, :ok, &changed_link/1),
+         {:ok, snapshot} <- read_after_identity(handle, max_bytes) do
+      check_snapshot(snapshot, sha256_hex, max_bytes)
+    end
+  end
+
+  defp same_private_leaf(handle, leaf, max_bytes) do
+    case :file.read_file_info(handle, time: :posix) do
+      {:ok, info} -> compare_private(File.Stat.from_record(info), leaf, max_bytes)
+      {:error, _reason} -> file_failure(:unreadable)
+    end
+  end
+
+  defp compare_private(opened, leaf, max_bytes) do
+    cond do
+      object(opened) != object(leaf) -> file_failure(:changed)
+      mode_bits(opened) != 0o600 -> file_failure(:file_mode)
+      opened.size > max_bytes -> file_failure(:too_large)
+      true -> :ok
+    end
+  end
+
+  # nil while the directory is still the checked object meeting its
+  # requirement (for Enum.find_value/3); otherwise the refusal.
+  defp changed_link({path, kind, checked}) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory} = now} ->
+        cond do
+          object(now) != object(checked) -> file_failure(:changed)
+          kind == :root and mode_bits(now) != 0o700 -> file_failure(:root_mode)
+          kind == :dir and others_write?(now) -> file_failure(:dir_mode)
+          true -> nil
+        end
+
+      _other ->
+        file_failure(:changed)
+    end
+  end
+
+  defp object(%File.Stat{} = stat),
+    do: {stat.type, stat.major_device, stat.minor_device, stat.inode}
+
+  defp mode_bits(%File.Stat{mode: mode}), do: Bitwise.band(mode, 0o777)
+  defp others_write?(%File.Stat{mode: mode}), do: Bitwise.band(mode, 0o022) != 0
 
   @doc """
   Decodes `bin` under rules 1-4 and 7 (`max_bytes:`, `max_depth:`,
