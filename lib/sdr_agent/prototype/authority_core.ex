@@ -52,8 +52,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d),
     B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
     B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
-    `resolve_delegation/2` and `operator?/1`, and `assurance/0` are
-    implemented. Every other
+    `resolve_delegation/2` and `operator?/1`, `assurance/0`, and C1's pure
+    `check_worksheet/3` steps 1-3 are implemented. Every other
     function is still a non-permissive RED declaration returning
     `{:error, :not_implemented}`; none fabricates success.
     """
@@ -70,6 +70,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Operations.PrototypeDatabaseBinding
     alias SdrAgent.Operations.PrototypeDelegation
     alias SdrAgent.Prototype.Binding
+    alias SdrAgent.Prototype.BoundedJson
     alias SdrAgent.Prototype.Checks.KernelMarker
     alias SdrAgent.Repo
 
@@ -81,6 +82,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
                     "(pg_control_system()).system_identifier FROM pg_database d " <>
                     "WHERE d.datname = current_database()"
+
+    # IF-2 provisioning: the budget worksheet (F7).
+    @shared_total 60
+    @funded_ceiling 50
+    @window_starts_at "2026-10-28T02:38:32.000000Z"
+    @worksheet_max_bytes 16_384
+    @worksheet_keys ~w(schema shared_total window_starts_at as_of routes previous_bindings)
+    @route_keys ~w(route basis consumed evidence)
+    @evidence_keys ~w(path sha256)
+    @previous_keys ~w(consumed evidence)
+    @worksheet_known_keys Enum.uniq(
+                            @worksheet_keys ++ @route_keys ++ @evidence_keys ++ @previous_keys
+                          )
+    @budget_routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
+    @bases ~w(agent_receipt owner_attestation owner_aggregate)
+    @owner_bases ~w(owner_attestation owner_aggregate)
 
     # Amendment item 1 (D-249: accepted interior text 54769 B), exact.
     @policy_entry %{
@@ -450,10 +467,138 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec pinned_migrations() :: [{integer(), String.t()}] | {:error, atom()}
     def pinned_migrations, do: red({:error, :not_implemented})
 
-    @doc "Checks the IF-2 budget worksheet `bytes` (its sha256 hex, the evidence root)."
+    @doc """
+    Checks the IF-2 budget worksheet `bytes` against its sha256 hex, with its
+    evidence under `evidence_root`; `{:ok, %{sha256:, remaining:}}` or a
+    closed refusal atom. Steps, in order:
+
+    1. The sha256 of `bytes` equals `sha256_hex`; the general parser rules
+       (`SdrAgent.Prototype.BoundedJson`, at most 16 KiB, depth 4); exact
+       key sets, types and counts (0..60); the fixed schema, total and
+       window start; `as_of` RFC 3339 with an offset, not before the window
+       start. Otherwise `:worksheet_invalid`.
+    2. Exactly the five routes, each once; an owner or hosted route only on
+       an owner basis. Otherwise `:budget_unbounded` (unknown is not zero).
+    3. `60 − Σ consumed − previous_bindings.consumed` below 50 is
+       `:budget_below_ceiling`: the recorded counts already refuse, whatever
+       the evidence.
+    4. Every evidence reference resolves under the root to its exact bytes.
+       Otherwise `:budget_unbounded`.
+
+    Stage (D-237 S1 C1, Codex a6850b13): steps 1-3 are implemented. Step 4
+    waits for the reviewed shared private reader (S1b), so every evidence
+    reference is unresolved and refuses `:budget_unbounded` (fail closed):
+    no worksheet passes yet.
+    """
     @spec check_worksheet(binary(), String.t(), Path.t()) ::
-            {:ok, %{sha256: String.t(), remaining: non_neg_integer()}} | {:error, atom()}
-    def check_worksheet(_bytes, _sha256_hex, _evidence_root), do: red({:error, :not_implemented})
+            {:ok, %{sha256: String.t(), remaining: non_neg_integer()}}
+            | {:error, :worksheet_invalid | :budget_unbounded | :budget_below_ceiling}
+    def check_worksheet(bytes, sha256_hex, evidence_root)
+        when is_binary(bytes) and is_binary(sha256_hex) and is_binary(evidence_root) do
+      with :ok <- worksheet_digest(bytes, sha256_hex),
+           {:ok, worksheet} <- worksheet_decode(bytes),
+           :ok <- worksheet_shape(worksheet),
+           :ok <- routes_bounded(worksheet["routes"]),
+           {:ok, remaining} <- worksheet_remaining(worksheet),
+           :ok <- evidence_resolved(worksheet, evidence_root) do
+        {:ok, %{sha256: sha256_hex, remaining: remaining}}
+      end
+    end
+
+    def check_worksheet(_bytes, _sha256_hex, _evidence_root), do: {:error, :worksheet_invalid}
+
+    defp worksheet_digest(bytes, sha256_hex) do
+      if hex(:crypto.hash(:sha256, bytes)) == sha256_hex,
+        do: :ok,
+        else: {:error, :worksheet_invalid}
+    end
+
+    defp worksheet_decode(bytes) do
+      case BoundedJson.decode(bytes,
+             max_bytes: @worksheet_max_bytes,
+             max_depth: 4,
+             known_keys: @worksheet_known_keys
+           ) do
+        {:ok, %{} = worksheet} -> {:ok, worksheet}
+        _invalid -> {:error, :worksheet_invalid}
+      end
+    end
+
+    defp worksheet_shape(worksheet) do
+      with :ok <- BoundedJson.exact_keys(worksheet, @worksheet_keys, []),
+           "d237-budget-worksheet/1" <- worksheet["schema"],
+           @shared_total <- worksheet["shared_total"],
+           @window_starts_at <- worksheet["window_starts_at"],
+           true <- as_of_in_window?(worksheet["as_of"]),
+           routes when is_list(routes) <- worksheet["routes"],
+           true <- Enum.all?(routes, &route_shape?/1),
+           %{} = previous <- worksheet["previous_bindings"],
+           :ok <- BoundedJson.exact_keys(previous, @previous_keys, ["previous_bindings"]),
+           true <- consumed?(previous["consumed"]),
+           true <- evidence_shape?(previous["evidence"]) do
+        :ok
+      else
+        _invalid -> {:error, :worksheet_invalid}
+      end
+    end
+
+    defp as_of_in_window?(as_of) when is_binary(as_of) do
+      {:ok, window_start, _offset} = DateTime.from_iso8601(@window_starts_at)
+
+      case DateTime.from_iso8601(as_of) do
+        {:ok, at, _offset} -> DateTime.compare(at, window_start) != :lt
+        _invalid -> false
+      end
+    end
+
+    defp as_of_in_window?(_as_of), do: false
+
+    defp route_shape?(%{} = route) do
+      BoundedJson.exact_keys(route, @route_keys, ["routes"]) == :ok and
+        is_binary(route["route"]) and route["basis"] in @bases and
+        consumed?(route["consumed"]) and evidence_shape?(route["evidence"])
+    end
+
+    defp route_shape?(_route), do: false
+
+    defp consumed?(n), do: is_integer(n) and n >= 0 and n <= @shared_total
+
+    defp evidence_shape?(%{} = evidence) do
+      BoundedJson.exact_keys(evidence, @evidence_keys, ["evidence"]) == :ok and
+        is_binary(evidence["path"]) and is_binary(evidence["sha256"])
+    end
+
+    defp evidence_shape?(_evidence), do: false
+
+    # Exactly the five routes, each once; owner and hosted routes only on an
+    # owner basis.
+    defp routes_bounded(routes) do
+      names = Enum.map(routes, & &1["route"])
+
+      if Enum.sort(names) == Enum.sort(@budget_routes) and Enum.all?(routes, &basis_allowed?/1),
+        do: :ok,
+        else: {:error, :budget_unbounded}
+    end
+
+    defp basis_allowed?(%{"route" => "prototype_binding"}), do: true
+    defp basis_allowed?(%{"basis" => basis}), do: basis in @owner_bases
+
+    defp worksheet_remaining(worksheet) do
+      consumed =
+        Enum.sum(Enum.map(worksheet["routes"], & &1["consumed"])) +
+          worksheet["previous_bindings"]["consumed"]
+
+      remaining = @shared_total - consumed
+
+      if remaining >= @funded_ceiling,
+        do: {:ok, remaining},
+        else: {:error, :budget_below_ceiling}
+    end
+
+    # Step 4 waits for the reviewed shared private reader (S1b; Codex
+    # a6850b13 D4): until then no evidence reference resolves, so every
+    # otherwise-sufficient worksheet refuses (fail closed).
+    defp evidence_resolved(_worksheet, _evidence_root), do: red({:error, :budget_unbounded})
 
     defp hex(digest), do: Base.encode16(digest, case: :lower)
 
