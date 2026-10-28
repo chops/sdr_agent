@@ -38,6 +38,25 @@ defmodule SdrAgent.Prototype.TaskKindTest do
     assert Session.enter(agent: "codex_cli", session_correlation: nil) == {:error, :session_unset}
   end
 
+  test "the task entry runs the boot check before any read: a refused check writes nothing" do
+    fx = bound!()
+
+    # The process's fixed snapshot names another instance, so the switch it
+    # derives (test-seam build) mismatches the row.
+    other = %{fx.snapshot | instance_id: Ecto.UUID.generate()}
+    assert PrototypeFixtures.enter_runtime(other) == :ok
+
+    count = fn ->
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM prototype_delegations", [])
+      n
+    end
+
+    before = count.()
+    result = Session.enter(agent: "codex_cli", session_correlation: "task-entry-boot-0001")
+    assert result == {:error, :instance_mismatch}, "task entry: #{inspect(result)}"
+    assert count.() == before
+  end
+
   test "the task entry returns the operator actor of its own delegation" do
     fx = bound!()
     result = Session.enter(agent: "codex_cli", session_correlation: "task-entry-0003")
