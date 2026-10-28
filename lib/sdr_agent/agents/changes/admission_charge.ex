@@ -15,19 +15,32 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
   re-derives — is set only from the admitted charge of an authorized
   calibration call; a caller-supplied value is refused (Forbidden). The
   `calibration_claim` argument (R0-07 E4c-2, the console's launch-record
-  claim) follows the same rule.
+  claim) follows the same rule. So does the D-237 `prototype_authority`
+  argument (interfaces r6 IF-4; Codex 339c8e8d ruling 3): a caller-supplied
+  non-nil value is refused (Forbidden), never ignored, for every provider and
+  runtime, before the insert, so the reservation transaction (run counter,
+  request Payload, invocation and event) rolls back.
   """
   use Ash.Resource.Change
 
   alias Ash.Error.Forbidden
   alias SdrAgent.Agents.Checks.AdmissionContext
 
+  # Arguments a caller may never supply (each is set only from an admitted
+  # charge): any non-nil value is refused, for every provider and runtime.
+  @charge_arguments [
+    :calibration_tuple,
+    :calibration_claim,
+    :calibration_binding,
+    :prototype_authority
+  ]
+
   @impl true
   def change(changeset, _opts, _context) do
     provider = Ash.Changeset.get_attribute(changeset, :provider)
 
     supplied? =
-      Enum.any?([:calibration_tuple, :calibration_claim, :calibration_binding], fn argument ->
+      Enum.any?(@charge_arguments, fn argument ->
         not is_nil(Ash.Changeset.get_argument(changeset, argument))
       end)
 
