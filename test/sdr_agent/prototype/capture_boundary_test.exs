@@ -40,6 +40,21 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
     business refusal at exactly `"S4-ORACLE propagated: typed refusal
     observed"`.
 
+  - T11, propagated (Codex 1fabb2d3 R1/R2): the non-business worker paths
+    are each reached for this operation and attempt and asserted at the
+    oracle's own step:
+    - a storage failure after the seam. Today it escapes the drain as the
+      C1 protocol defect, so it is RED at "S4-ORACLE propagated: protocol";
+    - a returned Forbidden and a returned Unknown, injected at the approval
+      read;
+    - a raised Unknown (the decision fault).
+  - The fixtures' seam scopes restore any prior value on exit and on
+    unwind, including scopes armed inside the hook. Control.
+  - T19: each distinct exit stops the boundary at the real call site, with
+    no later stage read and no audit event insert, for a returned error
+    (injected), a raise (the decision fault) and a rollback throw (a renamed
+    source). Controls.
+
   The seams are site-local keys that only PrototypeCapture's boundary call
   sites read (Codex 7b7f4b1c). The create authorize pre-flight
   (create.ex:200) never consumes them, and no data-layer read rule is
@@ -430,20 +445,104 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
     attempt = outreach!(ctx, delivery).attempt_count + 1
     ref = make_ref()
 
-    # The decision fault is armed inside the hook, so it binds exactly this
-    # operation and attempt. It is removed in the calling process on every
-    # exit.
+    # The decision fault is armed inside the hook by with_capture!/2, so it
+    # binds exactly this operation and attempt, and its prior scope is
+    # restored in the calling process on every exit (Codex 1fabb2d3).
+    rejected_at!("S4-ORACLE refused: no typed refusal", fn ->
+      refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn _op -> :ok end,
+        arm: [fault: %{ref: ref, point: :decision}]
+      )
+    end)
+
+    assert messages(ref) == [{:fault_raised, delivery.id, attempt, :decision}],
+           "prerequisite: the decision fault was not reached for this attempt"
+
+    no_capture!(ctx, delivery)
+  end
+
+  test "the fixtures restore a prior seam scope on exit and on unwind (control)" do
+    key = {@capture, :fault}
+    Process.put(key, :prior_scope)
+
     try do
-      rejected_at!("S4-ORACLE refused: no typed refusal", fn ->
-        refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn op ->
-          scope = %{ref: ref, op_id: op.id, attempt: op.attempt_count, point: :decision}
-          Process.put({@capture, :fault}, scope)
-          :ok
-        end)
-      end)
+      scope = %{ref: make_ref(), op_id: Ecto.UUID.generate(), attempt: 1, point: :decision}
+      with_seam(:fault, scope, fn -> :ok end)
+      assert Process.get(key) == :prior_scope
+
+      assert_raise RuntimeError, fn ->
+        with_seam(:fault, scope, fn -> raise "synthetic unwind" end)
+      end
+
+      assert Process.get(key) == :prior_scope
+
+      ctx = prototype_drafted!()
+      assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+      _delivery = delivery_of!(ctx, approval)
+
+      {_ref, drained} =
+        with_capture!(fn _op -> raise "synthetic hook unwind" end,
+          arm: [fault: %{ref: make_ref(), point: :decision}]
+        )
+
+      assert drained == {:raised, RuntimeError}
+      assert Process.get(key) == :prior_scope
+      assert Process.get({@capture, :observer}) == nil
     after
-      Process.delete({@capture, :fault})
+      Process.delete(key)
     end
+  end
+
+  # ------------------------------------------------------------------ T11, propagated
+
+  # Codex 1fabb2d3 R1/R2: the non-business worker paths, each reached for
+  # this operation and attempt and asserted at the oracle's own step: a
+  # storage failure after the seam, a returned Forbidden, a returned Unknown
+  # (both injected at the approval read), and a raised Unknown (the decision
+  # fault).
+  test "T11: a storage failure after the seam propagates to the worker boundary as Unknown" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+
+    propagated_attempt!(ctx, delivery, fn _op ->
+      tamper!("ALTER TABLE delivery_receipts RENAME TO delivery_receipts_unavailable")
+    end)
+
+    tamper!("ALTER TABLE delivery_receipts_unavailable RENAME TO delivery_receipts")
+    no_capture!(ctx, delivery)
+  end
+
+  for {label, class} <- [forbidden: Ash.Error.Forbidden, unknown: Ash.Error.Unknown] do
+    test "T11: an injected returned #{label} at the approval read propagates to the worker boundary" do
+      ctx = prototype_drafted!()
+      assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+      delivery = delivery_of!(ctx, approval)
+      attempt = outreach!(ctx, delivery).attempt_count + 1
+      ref = make_ref()
+      result = {:error, unquote(class).exception([])}
+
+      propagated_attempt!(ctx, delivery, fn _op -> :ok end,
+        class: unquote(class),
+        arm: [inject: %{ref: ref, stage: :approval, result: result}]
+      )
+
+      assert messages(ref) == [{:injected, delivery.id, attempt, :approval}],
+             "prerequisite: the injection was not reached for this attempt"
+
+      no_capture!(ctx, delivery)
+    end
+  end
+
+  test "T11: a raised programming fault propagates to the worker boundary as Unknown" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    attempt = outreach!(ctx, delivery).attempt_count + 1
+    ref = make_ref()
+
+    propagated_attempt!(ctx, delivery, fn _op -> :ok end,
+      arm: [fault: %{ref: ref, point: :decision}]
+    )
 
     assert messages(ref) == [{:fault_raised, delivery.id, attempt, :decision}],
            "prerequisite: the decision fault was not reached for this attempt"
@@ -464,5 +563,126 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
     end)
 
     no_capture!(ctx, delivery)
+  end
+
+  # ------------------------------------------------------------------ T19
+
+  # Codex 1fabb2d3 R3: each distinct exit is checked at the real boundary on
+  # a direct record of a held operation: a returned error (injected), a
+  # raise (the decision fault) and a rollback throw (a renamed source). One
+  # ordered stream of this process's repo statements and seam messages
+  # shows that the boundary was reached, and that after the exit point no
+  # later stage's source is read and no audit event is inserted. Nothing is
+  # captured.
+  defp stop_stream(fun, ref) do
+    handler = {__MODULE__, make_ref()}
+
+    :ok =
+      :telemetry.attach(handler, [:sdr_agent, :repo, :query], &__MODULE__.observe_query/4, self())
+
+    result =
+      try do
+        fun.()
+      after
+        :telemetry.detach(handler)
+      end
+
+    {result, ordered(ref, [])}
+  end
+
+  defp ordered(ref, acc) do
+    receive do
+      {__MODULE__, :query, source, command} -> ordered(ref, [{:query, source, command} | acc])
+      {@capture, ^ref, kind, _op_id, _attempt, detail} -> ordered(ref, [{kind, detail} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  # The stream after the first `marker`, or :not_reached.
+  defp after_marker(stream, marker) do
+    case Enum.drop_while(stream, &(&1 != marker)) do
+      [^marker | rest] -> rest
+      [] -> :not_reached
+    end
+  end
+
+  defp later_work(rest, sources) do
+    Enum.filter(rest, fn
+      {:query, "audit_events", :insert} -> true
+      {:query, source, _command} -> source in sources
+      _other -> false
+    end)
+  end
+
+  defp stops_after!(stream, marker, sources) do
+    rest = after_marker(stream, marker)
+    assert rest != :not_reached, "prerequisite: the exit point was not reached"
+    assert later_work(rest, sources) == []
+  end
+
+  defp injected_stream(ctx, operation, stage) do
+    ref = make_ref()
+    forbidden = {:error, Ash.Error.Forbidden.exception([])}
+
+    scope = %{
+      ref: ref,
+      op_id: operation.id,
+      attempt: operation.attempt_count,
+      stage: stage,
+      result: forbidden
+    }
+
+    stop_stream(
+      fn -> with_seam(:inject, scope, fn -> direct_refusal(ctx, operation) end) end,
+      ref
+    )
+  end
+
+  test "T19: a returned error at the operation read stops the boundary there (control)" do
+    {ctx, delivery, operation} = held!()
+    {_outcome, stream} = injected_stream(ctx, operation, :operation)
+    stops_after!(stream, {:injected, :operation}, ["approvals", "suppressions"])
+    no_capture!(ctx, delivery)
+  end
+
+  test "T19: a returned error at the approval read stops the boundary there (control)" do
+    {ctx, delivery, operation} = held!()
+    {_outcome, stream} = injected_stream(ctx, operation, :approval)
+    stops_after!(stream, {:injected, :approval}, ["suppressions"])
+    no_capture!(ctx, delivery)
+  end
+
+  test "T19: a raise in decision code stops the boundary before any audit event (control)" do
+    {ctx, delivery, operation} = held!()
+    ref = make_ref()
+    scope = %{ref: ref, op_id: operation.id, attempt: operation.attempt_count, point: :decision}
+
+    {_outcome, stream} =
+      stop_stream(
+        fn -> with_seam(:fault, scope, fn -> direct_refusal(ctx, operation) end) end,
+        ref
+      )
+
+    stops_after!(stream, {:fault_raised, :decision}, [])
+    no_capture!(ctx, delivery)
+  end
+
+  for {table, later} <- [{"approvals", ["suppressions"]}, {"suppressions", []}] do
+    test "T19: a rollback throw at the #{table} read stops the boundary there (control)" do
+      {ctx, delivery, operation} = held!()
+      table = unquote(table)
+      tamper!("ALTER TABLE #{table} RENAME TO #{table}_unavailable")
+
+      {_outcome, stream} =
+        try do
+          stop_stream(fn -> direct_refusal(ctx, operation) end, make_ref())
+        after
+          tamper!("ALTER TABLE #{table}_unavailable RENAME TO #{table}")
+        end
+
+      stops_after!(stream, {:query, table, :error}, unquote(later))
+      no_capture!(ctx, delivery)
+    end
   end
 end
