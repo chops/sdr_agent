@@ -23,7 +23,10 @@ defmodule SdrAgent.Sales.Sequence do
   trace ids as `:create` does, and requires `seed_provenance_sha256`
   (exactly 64 lowercase hex characters, never trimmed or coerced), which its
   one `sales.sequence.created` event records as an argument. Policy:
-  `OperatorAction(:seed_settings)` only.
+  `OperatorAction(:seed_settings)` only. Its raw `name` and its stored
+  value must pass `SdrAgent.Agents.RunSettings.ContentRules.text/1`
+  (`SdrAgent.Sales.Validations.SeedText`, its first before-action check:
+  after authorization, before any other hook).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -85,6 +88,8 @@ defmodule SdrAgent.Sales.Sequence do
       argument :seed_provenance_sha256, :string,
         allow_nil?: false,
         constraints: [match: ~r/\A[0-9a-f]{64}\z/, trim?: false]
+
+      validate {SdrAgent.Sales.Validations.SeedText, fields: [:name]}, before_action?: true
 
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds

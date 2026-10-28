@@ -32,7 +32,11 @@ defmodule SdrAgent.Sales.Campaign do
   the action). It requires `seed_provenance_sha256` (exactly 64 lowercase
   hex characters, never trimmed or coerced), which its one
   `sales.campaign.created` event records as an argument. Policy:
-  `OperatorAction(:seed_settings)` only.
+  `OperatorAction(:seed_settings)` only. Its raw `name`, `sender_name`,
+  `sender_email` and `footer_template_version`, and their stored values,
+  must pass `SdrAgent.Agents.RunSettings.ContentRules.text/1`
+  (`SdrAgent.Sales.Validations.SeedText`, its first before-action check:
+  after authorization, before the ImportTenant reads).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -133,6 +137,10 @@ defmodule SdrAgent.Sales.Campaign do
       argument :seed_provenance_sha256, :string,
         allow_nil?: false,
         constraints: [match: ~r/\A[0-9a-f]{64}\z/, trim?: false]
+
+      validate {Validations.SeedText,
+                fields: [:name, :sender_name, :sender_email, :footer_template_version]},
+               before_action?: true
 
       validate {Validations.Reserved, attribute: :sender_email, kind: :email}
       validate {Validations.Timezone, attribute: :timezone}
