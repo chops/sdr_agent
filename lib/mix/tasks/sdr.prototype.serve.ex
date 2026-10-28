@@ -3,30 +3,57 @@ defmodule Mix.Tasks.Sdr.Prototype.Serve do
 
   @moduledoc """
   `mix sdr.prototype.serve`: the D-237 serve process kind (interfaces r6
-  IF-2 "Process kinds"): the full application tree with the
-  `SdrAgent.Prototype.BootCheck` child, Oban queues on, the model provider
-  `claude_cli`, and the endpoint on port 4120 only if `lsof` shows that port
-  free. It never stops or signals another listener.
+  IF-2 "Process kinds"): the full application tree, whose
+  `SdrAgent.Prototype.BootCheck` child (after the Repo, before the model
+  provider) fixes prototype runtime or fails the start; the Oban queues as
+  configured (on); and the endpoint on port 4120.
 
-    * `preflight/1` decides the port check from the listener listing;
-    * `overrides/0` is the configuration it applies before the start.
+    * `preflight/1` decides the start from the configured provider and the
+      `lsof -nP -iTCP:4120 -sTCP:LISTEN` listing: the provider must already
+      be `SdrAgent.AI.ModelProvider.ClaudeCLI` (this task never selects,
+      switches or defaults one), and the port must be free. A busy port, or
+      a listing that cannot be read, refuses: unknown is not free. The task
+      never stops, signals or takes over another listener;
+    * `overrides/0` is the endpoint configuration applied before the
+      application starts (port 4120, serving); it never touches the queues
+      or the provider.
 
-  RED stage (D-237 S4): the contract surface only.
+  Bounded stage (D-237 S4, Codex 9086e6a8): `run/1` is not implemented yet
+  and returns `{:error, :not_implemented}`.
   """
   use Mix.Task
 
-  @doc "`:ok` when no listener holds port 4120, else `{:error, :port_busy}`."
-  @spec preflight(keyword()) :: :ok | {:error, atom()}
-  def preflight(_opts), do: red({:error, :not_implemented})
+  @port 4120
+  @claude_cli SdrAgent.AI.ModelProvider.ClaudeCLI
 
-  @doc "The configuration applied before the application starts."
-  @spec overrides() :: keyword() | {:error, atom()}
-  def overrides, do: red({:error, :not_implemented})
+  @doc """
+  `:ok` when `provider:` is the ClaudeCLI provider and `listeners:` (a
+  zero-arity function returning the `lsof -nP -iTCP:4120 -sTCP:LISTEN`
+  listing, `""` when nothing listens, anything else when unreadable) shows
+  the port free; otherwise `{:error, :provider_not_claude_cli | :port_busy |
+  :port_unknown}`.
+  """
+  @spec preflight(keyword()) :: :ok | {:error, atom()}
+  def preflight(opts) do
+    listeners = Keyword.fetch!(opts, :listeners)
+
+    if Keyword.get(opts, :provider) == @claude_cli,
+      do: port(listeners.()),
+      else: {:error, :provider_not_claude_cli}
+  end
+
+  @doc "The configuration applied before the application starts: the endpoint on 4120, serving."
+  @spec overrides() :: keyword()
+  def overrides, do: [{SdrAgentWeb.Endpoint, [http: [port: @port], server: true]}]
 
   @impl Mix.Task
   def run(_argv), do: red({:error, :not_implemented})
 
-  # RED stub result, typed dynamic() so callers compile against the stub
-  # (Elixir 1.20 infers literal returns); nothing sets the key.
+  defp port(""), do: :ok
+  defp port(listing) when is_binary(listing), do: {:error, :port_busy}
+  defp port(_unreadable), do: {:error, :port_unknown}
+
+  # RED stub result for the not-yet-bounded start, typed dynamic() so
+  # callers compile against it; nothing sets the key.
   defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end
