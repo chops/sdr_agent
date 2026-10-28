@@ -525,4 +525,100 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
              "#{file} evaluates input"
     end
   end
+
+  describe "seed reads under substitution (Codex R4; synchronized test seams)" do
+    # The hooks run inside SeedDir.read/2 at its named boundaries (test-seam
+    # build only); each test acts at an exact point, with no timing.
+    setup do
+      {dir, hashes} = F.write_seed_dir!()
+      test_pid = self()
+
+      hook(:after_read, fn {name, bytes} -> send(test_pid, {:read, name, byte_size(bytes)}) end)
+
+      %{dir: dir, hashes: hashes}
+    end
+
+    test "the root replaced by a symlink after the precheck: refused, nothing under it read",
+         ctx do
+      hook(:after_precheck, fn dir ->
+        outside = F.scratch_dir!()
+        for name <- SeedDir.files(), do: F.write!(outside, name, File.read!(Path.join(dir, name)))
+        File.rename!(dir, Path.join(F.scratch_dir!(), "moved-root"))
+        File.ln_s!(outside, dir)
+      end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "seed_dir", :changed)
+      refute_received {:read, _name, _size}, "a file was read under the substituted root"
+    end
+
+    test "the root widened to 0755 after the precheck: refused before any content is read", ctx do
+      hook(:after_precheck, fn dir -> File.chmod!(dir, 0o755) end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "seed_dir", :dir_mode)
+      refute_received {:read, _name, _size}, "content was read under a widened root"
+    end
+
+    test "a file widened to 0644 after the precheck: refused before its content is read", ctx do
+      hook(:after_precheck, fn dir -> File.chmod!(Path.join(dir, "writing_guide.json"), 0o644) end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "writing_guide.json", :file_mode)
+      refute_received {:read, "writing_guide.json", _size}, "the widened file was read"
+    end
+
+    test "control: a file replaced by a symlink after the precheck is refused, the target never read",
+         ctx do
+      hook(:after_precheck, fn dir ->
+        path = Path.join(dir, "writing_guide.json")
+        outside = F.scratch_dir!()
+        target = F.write!(outside, "writing_guide.json", File.read!(path))
+        File.rename!(path, Path.join(outside, "moved.json"))
+        File.ln_s!(target, path)
+      end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "writing_guide.json", :not_regular)
+      refute_received {:read, "writing_guide.json", _size}, "the symlink target was read"
+    end
+
+    test "control: a file grown past 64 KiB after the precheck is refused unread", ctx do
+      hook(:after_precheck, fn dir ->
+        File.write!(Path.join(dir, "writing_guide.json"), String.duplicate(" ", 65_536), [:append])
+      end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "writing_guide.json", :too_large)
+      refute_received {:read, "writing_guide.json", _size}, "the grown file was read"
+    end
+
+    test "a file grown past 64 KiB after it is opened: the read stops at the bound plus one byte",
+         ctx do
+      hook(:after_open, fn {name, _handle} ->
+        if name == "writing_guide.json",
+          do: File.write!(Path.join(ctx.dir, name), String.duplicate(" ", 131_072), [:append])
+      end)
+
+      refused!(SeedDir.read(ctx.dir, ctx.hashes), "writing_guide.json", :too_large)
+      assert_received {:read, "writing_guide.json", size}, "the opened handle was never read"
+      assert size <= 65_537, "read #{size} bytes, past the bound and its sentinel byte"
+    end
+
+    test "each file is read through one handle, closed on success and on refusal", ctx do
+      test_pid = self()
+      hook(:after_open, fn {name, handle} -> send(test_pid, {:opened, name, handle}) end)
+
+      assert match?({:ok, _}, SeedDir.read(ctx.dir, ctx.hashes))
+
+      for name <- Enum.sort(SeedDir.files()) do
+        assert_received {:opened, ^name, handle}, "#{name} was read through no reported handle"
+        assert :file.read(handle, 1) == {:error, :einval}, "#{name}'s handle was left open"
+      end
+
+      bad = Map.put(ctx.hashes, :writing_guide, F.sha256("other"))
+      refused!(SeedDir.read(ctx.dir, bad), "writing_guide.json", :digest_mismatch)
+      assert_received {:opened, "writing_guide.json", handle}
+
+      assert :file.read(handle, 1) == {:error, :einval},
+             "the handle was left open after a refusal"
+    end
+  end
+
+  defp hook(name, fun), do: Process.put({SeedDir, name}, fun)
 end

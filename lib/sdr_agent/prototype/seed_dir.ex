@@ -58,6 +58,7 @@ defmodule SdrAgent.Prototype.SeedDir do
   @claim_kinds ~w(feature use_case outcome proof_point)
   @provenance_schema "sdr-agent.prototype-seed-provenance"
   @hex64 ~r/\A[0-9a-f]{64}\z/
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
   @repo_ref ~r/\A[0-9a-f]{40}:[A-Za-z0-9._\/-]{1,200}\z/
   @content_files [
     {"offering_profile", :offering_profile},
@@ -84,6 +85,7 @@ defmodule SdrAgent.Prototype.SeedDir do
          :ok <- directory(dir),
          :ok <- entries(dir),
          :ok <- modes(dir),
+         :ok <- seam(:after_precheck, dir),
          {:ok, bins} <- read_all(dir, sha256s),
          {:ok, docs} <- decode_all(bins),
          :ok <- profile(docs[:offering_profile]),
@@ -155,8 +157,12 @@ defmodule SdrAgent.Prototype.SeedDir do
       key = @keys[name]
 
       case BoundedJson.read_file(Path.join(dir, name), sha256s[key], @max_bytes) do
-        {:ok, bin} -> {:cont, {:ok, Map.put(acc, key, bin)}}
-        {:error, {_path, rule}} -> {:halt, {:error, {name, rule}}}
+        {:ok, bin} ->
+          seam(:after_read, {name, bin})
+          {:cont, {:ok, Map.put(acc, key, bin)}}
+
+        {:error, {_path, rule}} ->
+          {:halt, {:error, {name, rule}}}
       end
     end)
   end
@@ -449,5 +455,25 @@ defmodule SdrAgent.Prototype.SeedDir do
   defp segments("entries[" <> rest) do
     {k, "]"} = Integer.parse(rest)
     ["entries", k]
+  end
+
+  # Test-seam builds only (`:claude_cli_test_seams`, fixed at compile time):
+  # a test may act or observe at a named boundary of `read/2` through a
+  # one-argument function in its own process dictionary under
+  # `{SdrAgent.Prototype.SeedDir, name}`: `:after_precheck` (the directory,
+  # once every lstat check passed and before any file is opened) and
+  # `:after_read` (`{file name, bytes}` once a file's bytes are read). Its
+  # return value is ignored. Every other build compiles `seam/2` to `:ok`.
+  if @test_seams do
+    defp seam(name, arg) do
+      case Process.get({__MODULE__, name}) do
+        hook when is_function(hook, 1) -> hook.(arg)
+        _none -> nil
+      end
+
+      :ok
+    end
+  else
+    defp seam(_name, _arg), do: :ok
   end
 end
