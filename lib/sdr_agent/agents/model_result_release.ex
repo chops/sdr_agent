@@ -111,7 +111,10 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     :unsupported,
     :no_exchange,
     :inferred,
-    :interrupted
+    :interrupted,
+    # D-237 (Codex 2c9450b7 ruling 3b): `:reconciled` is recorded only by the
+    # prototype gate's `witness_mode_mismatch` refusal of a reconciled receipt.
+    :reconciled
   ]
   @event [
     category: :model,
