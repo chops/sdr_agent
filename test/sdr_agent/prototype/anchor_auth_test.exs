@@ -377,6 +377,57 @@ defmodule SdrAgent.Prototype.AnchorAuthTest do
       assert {:ok, %User{role: :reviewer}} =
                Accounts.change_role(changed, :reviewer, actor: admin)
     end
+
+    # Codex 20d0d5fb: authorization still precedes the refusal. An
+    # unauthorized caller on each anchor path gets exactly Forbidden (and the
+    # Guard's denial audit for guarded actions), never the immutability
+    # Invalid, and no row changes. This control passes before and after the
+    # GREEN; a build-time validation would turn it into Invalid.
+    test "unauthorized callers still get exactly Forbidden on every anchor path (ordering control)" do
+      fx = bound!(enter_runtime: false)
+      reviewer = new_human(:reviewer, fx.tenant)
+      other = new_human(:reviewer, fx.tenant)
+      pw = %{password: "test-password-1234", password_confirmation: "test-password-1234"}
+
+      anchor_before = user_row(fx.anchor.id)
+      other_before = user_row(other.id)
+      count_before = users_count()
+
+      results = [
+        change_role_from_anchor: Accounts.change_role(fx.anchor, :reviewer, actor: reviewer),
+        change_role_to_anchor: Accounts.change_role(other, :agent_operator, actor: reviewer),
+        create_user_as_anchor:
+          Accounts.create_user(
+            Map.merge(pw, %{
+              email: "machine-unauth@example.test",
+              display_name: "Machine",
+              role: :agent_operator
+            }),
+            actor: reviewer
+          ),
+        seed_as_anchor:
+          Accounts.seed_user(
+            Map.merge(pw, %{
+              id: Ecto.UUID.generate(),
+              email: "machine-unauth-seed@example.test",
+              display_name: "Machine seed",
+              role: :agent_operator
+            }),
+            actor: reviewer
+          ),
+        set_password_on_anchor: Accounts.set_password(fx.anchor, pw, actor: reviewer)
+      ]
+
+      offenders =
+        for {path, result} <- results,
+            not match?({:error, %Ash.Error.Forbidden{}}, result),
+            do: {path, refusal_shape(result)}
+
+      assert offenders == [], "not exactly Forbidden: #{inspect(offenders)}"
+      assert user_row(fx.anchor.id) == anchor_before
+      assert user_row(other.id) == other_before
+      assert users_count() == count_before
+    end
   end
 
   describe "preserved controls in prototype runtime" do
