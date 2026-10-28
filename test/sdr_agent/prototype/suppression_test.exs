@@ -11,11 +11,19 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     captured receipt.
   - A recipient suppressed after the claim, immediately before the capture
     (email or domain scope, normalised value), is refused at the capture
-    boundary in prototype runtime: no captured receipt, the operation is
-    not accepted, and the refusal fails closed on the existing failure
-    path. In ordinary runtime an already-claimed delivery is left to its
-    outcome (unchanged; the control). An unavailable suppression source at
-    capture refuses closed (`prototype_suppression_unchecked`).
+    boundary in prototype runtime. It is a typed business refusal
+    (`prototype_recipient_suppressed`): a permanent delivery outcome at the
+    worker (T9), and the singleton `CaptureRefused` on a direct record (T3).
+    No captured receipt is written, and the operation is not accepted. In
+    ordinary runtime an already-claimed delivery is left to its outcome
+    (unchanged; the control).
+  - An unavailable suppression source at capture is a lossy failure, so it
+    is never classified (Codex 6d1ead6d; S4 proposal r3 section 2.5, the
+    contract correction accepted by Codex 4c72c150). It propagates
+    unchanged: the worker boundary's exact sanitized line for this attempt
+    (`propagated_attempt!/3`), and the original class on a direct record.
+    Nothing is captured, and the source is never read as "not suppressed"
+    (T6).
   - R10 (supplement 1 r2 section 7): a suppressed contact cannot be
     assigned by the operator (the Store check), and the NoStore check
     refuses prototype boot. Home stays fail-closed for
@@ -53,64 +61,59 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     assert captured(ctx, delivery) == []
   end
 
-  test "suppressed (email, normalised) immediately before capture: refused at the capture boundary" do
+  test "T9: suppressed (email, normalised) immediately before capture: a typed permanent refusal at the worker" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
     variant = "  " <> String.upcase(to_string(ctx.contact.email)) <> " "
-    capture_hook!(:before_capture, fn _op -> suppress!(ctx, :email, variant) end)
 
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
-    no_capture!(ctx, delivery)
-    assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
-    no_capture!(ctx, delivery)
+    refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn _op ->
+      suppress!(ctx, :email, variant)
+    end)
   end
 
-  test "suppressed (domain) immediately before capture: refused at the capture boundary" do
+  test "T9: suppressed (domain) immediately before capture: a typed permanent refusal at the worker" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
 
-    capture_hook!(:before_capture, fn _op ->
+    refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn _op ->
       suppress!(ctx, :domain, String.upcase(domain(ctx.contact.email)))
     end)
+  end
 
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
-    no_capture!(ctx, delivery)
-    assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
+  test "T3: a direct capture of a recipient suppressed after the claim returns the typed refusal" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    operation = hold_before_capture!(ctx, delivery)
+    suppress!(ctx, :email, to_string(ctx.contact.email))
+
+    assert direct_refusal(ctx, operation) == {:refused, :prototype_recipient_suppressed}
     no_capture!(ctx, delivery)
   end
 
-  # Codex 845d0959: a failed or unavailable suppression lookup at capture is a
-  # closed refusal, never "not suppressed". Negative synthetic tampering: the
-  # suppression source is made unavailable immediately before the capture by
-  # renaming its table inside the test's own sandbox transaction (rolled
-  # back with it); no NoStore fallback is involved.
-  test "an unavailable suppression source at capture refuses closed (prototype_suppression_unchecked), nothing written" do
+  # T6, a contract correction (S4 proposal r3 section 2.5; Codex 6d1ead6d and
+  # 4c72c150 Q1). A failed suppression lookup at capture is lossy, so it is
+  # never classified. It is never read as "not suppressed" either: it
+  # propagates unchanged, with nothing captured. The proof of reach is kept.
+  # Negative synthetic tampering: the source is made unavailable inside the
+  # before_capture hook, after the send gate's claim, by renaming its table
+  # inside the test's own sandbox transaction (rolled back with it).
+  test "T6: an unavailable suppression source at capture propagates the failure unchanged, nothing written" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
 
-    capture_hook!(:before_capture, fn _op ->
+    propagated_attempt!(ctx, delivery, fn _op ->
       tamper!("ALTER TABLE suppressions RENAME TO suppressions_unavailable")
     end)
 
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
+    # A direct record, with the source still unavailable, returns the
+    # original propagated class (struct names only, never the value) and no
+    # typed refusal.
+    assert direct_refusal(ctx, outreach!(ctx, delivery)) == {:returned, :error, Ash.Error.Unknown}
     no_capture!(ctx, delivery)
-    refusal = capture_refusal(ctx, delivery)
-    assert refusal =~ "prototype_suppression_unchecked"
-    no_capture!(ctx, delivery)
-
-    # Fixed text only: no raw SQL, table name or recipient (Codex e9688dca).
-    for raw <- ["SELECT", "suppressions_unavailable", to_string(ctx.contact.email)] do
-      refute refusal =~ raw, "the refusal carries raw detail"
-    end
 
     # The connection is still usable and the fixture is restored.
     tamper!("ALTER TABLE suppressions_unavailable RENAME TO suppressions")

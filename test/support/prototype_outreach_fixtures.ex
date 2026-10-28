@@ -22,7 +22,17 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     (revision id, content digest and the recipient address as read now).
   - `capture_hook!/2` runs a function in the delivering process right
     before or after the capture (the capture adapter's fault seam), e.g. to
-    move the clock or suppress the recipient immediately before capture.
+    move the clock or suppress the recipient immediately before capture. It
+    returns a fresh ref, and every run of the phase is reported as
+    attempt-tagged messages (`CaptureHook`).
+  - The capture-boundary oracles (D-237 S4 proposal r3 sections 5.2-5.3,
+    Codex 4c72c150 and 6b79bfb3): `refused_attempt!/4` for a typed business
+    refusal and `propagated_attempt!/3` for a propagated failure. Each runs
+    one inline drain with its hook and the boundary observer bound to this
+    operation and attempt, and fails at a fixed step marker
+    (`"S4-ORACLE ..."`). `rejected_at!/2` asserts that an oracle rejects at
+    exactly one marker. `direct_refusal/2` and `outcome/1` keep struct
+    names only, never an error value.
   """
 
   import ExUnit.Assertions
@@ -35,6 +45,29 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   alias SdrAgent.Outreach
   alias SdrAgent.OutreachFixtures
   alias SdrAgent.PrototypeFixtures
+
+  @capture SdrAgent.Outreach.Changes.PrototypeCapture
+  @hook SdrAgent.PrototypeOutreachFixtures.CaptureHook
+  # Proposed (proposal r3 section 3.1): named as an atom only, so the RED
+  # head compiles without it.
+  @refused SdrAgent.Outreach.Errors.CaptureRefused
+  @worker "SdrAgent.Outreach.DeliveryWorker"
+  # The worker boundary's exact first line for a propagated failure
+  # (error_boundary.ex:63-78; oban/lib/oban/job.ex:581-589).
+  @job_error_line ~s|** (Oban.PerformError) SdrAgent.Outreach.DeliveryWorker failed with {:error, "Ash.Error.Unknown"}|
+  # The synthetic raw-detail markers; the recipient and its domain are added
+  # per context.
+  @raw_markers [
+    "SELECT",
+    "42P01",
+    "undefined_table",
+    "suppressions",
+    "Postgrex",
+    "#Ash.Query<",
+    "%Ash.Query{",
+    "#Ash.Filter<",
+    "%Ash.Filter{"
+  ]
 
   @window_start ~U[2026-10-28 02:38:32.000000Z]
   @window_end ~U[2026-11-07 07:00:00.000000Z]
@@ -120,25 +153,103 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     Outreach.approve(draft, input, actor: ctx.operator)
   end
 
-  @doc "Runs `fun.(operation)` in the delivering process at capture `phase`."
+  @doc """
+  Runs `fun.(operation)` in the delivering process at capture `phase` and
+  returns the registration's fresh ref. Each run of the phase sends
+  attempt-tagged messages for that ref (`CaptureHook`).
+  """
   def capture_hook!(phase, fun) when phase in [:before_capture, :after_capture] do
-    OutreachFixtures.put_env!(:capture_faults, SdrAgent.PrototypeOutreachFixtures.CaptureHook)
-    Process.put({SdrAgent.PrototypeOutreachFixtures.CaptureHook, phase}, fun)
-    :ok
+    OutreachFixtures.put_env!(:capture_faults, @hook)
+    ref = make_ref()
+    Process.put({@hook, phase}, {ref, fun})
+    ref
   end
 
   @doc """
-  Runs `fun` (an inline delivery drain) and returns the full inspection of
-  the exception it raised, or the string `"no exception raised"` (a binary,
-  so `=~` fails as an assertion, never a crash). A refused capture fails
-  closed on the existing failure path (the worker raises); the caller
-  asserts the exact named refusal code inside it, never a crash alone.
+  Runs one inline delivery drain (`OutreachFixtures.deliver!/0`) with `fun`
+  registered at `:before_capture` under a fresh ref. When the hook runs for
+  an operation, it first arms the boundary observer
+  (`{PrototypeCapture, :observer}` = `%{ref, op_id, attempt}`) for exactly
+  that operation and attempt, then runs `fun`. Both registrations are
+  removed in the calling process on every exit, restoring any prior value.
+  Returns `{ref, drain counts}`.
   """
-  def raised(fun) do
-    fun.()
-    "no exception raised"
-  rescue
-    error -> inspect(error, limit: :infinity, printable_limit: :infinity)
+  def with_capture!(fun) do
+    hook_key = {@hook, :before_capture}
+    observer_key = {@capture, :observer}
+    prior_hook = Process.get(hook_key)
+    prior_observer = Process.get(observer_key)
+    OutreachFixtures.put_env!(:capture_faults, @hook)
+    ref = make_ref()
+
+    armed = fn operation ->
+      Process.put(observer_key, %{ref: ref, op_id: operation.id, attempt: operation.attempt_count})
+
+      fun.(operation)
+    end
+
+    Process.put(hook_key, {ref, armed})
+
+    try do
+      {ref, OutreachFixtures.deliver!()}
+    after
+      restore_key(hook_key, prior_hook)
+      restore_key(observer_key, prior_observer)
+    end
+  end
+
+  @doc """
+  Runs `fun` with the test-build boundary seam `kind` (`:inject` or
+  `:fault`; proposal r3 section 5.1) armed as `scope` for one operation and
+  attempt, and removes it in the calling process on every exit, restoring
+  any prior value.
+  """
+  def with_seam(kind, %{ref: _, op_id: _, attempt: _} = scope, fun)
+      when kind in [:inject, :fault] do
+    key = {@capture, kind}
+    prior = Process.get(key)
+    Process.put(key, scope)
+
+    try do
+      fun.()
+    after
+      restore_key(key, prior)
+    end
+  end
+
+  defp restore_key(key, nil), do: Process.delete(key)
+  defp restore_key(key, value), do: Process.put(key, value)
+
+  @doc """
+  Every message tagged with `ref` (and nothing else), in arrival order, as
+  value-free tuples:
+  - from `CaptureHook`: `{:entered, phase, op_id, attempt}` and
+    `{:returned, phase, op_id, attempt, :ok | :fault}`;
+  - from the boundary's test-build seams: `{:refused, op_id, attempt, code}`,
+    `{:injected, op_id, attempt, stage}` and
+    `{:fault_raised, op_id, attempt, point}`.
+  """
+  def messages(ref), do: collect(ref, [])
+
+  defp collect(ref, acc) do
+    receive do
+      {@hook, ^ref, :entered, phase, id, attempt} ->
+        collect(ref, [{:entered, phase, id, attempt} | acc])
+
+      {@hook, ^ref, :returned, phase, id, attempt, tag} ->
+        collect(ref, [{:returned, phase, id, attempt, tag} | acc])
+
+      {@capture, ^ref, :refused, id, attempt, code} ->
+        collect(ref, [{:refused, id, attempt, code} | acc])
+
+      {@capture, ^ref, :injected, id, attempt, stage} ->
+        collect(ref, [{:injected, id, attempt, stage} | acc])
+
+      {@capture, ^ref, :fault_raised, id, attempt, point} ->
+        collect(ref, [{:fault_raised, id, attempt, point} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   @doc "Events of `type` in `tenant` (kernel read), oldest first."
@@ -168,57 +279,180 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
-  Runs `drain` (the inline delivery drain) for `delivery`, which must fail
-  closed at the capture (Codex f9a45a0c R3): the delivering process reached
-  `:before_capture` (`CaptureHook`), the drain reports no success and at
-  least one failure, and the delivery's own job (`DeliveryWorker`, this
-  operation) holds only the worker error boundary's sanitized Ash error
-  summary (`SdrAgent.Workers.ErrorBoundary`): no refusal code, recipient or
-  SQL. Nothing is rescued: any exception, an ExUnit failure included,
-  propagates.
+  The typed business refusal oracle (proposal r3 section 5.3). It runs one
+  inline drain of `delivery` with `fun` at `:before_capture`
+  (`with_capture!/1`) and requires, in this order, each failing at its own
+  fixed marker:
+
+  1. `"S4-ORACLE refused: prerequisites"`: the operation is claimable and
+     has a job;
+  2. `"S4-ORACLE refused: reach"`: exactly one before_capture run for this
+     operation and attempt, returning `:ok`;
+  3. `"S4-ORACLE refused: no typed refusal"`: exactly one boundary
+     observation `{:refused, op, attempt, code}`;
+  4. `"S4-ORACLE refused: outcome"`: the operation's only job completed on
+     attempt 1 with no error; the operation is failed_permanent with
+     `last_error` `%{"reason" => code}`; the draft failed;
+  5. `"S4-ORACLE refused: capture written"`: no captured, accepted or
+     delivered receipt or receipt event.
+
+  Nothing is rescued.
   """
-  def failed_closed!(delivery, drain) do
-    OutreachFixtures.put_env!(:capture_faults, SdrAgent.PrototypeOutreachFixtures.CaptureHook)
-    counts = drain.()
+  def refused_attempt!(ctx, delivery, code, fun \\ fn _operation -> :ok end) do
+    attempt = prerequisites!(ctx, delivery, "S4-ORACLE refused: prerequisites")
+    {ref, _counts} = with_capture!(fun)
+    seen = messages(ref)
+    step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE refused: reach")
 
-    assert match?(%{success: 0}, counts) and
-             Map.get(counts, :failure, 0) + Map.get(counts, :discard, 0) > 0,
-           "the delivery did not fail: #{inspect(counts)}"
+    step!(
+      observed(seen) == [{:refused, delivery.id, attempt, code}],
+      "S4-ORACLE refused: no typed refusal"
+    )
 
-    assert_received {SdrAgent.PrototypeOutreachFixtures.CaptureHook, :reached, :before_capture},
-                    "the worker never reached the capture"
+    op = OutreachFixtures.outreach!(ctx, delivery)
+    draft = OutreachFixtures.outreach!(ctx, %Outreach.Draft{id: op.draft_id})
 
+    step!(
+      jobs(delivery.id) == [{"completed", 1, 0}] and op.state == :failed_permanent and
+        op.last_error == %{"reason" => Atom.to_string(code)} and draft.status == :failed,
+      "S4-ORACLE refused: outcome"
+    )
+
+    step!(nothing_captured?(ctx, delivery), "S4-ORACLE refused: capture written")
+  end
+
+  @doc """
+  The propagated-failure oracle (proposal r3 section 5.3). It has the same
+  drain, prerequisites (`"S4-ORACLE propagated: prerequisites"`) and reach
+  (`"S4-ORACLE propagated: reach"`) steps as `refused_attempt!/4`, then:
+
+  - `"S4-ORACLE propagated: typed refusal observed"`: no boundary
+    observation for this ref;
+  - `"S4-ORACLE propagated: outcome"`: the operation's only job is
+    retryable on attempt 1 with one error. Its rendered error's first line
+    is exactly the sanitized `Ash.Error.Unknown` boundary line, and no
+    marker (`@raw_markers`, the recipient and its domain) appears anywhere
+    in it. The text is read, never printed. The operation stays attempting
+    on this attempt;
+  - `"S4-ORACLE propagated: capture written"`.
+
+  It does not, and must not, tell a lossy database failure from a
+  programming error.
+  """
+  def propagated_attempt!(ctx, delivery, fun) do
+    attempt = prerequisites!(ctx, delivery, "S4-ORACLE propagated: prerequisites")
+    {ref, _counts} = with_capture!(fun)
+    seen = messages(ref)
+    step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE propagated: reach")
+    step!(observed(seen) == [], "S4-ORACLE propagated: typed refusal observed")
+    op = OutreachFixtures.outreach!(ctx, delivery)
+
+    step!(
+      jobs(delivery.id) == [{"retryable", 1, 1}] and job_error_clean?(ctx, delivery) and
+        op.state == :attempting and op.attempt_count == attempt,
+      "S4-ORACLE propagated: outcome"
+    )
+
+    step!(nothing_captured?(ctx, delivery), "S4-ORACLE propagated: capture written")
+  end
+
+  @doc """
+  Asserts that `fun` (an oracle call) fails with exactly `marker`. A
+  failure at any other step, an earlier fixture failure included, does not
+  count (Codex 4c72c150 H2).
+  """
+  def rejected_at!(marker, fun) do
+    error = assert_raise(ExUnit.AssertionError, fun)
+    assert error.message == marker, "the oracle did not reject at the intended step"
+  end
+
+  defp prerequisites!(ctx, delivery, marker) do
+    before = OutreachFixtures.outreach!(ctx, delivery)
+    step!(before.state in [:pending, :failed_retryable] and jobs(delivery.id) != [], marker)
+    before.attempt_count + 1
+  end
+
+  defp expected_reach(delivery, attempt, tag),
+    do: [
+      {:entered, :before_capture, delivery.id, attempt},
+      {:returned, :before_capture, delivery.id, attempt, tag}
+    ]
+
+  defp reach(seen), do: Enum.filter(seen, &(elem(&1, 0) in [:entered, :returned]))
+  defp observed(seen), do: Enum.filter(seen, &(elem(&1, 0) == :refused))
+
+  defp step!(true, _marker), do: :ok
+  defp step!(_false, marker), do: flunk(marker)
+
+  # This operation's delivery jobs, oldest first: state, attempt, error count.
+  defp jobs(operation_id) do
     %{rows: rows} =
       SdrAgent.Repo.query!(
-        "SELECT state, errors::text FROM oban_jobs WHERE worker = $1 AND " <>
-          "args->>'delivery_operation_id' = $2",
-        ["SdrAgent.Outreach.DeliveryWorker", delivery.id]
+        "SELECT state, attempt, cardinality(errors) FROM oban_jobs " <>
+          "WHERE worker = $1 AND args->>'delivery_operation_id' = $2 ORDER BY id",
+        [@worker, operation_id]
       )
 
-    assert [[state, errors]] = rows
-    assert state in ["retryable", "discarded"], "the delivery job is #{state}"
+    Enum.map(rows, &List.to_tuple/1)
+  end
 
-    assert errors =~ ~r/Ash\.Error\.(Unknown|Invalid)/,
-           "no sanitized Ash error summary in the job: #{errors}"
+  # The complete rendered error of the job's first attempt: its exact first
+  # line and no marker anywhere. Read, never printed.
+  defp job_error_clean?(ctx, delivery) do
+    case SdrAgent.Repo.query!(
+           "SELECT errors[1]->>'error' FROM oban_jobs " <>
+             "WHERE worker = $1 AND args->>'delivery_operation_id' = $2 ORDER BY id",
+           [@worker, delivery.id]
+         ) do
+      %{rows: [[text]]} when is_binary(text) ->
+        hd(String.split(text, "\n")) == @job_error_line and
+          not Enum.any?(markers(ctx), &String.contains?(text, &1))
 
-    for raw <- ["prototype_", "SELECT", "42P01", to_string(delivery.recipient_email)] do
-      refute errors =~ raw, "the job error carries raw detail"
+      _other ->
+        false
     end
+  end
 
-    :ok
+  @doc "The synthetic raw-detail markers for `ctx`: fixed markers plus the recipient and its domain."
+  def markers(ctx) do
+    email = to_string(ctx.contact.email)
+    [_local, domain] = String.split(email, "@", parts: 2)
+    @raw_markers ++ [email, domain]
+  end
+
+  defp nothing_captured?(ctx, delivery) do
+    written = [:captured, :accepted, :delivered]
+    kinds = ctx |> OutreachFixtures.receipts!(delivery) |> Enum.map(& &1.kind)
+
+    events =
+      ctx.tenant
+      |> events_of("outreach.delivery.receipt_recorded")
+      |> Enum.filter(&(&1.payload["changes"]["kind"] in Enum.map(written, fn k -> "#{k}" end)))
+
+    not Enum.any?(kinds, &(&1 in written)) and events == [] and
+      OutreachFixtures.outreach!(ctx, delivery).state not in [:accepted, :delivered]
   end
 
   @doc """
   Runs `delivery` with its capture held by a retryable fault at
   `:before_capture`: the operation is claimed (its rendered message and
-  digest stored) and nothing is captured. Returns the stored operation.
+  digest stored) and nothing is captured. The hold is bound to this
+  operation and attempt (exactly one before_capture run returning the
+  fault), and its registration is removed on every exit. Returns the
+  stored operation.
   """
   def hold_before_capture!(ctx, delivery) do
-    capture_hook!(:before_capture, fn _operation -> {:error, {:retryable, :held_by_test}} end)
-    OutreachFixtures.deliver!()
-    Process.delete({SdrAgent.PrototypeOutreachFixtures.CaptureHook, :before_capture})
+    attempt = OutreachFixtures.outreach!(ctx, delivery).attempt_count + 1
+    {ref, _counts} = with_capture!(fn _operation -> {:error, {:retryable, :held_by_test}} end)
+
+    assert reach(messages(ref)) == expected_reach(delivery, attempt, :fault),
+           "the hold did not reach this operation's capture exactly once"
+
     operation = OutreachFixtures.outreach!(ctx, delivery)
-    assert is_binary(operation.rendered_sha256), "the delivery was not claimed"
+
+    assert is_binary(operation.rendered_sha256) and operation.state == :failed_retryable,
+           "the delivery was not claimed and held"
+
     no_capture!(ctx, delivery)
     operation
   end
@@ -249,21 +483,38 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
-  The refusal text of a direct `captured` receipt record for `delivery`, as
-  the delivery worker (DLV), with its stored operation fields: the full
-  inspection of the raised or returned error, or `"recorded"` when the
-  receipt was recorded.
+  The value-free outcome of a direct `captured` record of `operation` (its
+  stored fields), as the delivery worker. See `outcome/1`.
   """
-  def capture_refusal(ctx, delivery), do: refusal_of(fn -> record_captured(ctx, delivery) end)
+  def direct_refusal(ctx, operation), do: outcome(fn -> record_operation(ctx, operation) end)
 
-  @doc "The refusal text of `record` (a direct receipt record): see `capture_refusal/2`."
-  def refusal_of(record) do
-    case record.() do
-      {:ok, _receipt} -> "recorded"
-      {:error, error} -> inspect(error, limit: :infinity, printable_limit: :infinity)
+  @doc """
+  Runs `fun` (a receipt record) and keeps struct names only (Codex 99c249b0
+  C1, 6d1ead6d):
+  - `{:refused, code}` for exactly one typed capture refusal returned in an
+    `Ash.Error.Invalid`;
+  - `{:returned, :error, class}` for any other returned error;
+  - `{:returned, :ok}`, `{:returned, :other}`;
+  - `{:raised, module}` for a raise.
+
+  Nothing of an error value is kept, so nothing can be printed.
+  """
+  def outcome(fun) do
+    case fun.() do
+      {:error, %Ash.Error.Invalid{errors: [%{__struct__: @refused, code: code}]}} ->
+        {:refused, code}
+
+      {:error, %{__struct__: class}} ->
+        {:returned, :error, class}
+
+      {:ok, _record} ->
+        {:returned, :ok}
+
+      _other ->
+        {:returned, :other}
     end
   rescue
-    error -> inspect(error, limit: :infinity, printable_limit: :infinity)
+    exception -> {:raised, exception.__struct__}
   end
 
   @doc """
@@ -300,27 +551,42 @@ end
 defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do
   @moduledoc """
   Capture-adapter fault seam (`config :sdr_agent, :capture_faults`) for S4
-  tests: `fault/2` runs the function the test registered for the phase in
-  the delivering process (Oban's inline drain runs in the test process),
-  records that the phase was reached, and returns `:ok` or the function's
-  own `{:error, {class, reason}}` fault. It can only change what the test
+  tests. `fault/2` runs the function the test registered for the phase
+  (`{ref, fun}`) in the delivering process; Oban's inline drain runs in the
+  test process. It returns `:ok` or the function's own
+  `{:error, {class, reason}}` fault. It can only change what the test
   controls (the clock, a suppression row) before the real capture runs, or
   make the delivery fail before it.
   """
 
   @doc """
-  Runs the registered function for `phase`, if any, and records that the
-  delivering process reached `phase` (a `{CaptureHook, :reached, phase}`
-  message to itself). Returns `:ok`, or the function's own
-  `{:error, {class, reason}}` fault, which can only make the delivery fail
-  before the capture (`hold_before_capture!/2`).
+  Runs the function registered for `phase`, if any, and reports the run to
+  the delivering process, tagged with the registration's ref, this
+  operation and its attempt:
+  - `{CaptureHook, ref, :entered, phase, op_id, attempt}` before the function;
+  - `{CaptureHook, ref, :returned, phase, op_id, attempt, :ok | :fault}`
+    after it, so a hook that raised is never reported as returned.
+
+  Returns `:ok`, or the function's own `{:error, {class, reason}}` fault,
+  which can only make the delivery fail before the capture
+  (`hold_before_capture!/2`).
   """
   def fault(phase, operation) do
-    send(self(), {__MODULE__, :reached, phase})
-
     case Process.get({__MODULE__, phase}) do
-      nil -> :ok
-      fun -> fault_of(fun.(operation))
+      {ref, fun} ->
+        send(self(), {__MODULE__, ref, :entered, phase, operation.id, operation.attempt_count})
+        fault = fault_of(fun.(operation))
+        tag = if fault == :ok, do: :ok, else: :fault
+
+        send(
+          self(),
+          {__MODULE__, ref, :returned, phase, operation.id, operation.attempt_count, tag}
+        )
+
+        fault
+
+      nil ->
+        :ok
     end
   end
 

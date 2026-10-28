@@ -14,9 +14,13 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
   - Capture: a NEW captured receipt in prototype runtime carries the block,
     only for an approval by the anchor; a duplicate capture gives one
     receipt; a non-anchor approval's capture and a live binding mismatch
-    (`prototype_binding_mismatch`) record no captured receipt, failing
-    closed on the existing failure path; every refused capture writes
-    nothing (`no_capture!/2`). An ordinary-runtime capture is unchanged.
+    (`prototype_binding_mismatch`) record no captured receipt. Per the
+    capture-boundary contract (S4 proposal r3, Codex 6b79bfb3), such a
+    refusal is a typed business refusal: at the worker it is a permanent
+    delivery outcome (`refused_attempt!/4`, T9), and on a direct record it is
+    the singleton `CaptureRefused` matched by struct name (T3). Every
+    refused capture writes nothing (`no_capture!/2`). An ordinary-runtime
+    capture is unchanged.
   - Non-HTML carriers: receipt event, approval event and the signed export
     payload carry the block; the captured message bytes never do.
   - The window `[2026-10-28T02:38:32Z, 2026-11-07T07:00:00Z)`: the
@@ -329,40 +333,38 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     refute bytes =~ "d237-prototype/1"
   end
 
-  test "a capture for an approval not by the anchor records no captured receipt (fails closed)" do
-    fixture = bound!(enter_runtime: false)
+  defp human_approved!(fixture) do
     ctx = demo!(fixture)
     %{draft: draft} = drafted!(ctx)
     approval = approve!(ctx, draft, operator!(ctx, :reviewer))
     delivery = delivery_of!(ctx, approval)
     enter_window!(fixture)
+    {ctx, delivery}
+  end
 
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
-    no_capture!(ctx, delivery)
-    assert capture_refusal(ctx, delivery) =~ "prototype_approval_not_delegated"
+  test "T9: a capture for an approval not by the anchor is a typed permanent refusal at the worker" do
+    {ctx, delivery} = human_approved!(bound!(enter_runtime: false))
+    refused_attempt!(ctx, delivery, :prototype_approval_not_delegated)
+  end
+
+  test "T3: a direct capture for an approval not by the anchor returns the typed refusal" do
+    {ctx, delivery} = human_approved!(bound!(enter_runtime: false))
+    operation = hold_before_capture!(ctx, delivery)
+    assert direct_refusal(ctx, operation) == {:refused, :prototype_approval_not_delegated}
     no_capture!(ctx, delivery)
   end
 
-  test "a live binding mismatch at capture records no captured receipt (prototype_binding_mismatch)" do
+  test "T9: a live binding mismatch at capture is a typed permanent refusal at the worker" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
 
-    capture_hook!(:before_capture, fn _op ->
+    refused_attempt!(ctx, delivery, :prototype_binding_mismatch, fn _op ->
       :ok = PrototypeFixtures.put_live_identity(%{system_identifier: 1})
     end)
-
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
-    no_capture!(ctx, delivery)
-    assert capture_refusal(ctx, delivery) =~ "prototype_binding_mismatch"
-    no_capture!(ctx, delivery)
   end
 
-  test "the capture validation names prototype_binding_mismatch" do
+  test "T3: the capture validation returns the typed prototype_binding_mismatch refusal" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
@@ -370,10 +372,10 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     dlv = Actor.system(:delivery_worker, ctx.tenant.id)
     {:ok, payload} = Audit.put_payload("synthetic message", "message/rfc822", actor: dlv)
 
-    # The refusal fails closed by raising, so the direct call raises the
-    # named refusal (the worker path is covered by failed_closed!/1).
+    # A typed business refusal is returned, never raised (proposal r3
+    # section 2.4); the worker path is T9 above.
     refused =
-      raised(fn ->
+      outcome(fn ->
         Outreach.record_receipt(
           %{
             delivery_operation_id: delivery.id,
@@ -387,7 +389,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
         )
       end)
 
-    assert refused =~ "prototype_binding_mismatch"
+    assert refused == {:refused, :prototype_binding_mismatch}
     no_capture!(ctx, delivery)
   end
 
@@ -416,8 +418,10 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     ])
   end
 
+  # T3: the closed business refusal is the singleton typed CaptureRefused,
+  # matched by struct name (proposal r3 section 2.3).
   defp not_delegated!(ctx, delivery, record) do
-    assert refusal_of(record) =~ "prototype_approval_not_delegated"
+    assert outcome(record) == {:refused, :prototype_approval_not_delegated}
     no_capture!(ctx, delivery)
   end
 
@@ -448,14 +452,14 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     operation = hold_before_capture!(ctx, delivery)
     foreign_tenant!("delivery_operations", operation.id)
 
-    refusal = refusal_of(fn -> record_operation(ctx, operation) end)
+    refusal = outcome(fn -> record_operation(ctx, operation) end)
 
     tamper!("UPDATE delivery_operations SET tenant_id = $1 WHERE id = $2", [
       Ecto.UUID.dump!(ctx.tenant.id),
       Ecto.UUID.dump!(operation.id)
     ])
 
-    assert refusal =~ "prototype_approval_not_delegated"
+    assert refusal == {:refused, :prototype_approval_not_delegated}
     no_capture!(ctx, delivery)
   end
 
@@ -613,17 +617,24 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     assert {:ok, %{status: :granted}} = Outreach.approve(draft, input, actor: ctx.admin)
   end
 
-  test "capture: at the exclusive window end no captured receipt is recorded" do
+  test "T9: capture at the exclusive window end is a typed permanent refusal at the worker" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
-    capture_hook!(:before_capture, fn _op -> Clock.freeze(window_end()) end)
 
-    # The worker fails closed (its error boundary sanitizes the Ash error);
-    # the capture boundary names the code on a direct record.
-    failed_closed!(delivery, fn -> deliver!() end)
-    no_capture!(ctx, delivery)
-    assert capture_refusal(ctx, delivery) =~ "prototype_outside_window"
+    refused_attempt!(ctx, delivery, :prototype_outside_window, fn _op ->
+      Clock.freeze(window_end())
+    end)
+  end
+
+  test "T3: a direct capture at the exclusive window end returns the typed refusal" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    operation = hold_before_capture!(ctx, delivery)
+    Clock.freeze(window_end())
+
+    assert direct_refusal(ctx, operation) == {:refused, :prototype_outside_window}
     no_capture!(ctx, delivery)
   end
 
