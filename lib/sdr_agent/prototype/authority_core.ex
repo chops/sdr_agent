@@ -210,8 +210,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       Stage (D-237 S1): B1a `enter_runtime/1` (Codex b743eb5d) and B1b
       `leave_runtime/0`, the `put_live_identity/1` storage and the
       `$callers` `lookup/1` (Codex b591e1a6) are implemented. Nothing reads
-      the stored live identity yet (its consumer is B2). `clear/0` still
-      returns `{:error, :not_implemented}`.
+      the stored live identity yet (its consumer is B2). `clear/0` (Codex
+      4d315a96) deletes exactly those two keys from the calling process.
       """
 
       alias SdrAgent.Prototype.Binding
@@ -244,9 +244,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         :ok
       end
 
-      @doc "Removes every seam key of the calling process."
-      @spec clear() :: :ok | {:error, atom()}
-      def clear, do: red({:error, :not_implemented})
+      @doc """
+      Removes the seam's two keys (runtime and live identity) from the
+      calling process only; no caller or other process is touched.
+      """
+      @spec clear() :: :ok
+      def clear do
+        Process.delete(@runtime_key)
+        Process.delete(@identity_key)
+        :ok
+      end
 
       @doc false
       # The value of `key` in the calling process, else in the first of its
@@ -266,9 +273,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           nil -> nil
         end
       end
-
-      # RED stub result, typed dynamic() (see SdrAgent.Prototype.Authority).
-      defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
     end
   end
 end
