@@ -113,6 +113,13 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
       refused!(parse(deeper, ctx), "results[0].relation", :too_deep)
     end
 
+    # Codex R2 (70679e0c): an invalid root shape is refused at "(root)".
+    test "a null, array or scalar root is refused at (root)", ctx do
+      refused!(raw("null", ctx), "(root)", :null)
+      refused!(raw("[]", ctx), "(root)", :type)
+      refused!(raw(~s("#{@marker}"), ctx), "(root)", :type)
+    end
+
     test "more than 64 KiB: refused by parse/3 and by read/3", ctx do
       bin = F.encode(ctx.manifest)
       big = bin <> String.duplicate(" ", 65_536 - byte_size(bin) + 1)

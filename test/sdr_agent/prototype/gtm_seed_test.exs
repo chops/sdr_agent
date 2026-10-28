@@ -170,6 +170,33 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
   end
 
   describe "exact key sets" do
+    # Codex R2 (70679e0c): an invalid root shape is refused at the bare file
+    # name (BoundedJson's root), never at "<file>:".
+    test "a null, array or scalar root is refused at the file" do
+      refused!(
+        read(F.write_seed_dir!(Map.put(contents(), "campaign.json", "null"))),
+        "campaign.json",
+        :null
+      )
+
+      refused!(
+        read(F.write_seed_dir!(Map.put(contents(), "writing_guide.json", "[]"))),
+        "writing_guide.json",
+        :type
+      )
+
+      profile =
+        Map.merge(contents(), %{"offering_profile.json" => "1", "provenance.json" => "{}"})
+
+      refused!(read(F.write_seed_dir!(profile)), "offering_profile.json", :type)
+
+      refused!(
+        read(F.write_seed_dir!(Map.put(contents(), "provenance.json", "null"))),
+        "provenance.json",
+        :null
+      )
+    end
+
     test "an unknown or missing key is refused without naming it" do
       refused!(
         read(F.write_seed_dir!(with_file("offering_profile.json", &Map.put(&1, @marker, "x")))),

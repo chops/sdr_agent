@@ -70,6 +70,19 @@ defmodule SdrAgent.Prototype.DossierParserTest do
   end
 
   describe "schema and shape" do
+    # Codex R2 (70679e0c): an invalid root shape is refused at "(root)",
+    # BoundedJson's root path, never at an empty path.
+    test "a null, array or scalar root is refused at (root), by parse/1 and read/2" do
+      refused!(DossierParser.parse("null"), "(root)", :null)
+      refused!(DossierParser.parse("[]"), "(root)", :type)
+      refused!(DossierParser.parse("1"), "(root)", :type)
+      refused!(DossierParser.parse(~s("#{@marker}")), "(root)", :type)
+
+      dir = F.scratch_dir!()
+      path = F.write!(dir, "dossier.json", "null")
+      refused!(DossierParser.read(path, F.sha256("null")), "(root)", :null)
+    end
+
     test "a wrong schema or schema_version is refused" do
       refused!(
         parse(Map.put(F.dossier(), "schema", "sdr-agent.prototype-dossier-" <> @marker)),
