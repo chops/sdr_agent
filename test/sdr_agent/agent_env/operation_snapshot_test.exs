@@ -3,7 +3,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
   C2* S1 PR-A RED-1 (plan `claude-c2star-s1-environment-plan-r2.md`
   sections 4.1-4.3 and 7.1 rows T-U4, T-U4/R4, T-B1; ADR-0005 C2* amendment
   item 2, the owner-or-inherit rule; Codex r2 review: PR-A plan/entity PASS,
-  ModeRefused in GREEN-1). The operation snapshot core:
+  ModeRefusedError in GREEN-1). The operation snapshot core:
 
     * **Constants and mode** (section 4.1): `agentenv-1`, its database,
       port and exclusive end; `mode/0` and `configured?/0` follow the
@@ -16,7 +16,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
       transaction open it refuses (the body runs, nothing is observed or
       registered). One snapshot per process; generations are strictly
       increasing; unconfigured it is inert; `entries/0` is closed; in the
-      non-run modes every entry raises `SdrAgent.AgentEnv.ModeRefused`
+      non-run modes every entry raises `SdrAgent.AgentEnv.ModeRefusedError`
       before its body.
     * **verify/1** (R3): only this process's active registration verifies.
     * **Observation** (sections 4.2, 4.3): the three views, validity (lease
@@ -27,7 +27,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
       1-6 and 8-20) called at the top level with the smallest input that
       reaches its first line observes exactly once with its own tag, outside
       any transaction, and nested entries inherit; inside `Repo.transaction/1`
-      it refuses; in bootstrap mode it raises ModeRefused. The DecisionRules
+      it refuses; in bootstrap mode it raises ModeRefusedError. The DecisionRules
       check always runs in the Decision create's own transaction, so at the
       top level it refuses (it inherits under an owner: see
       `SdrAgent.AgentEnv.SnapshotNestingTest`). The worker owners
@@ -45,7 +45,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
   its generation" (section 7.1) is observed.
 
   RED: `SdrAgent.AgentEnv`, `SdrAgent.AgentEnv.OperationSnapshot`,
-  `SdrAgent.AgentEnv.State` and `SdrAgent.AgentEnv.ModeRefused` do not exist
+  `SdrAgent.AgentEnv.State` and `SdrAgent.AgentEnv.ModeRefusedError` do not exist
   (structural, guarded after the fixtures), and no entry emits a snapshot
   event (behavioural). The unconfigured wiring row is a control.
 
@@ -78,7 +78,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
   @agent_env SdrAgent.AgentEnv
   @snapshot SdrAgent.AgentEnv.OperationSnapshot
   @state SdrAgent.AgentEnv.State
-  @mode_refused SdrAgent.AgentEnv.ModeRefused
+  @mode_refused SdrAgent.AgentEnv.ModeRefusedError
 
   @snapshot_api [
     entries: 0,
@@ -633,7 +633,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
     for mode <- [:check, :bootstrap, :provisioning] do
       @mode mode
 
-      test "#{mode} mode: an entry raises ModeRefused before its body runs", ctx do
+      test "#{mode} mode: an entry raises ModeRefusedError before its body runs", ctx do
         Fx.configure!(ctx.root, mode: @mode, nonce: Fx.nonce())
         require!(@mode_refused, exception: 1)
         require_snapshot!()
@@ -645,7 +645,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
           end)
 
         assert match?({:raised, %{__struct__: @mode_refused}}, result),
-               "C2* L6: an entry in #{@mode} mode must raise ModeRefused: #{inspect(result)}"
+               "C2* L6: an entry in #{@mode} mode must raise ModeRefusedError: #{inspect(result)}"
 
         refute_received :body_ran
         assert of_kind(events, :observe_start) == []
@@ -885,13 +885,13 @@ defmodule SdrAgent.AgentEnv.OperationSnapshotTest do
       end
 
       unless label in @raise_exempt do
-        test "#{label}: in bootstrap mode it raises ModeRefused before its body", ctx do
+        test "#{label}: in bootstrap mode it raises ModeRefusedError before its body", ctx do
           Fx.configure!(ctx.root, mode: :bootstrap, nonce: Fx.nonce(), step: :seed)
           {result, events} = Fx.trace_snapshots(fn -> attempt(wiring_call(@label, ctx)) end)
 
           assert match?({:raised, %{__struct__: @mode_refused}}, result),
-                 "C2* L6: #{@label} in bootstrap mode must raise ModeRefused at its first " <>
-                   "line; got #{inspect(result, limit: 6)}"
+                 "C2* L6: #{@label} in bootstrap mode must raise ModeRefusedError at its " <>
+                   "first line; got #{inspect(result, limit: 6)}"
 
           assert of_kind(events, :observe_start) == []
         end

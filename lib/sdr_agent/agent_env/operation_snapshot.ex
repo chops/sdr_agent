@@ -15,7 +15,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshot do
   | `:run` | yes | any | inherit: `fun.()`; never replaced or invalidated |
   | `:run` | no | no | own: observe, register, run, then unregister and invalidate (on return or raise) |
   | `:run` | no | yes | refuse: `fun.()` with nothing registered; nothing observed (no file I/O under locks) |
-  | `:check`, `:bootstrap`, `:provisioning` | — | — | raise `SdrAgent.AgentEnv.ModeRefused` before `fun` |
+  | `:check`, `:bootstrap`, `:provisioning` | — | — | raise `SdrAgent.AgentEnv.ModeRefusedError` before `fun` |
 
   A snapshot belongs to one process (its registration is in the process
   dictionary). Its `generation` is strictly increasing within the VM;
@@ -45,7 +45,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshot do
   """
 
   alias SdrAgent.AgentEnv
-  alias SdrAgent.AgentEnv.ModeRefused
+  alias SdrAgent.AgentEnv.ModeRefusedError
   alias SdrAgent.AgentEnv.State
   alias SdrAgent.Clock
   alias SdrAgent.Repo
@@ -129,7 +129,7 @@ defmodule SdrAgent.AgentEnv.OperationSnapshot do
     case AgentEnv.mode() do
       :none -> fun.()
       :run -> apply_rule(entry, fun)
-      mode -> raise ModeRefused, mode: mode, entry: entry
+      mode -> raise ModeRefusedError, mode: mode, entry: entry
     end
   end
 

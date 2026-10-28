@@ -9,7 +9,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   fresh and resume success logs; the validated-seed handoff; every phase
   0-3 refusal with its exact `setup_phase` map; every effect's unknown
   return (`{:unexpected, phase}`) and raise (propagates, unrescued, except
-  `BootCheck.Refusal`); the actor-mismatch rows; each asserting the exact
+  `BootCheck.RefusalError`); the actor-mismatch rows; each asserting the exact
   log, so no later effect ran. Also `preflight/2`, `prepare_storage/2`,
   `cluster_identity_check/2` and the non-invoking shape of
   `real_effects/1`. r3 adds exact-validation controls (newlines, digests;
@@ -758,7 +758,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
 
   defp scenario(:boot_refused) do
     verify = fn _created ->
-      raise SdrAgent.Prototype.BootCheck.Refusal, code: :binding_not_exact
+      raise SdrAgent.Prototype.BootCheck.RefusalError, code: :binding_not_exact
     end
 
     {%{}, %{verify: verify}, refused(3, :boot_refused)}

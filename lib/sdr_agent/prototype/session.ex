@@ -92,6 +92,6 @@ defmodule SdrAgent.Prototype.Session do
   defp boot do
     SdrAgent.Prototype.BootCheck.verify!()
   rescue
-    error in SdrAgent.Prototype.BootCheck.Refusal -> {:error, error.code}
+    error in SdrAgent.Prototype.BootCheck.RefusalError -> {:error, error.code}
   end
 end

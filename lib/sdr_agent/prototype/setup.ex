@@ -37,7 +37,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     Each effect's success shape is exact and typed; only its documented
     refusal family maps to a closed reason, any other value is
     `{:unexpected, phase}`, and a raise propagates (the one rescue is the
-    typed `BootCheck.Refusal` around `verify`). `with_repo/1` gets one
+    typed `BootCheck.RefusalError` around `verify`). `with_repo/1` gets one
     single-use callback per run: its first call runs phases 1b-3 and
     returns `{ref, result}`, any later call runs nothing, and only
     `{:ok, {^ref, result}, apps}` with a proper list of apps is accepted
@@ -490,7 +490,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         _other -> unexpected(3)
       end
     rescue
-      BootCheck.Refusal -> refused(3, :boot_refused)
+      BootCheck.RefusalError -> refused(3, :boot_refused)
     end
 
     defp actor(
