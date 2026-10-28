@@ -296,18 +296,35 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
     {leaf, Ash.Error.Unknown.exception(errors: [leaf])}
   end
 
-  # The injected leaf as an action's returned error class carries it. A
-  # validation's returned class is kept unchanged in the changeset (so an
-  # owner's rolled-back changeset holds `injected` itself), but create's
-  # error return (create.ex:228-230, Ash.Error.to_error_class) passes the
-  # class through Splode's stacktrace filter, Ash.Error's ["Ash.",
-  # "Splode."]: the leaf's frames are filtered and every other field is
-  # unchanged. Exactly that, nothing looser.
+  # The INNER step of create's error return only. A validation's returned
+  # class is kept unchanged in the changeset (so an owner's rolled-back
+  # changeset holds `injected` itself); create.ex:228-230
+  # (Ash.Error.to_error_class) then passes the class through Splode's
+  # stacktrace filter, Ash.Error's ["Ash.", "Splode."], which filters the
+  # leaf's frames. The outer step is action_returned/2.
   defp returned(%{stacktrace: %Splode.Stacktrace{stacktrace: frames}} = leaf)
        when is_list(frames) do
     filtered = Splode.filter_stacktrace(frames, Ash.Error.__stacktrace_filters__())
     %{leaf | stacktrace: %Splode.Stacktrace{stacktrace: filtered}}
   end
+
+  # The fixed action breadcrumb of create.ex:92-96 for the action's own
+  # resource (Contact or Lead): "Error returned from: <resource>.<action>".
+  # Built from the resource module and the action name only, never read
+  # from a returned error.
+  defp action_crumb(resource), do: "Error returned from: #{inspect(resource)}.import_prototype"
+
+  # The injected leaf exactly as a top-level :import_prototype create returns
+  # it (Ash 3.37.2 / Splode 0.3.2): the inner step's filtered frames
+  # (returned/1), then create.ex:92-96's Ash.Error.to_error_class(error,
+  # bread_crumbs: action_crumb), whose accumulate_bread_crumbs
+  # (splode.ex:636-666) prepends exactly that one crumb to the leaf's own.
+  # Every other key and value stays the injected leaf's, and == checks the
+  # crumbs' exact order and multiplicity. Measured on the actual raw and
+  # wrapper paths (c3-20261028T140813Z-56517); the owner path keeps
+  # `injected` itself.
+  defp action_returned(injected, resource),
+    do: %{returned(injected) | bread_crumbs: [action_crumb(resource) | injected.bread_crumbs]}
 
   defp sibling_succeeded?(:lead_account, pre), do: {:select, :contacts, :ok, nil} in pre
   defp sibling_succeeded?(_edge, _pre), do: true
@@ -345,7 +362,7 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
         refute absent_refusal?(result, field),
                "#{field}: the returned #{unquote(kind)} was relabelled as absence"
 
-        assert returned(injected) in leaves(elem(result, 1)),
+        assert action_returned(injected, resource) in leaves(elem(result, 1)),
                "#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
@@ -510,7 +527,8 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
         end
 
         # The returned error keeps its identity through the wrapper.
-        assert match?({:error, _}, result) and returned(injected) in leaves(elem(result, 1)),
+        assert match?({:error, _}, result) and
+                 action_returned(injected, resource) in leaves(elem(result, 1)),
                "#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
