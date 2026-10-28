@@ -141,6 +141,40 @@ defmodule SdrAgent.Prototype.DossierImportTest do
              )
     end
 
+    # Codex 22958123: a later session's valid delegation (S1's
+    # enter_session/2) replays the row: the original rows and their
+    # attribution stay, no event is appended, no row, Payload or slot is used.
+    test "an identical replay by a second valid delegation keeps the original attribution", ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+
+      entered = SdrAgent.Prototype.enter_session(:codex_cli, "codex-session:s3-replay-0002")
+
+      assert match?({:ok, _}, entered),
+             "prerequisite: enter_session/2 returned #{inspect(entered)}"
+
+      {:ok, second_id} = entered
+      {:ok, second} = SdrAgent.Prototype.operator_actor(second_id)
+      refute second.id == ctx.actor.id
+
+      tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads)
+      before = {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))}
+
+      assert import!([row], second) == %{imported: [], replayed: ["row-1"]}
+
+      assert {:ok, :replay, %{entry_id: entry_id}} =
+               call(@import, :import_row, [row, second])
+
+      assert {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))} == before
+
+      %{rows: [[delegation_id]]} =
+        Repo.query!("SELECT delegation_id FROM dossier_entries WHERE id = $1", [
+          Ecto.UUID.dump!(entry_id)
+        ])
+
+      assert Ecto.UUID.cast!(delegation_id) == ctx.actor.id
+    end
+
     test "the same domain or email from another dossier is :dossier_conflict and writes nothing",
          ctx do
       [row] = rows!([F.company(1)], ["row-1"])

@@ -179,5 +179,42 @@ defmodule SdrAgent.Prototype.ResearchImportBodyTest do
       assert match?({:error, _}, result), "record_dossier_source/2 returned #{inspect(result)}"
       assert count("dossier_sources") == 0
     end
+
+    # Codex 9ada21de / 69c53134: one binding supports several valid session
+    # delegations (S1's enter_session/2). Only the entry's importing
+    # delegation adds its sources: another valid delegation of the same
+    # binding, tenant and lead is refused with no source and no event, and
+    # the same attributes as the importing delegation are written.
+    test "a source by another valid delegation of the same binding is refused; the importer's is written",
+         ctx do
+      entry = entry!(ctx)
+      second = second_delegation!("codex-session:s3-source-0002")
+      assert {second.type, second.tenant_id} == {:prototype_operator, ctx.tenant.id}
+      refute second.id == ctx.actor.id
+
+      result = Research.record_dossier_source(source_attrs(ctx, entry), actor: second)
+      assert match?({:error, _}, result), "record_dossier_source/2 returned #{inspect(result)}"
+      assert count("dossier_sources") == 0
+      assert events_of_type(ctx.tenant, "research.dossier_source.imported") == []
+
+      positive = Research.record_dossier_source(source_attrs(ctx, entry), actor: ctx.actor)
+      assert match?({:ok, _}, positive), "the importer's source returned #{inspect(positive)}"
+      assert count("dossier_sources") == 1
+    end
+  end
+
+  # A second valid operator delegation of the same live binding, through
+  # S1's enter_session/2 and the fresh resolver.
+  defp second_delegation!(correlation) do
+    entered = SdrAgent.Prototype.enter_session(:codex_cli, correlation)
+    assert match?({:ok, _}, entered), "prerequisite: enter_session/2 returned #{inspect(entered)}"
+    {:ok, id} = entered
+    resolved = SdrAgent.Prototype.operator_actor(id)
+
+    assert match?({:ok, _}, resolved),
+           "prerequisite: operator_actor/1 returned #{inspect(resolved)}"
+
+    {:ok, actor} = resolved
+    actor
   end
 end
