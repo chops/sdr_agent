@@ -935,11 +935,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc """
     `:ok` when `public.schema_migrations` holds exactly the pinned migration
     set, no more and no fewer (setup fresh mode, after its migration);
-    otherwise `{:error, :migration_failed}`. Not a resumability check: rows
-    are not examined. RED: not implemented (setup contract r2).
+    otherwise `{:error, :migration_failed}`, including a failed read. Not a
+    resumability check: rows are not examined (setup contract r2).
     """
-    @spec check_migrated() :: :ok | {:error, :migration_failed | :not_implemented}
-    def check_migrated, do: red({:error, :not_implemented})
+    @spec check_migrated() :: :ok | {:error, :migration_failed}
+    def check_migrated,
+      do: if(migrated_exactly?(), do: :ok, else: {:error, :migration_failed})
 
     @doc "The pinned migration set, `[{version, name}]` in version order."
     @spec pinned_migrations() :: [{integer(), String.t()}]
