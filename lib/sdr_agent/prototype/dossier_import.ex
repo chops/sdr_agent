@@ -75,8 +75,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     Results carry codes, row ids and ids only, never values; the codes are
     members of `SdrAgent.Prototype.SafeLog.reasons(:import)`.
 
-    Stage (D-237 S3): `cap_used/1` still returns 0, never a measured cap,
-    until its own RED with the import task.
+    `cap_used/1` is the import summary's point-in-time count (IF-8
+    `:import_summary`): `{:ok, n}`, the distinct `contact_id` of the
+    DossierEntry rows in the binding's tenant (every delegation's; a replay
+    or a failed row adds none), for the live operator only, through the same
+    fresh `live/1` gate, else `{:error, :forbidden | :binding_mismatch |
+    :not_prototype_runtime}`. A call inside an already-open transaction and
+    a failed read are the closed `{:error, :import_failed}`. It reads only:
+    no write, audit, reservation or output. Never authority: the cap is
+    decided per row under the binding lock.
+    O1
     """
 
     require Ash.Query
@@ -193,12 +201,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       def import_row(row, actor, seams) when is_list(seams), do: run_row(row, actor, seams)
 
       @doc false
-      # Test-seam builds only: `before_count:`, a 0-arity function run just
-      # before cap_used's count read (here, before the RED stub).
-      def cap_used(actor, seams) when is_list(seams) do
-        :ok = seam(seams, :before_count)
-        cap_used(actor)
-      end
+      # Test-seam builds only: `before_count:`, a 0-arity function run after
+      # the entry checks and just before cap_used's count read.
+      def cap_used(actor, seams) when is_list(seams), do: count_used(actor, seams)
     end
 
     defp run_row(row, actor, seams) do
@@ -231,9 +236,30 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp closed(%Ash.Changeset{}), do: :import_failed
     defp closed(%Ash.ActionInput{}), do: :import_failed
 
-    @doc "Distinct imported contacts of the binding."
-    @spec cap_used(SdrAgent.Actor.t()) :: non_neg_integer()
-    def cap_used(_actor), do: red(0)
+    @doc "The binding's distinct imported contacts, for the live operator; see the moduledoc."
+    @spec cap_used(SdrAgent.Actor.t()) ::
+            {:ok, non_neg_integer()}
+            | {:error, :forbidden | :binding_mismatch | :not_prototype_runtime | :import_failed}
+    def cap_used(actor), do: count_used(actor, [])
+
+    # Outside any transaction (refused inside one), so a failed read returns
+    # an error here rather than rolling a caller back by throw; it is not
+    # used/1, whose read/1 rolls the row transaction back.
+    defp count_used(actor, seams) do
+      with :ok <- not_nested(),
+           :ok <- live(actor) do
+        :ok = seam(seams, :before_count)
+
+        actor
+        |> entries()
+        |> Ash.Query.select([:contact_id])
+        |> Ash.read()
+        |> case do
+          {:ok, records} -> {:ok, records |> MapSet.new(& &1.contact_id) |> MapSet.size()}
+          {:error, _error} -> {:error, :import_failed}
+        end
+      end
+    end
 
     # The fresh real resolver must return exactly this actor (type, delegation
     # id and tenant), after the live binding check; nothing is taken from the
@@ -525,9 +551,5 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         content_sha256: content
       }
     end
-
-    # RED stub result, typed dynamic() so success clauses of callers compile
-    # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   end
 end
