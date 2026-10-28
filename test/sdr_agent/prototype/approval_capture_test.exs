@@ -134,6 +134,70 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     assert approvals!(ctx, draft) == []
   end
 
+  # The operator's approval needs the live operator (resolver re-run) AND the
+  # active anchor (Codex S4 RED-2, staged GREEN 1); everything else is refused
+  # with nothing written.
+
+  test "a forged operator struct cannot approve: Forbidden, nothing written" do
+    ctx = prototype_drafted!()
+    {draft, input} = reviewed(ctx, ctx.draft)
+
+    forged = [
+      %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id},
+      %Actor{type: :prototype_operator, id: ctx.operator.id, tenant_id: Ecto.UUID.generate()},
+      %Actor{type: :prototype_operator, id: nil, tenant_id: ctx.tenant.id}
+    ]
+
+    for actor <- forged do
+      result = Outreach.approve(draft, input, actor: actor)
+
+      assert match?({:error, %Ash.Error.Forbidden{}}, result),
+             "a forged operator approved: #{inspect(result)}"
+    end
+
+    assert approvals!(ctx, draft) == []
+    assert draft!(ctx, draft).status == :pending_review
+    assert events_of(ctx.tenant, "outreach.approval.granted") == []
+  end
+
+  test "outside prototype runtime the operator's delegation cannot approve" do
+    ctx = prototype_drafted!()
+    {draft, input} = reviewed(ctx, ctx.draft)
+    PrototypeFixtures.leave_runtime()
+
+    result = Outreach.approve(draft, input, actor: ctx.operator)
+
+    assert match?({:error, %Ash.Error.Forbidden{}}, result),
+           "the operator approved in ordinary runtime: #{inspect(result)}"
+
+    assert approvals!(ctx, draft) == []
+    assert draft!(ctx, draft).status == :pending_review
+    assert events_of(ctx.tenant, "outreach.approval.granted") == []
+  end
+
+  test "a disabled anchor: the live operator's approval is refused as inactive, nothing written" do
+    ctx = prototype_drafted!()
+    {draft, input} = reviewed(ctx, ctx.draft)
+    PrototypeFixtures.leave_runtime()
+
+    disabled = SdrAgent.Accounts.change_status(ctx.anchor, :disabled, actor: ctx.admin)
+
+    assert match?({:ok, %{status: :disabled}}, disabled),
+           "anchor not disabled: #{inspect(disabled)}"
+
+    enter_window!(ctx.fixture)
+
+    result = Outreach.approve(draft, input, actor: ctx.operator)
+
+    assert match?({:error, %Ash.Error.Invalid{}}, result),
+           "not refused as invalid (an inactive approver): #{inspect(result)}"
+
+    assert inspect(result) =~ "must be an active operator"
+    assert approvals!(ctx, draft) == []
+    assert draft!(ctx, draft).status == :pending_review
+    assert events_of(ctx.tenant, "outreach.approval.granted") == []
+  end
+
   # ------------------------------------------------------------------ capture
 
   test "a NEW captured receipt carries the block; a duplicate capture gives one receipt" do
