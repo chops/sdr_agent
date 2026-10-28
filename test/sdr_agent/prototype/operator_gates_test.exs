@@ -8,11 +8,16 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     (`OperatorAction(:assign)`) in its binding's tenant, and records the
     operator's own identity; it refuses a forged operator struct, a
     foreign-tenant operator and the auditor, writing nothing;
+  - Lead `:assign` only (Codex S4 RED ruling 1): the live operator may
+    assign, with the transition, stamp, owner and event as before; an
+    operator-supplied owner is refused; no other Lead mutation;
   - `SDR.retry_run/2` is refused in prototype runtime for every actor;
   - the `:review_read` read lines: the operator reads exactly the listed
     resources (Draft, DraftRevision, RevisionCitation, Approval,
     DeliveryOperation, DeliveryReceipt, AgentRun, Lead, Account, Contact,
-    Decision, ResearchArtifact, EvidenceClaim) and nothing else here; a
+    Decision, ResearchArtifact, EvidenceClaim), plus Campaign (Codex S4
+    RED ruling 2), and only rows of the binding tenant, through the policy
+    itself and nothing else here; a
     forged operator struct reads none of them in ordinary runtime;
   - the auditor cannot assign, approve or capture.
 
@@ -26,6 +31,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   alias SdrAgent.Actor
   alias SdrAgent.Outreach
+  alias SdrAgent.Sales
   alias SdrAgent.SDR
 
   @review_read [
@@ -41,7 +47,8 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     SdrAgent.Sales.Contact,
     SdrAgent.Agents.Decision,
     SdrAgent.Research.ResearchArtifact,
-    SdrAgent.Research.EvidenceClaim
+    SdrAgent.Research.EvidenceClaim,
+    SdrAgent.Sales.Campaign
   ]
 
   @not_review_read [
@@ -212,5 +219,167 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
            )
 
     assert reload!(ctx, lead).status == :new
+  end
+
+  # ------------------------------------------------------------------ ruling 1: Lead :assign only
+
+  defp can?(record, action, actor), do: Ash.can?({record, action}, actor) == true
+
+  @lead_mutations [
+    :start_research,
+    :start_qualifying,
+    :qualify,
+    :disqualify,
+    :start_outreach,
+    :disqualify_by_override,
+    :requalify_by_override,
+    :mark_replied,
+    :convert,
+    :nurture,
+    :stop,
+    :block,
+    :retry,
+    :reopen
+  ]
+
+  test "Lead :assign: the live operator assigns; transition, stamp, owner and event as before" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "04")
+    assert can?(lead, :assign, ctx.operator)
+
+    assert {:ok, assigned} = Sales.update(lead, :assign, %{}, actor: ctx.operator)
+    assert assigned.status == :assigned
+    assert assigned.assigned_at
+    assert assigned.owner_user_id == lead.owner_user_id
+
+    [event] = events_of(ctx.tenant, "sales.lead.assigned")
+    assert {event.actor_type, event.actor_id} == {:prototype_operator, ctx.operator.id}
+  end
+
+  test "Lead :assign: an operator-supplied owner is refused, through the resource and through SDR" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "04")
+
+    assert forbidden?(
+             Sales.update(lead, :assign, %{owner_user_id: ctx.admin.id}, actor: ctx.operator)
+           )
+
+    assert forbidden?(
+             SDR.assign_lead(lead,
+               campaign_id: ctx.campaign_id,
+               owner_user_id: ctx.admin.id,
+               actor: ctx.operator
+             )
+           )
+
+    reloaded = reload!(ctx, lead)
+    assert {reloaded.status, reloaded.owner_user_id} == {:new, lead.owner_user_id}
+  end
+
+  test "Lead :assign: forged, foreign-tenant and stale-binding operators are refused" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "04")
+    forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
+
+    foreign = %Actor{
+      type: :prototype_operator,
+      id: ctx.operator.id,
+      tenant_id: Ecto.UUID.generate()
+    }
+
+    for actor <- [forged, foreign] do
+      refute can?(lead, :assign, actor)
+      assert forbidden?(Sales.update(lead, :assign, %{}, actor: actor))
+    end
+
+    assert PrototypeFixtures.put_live_identity(%{system_identifier: 1}) == :ok
+    refute can?(lead, :assign, ctx.operator)
+    assert forbidden?(Sales.update(lead, :assign, %{}, actor: ctx.operator))
+    assert reload!(ctx, lead).status == :new
+  end
+
+  test "the operator gets no other Lead mutation" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "04")
+
+    for action <- @lead_mutations do
+      refute can?(lead, action, ctx.operator), "the operator may #{action} a lead"
+    end
+
+    refute Ash.can?({Sales.Lead, :create}, ctx.operator) == true
+  end
+
+  test "Lead :assign control: an admin still assigns with an owner in ordinary runtime (unchanged)" do
+    ctx = demo!(nil)
+    lead = lead!(ctx, "04")
+
+    assert {:ok, assigned} =
+             Sales.update(lead, :assign, %{owner_user_id: ctx.admin.id}, actor: ctx.admin)
+
+    assert {assigned.status, assigned.owner_user_id} == {:assigned, ctx.admin.id}
+  end
+
+  # ------------------------------------------------------------------ ruling 2: Campaign review_read
+
+  # A copy of an existing row under a random, foreign tenant (raw SQL with
+  # triggers disabled, as a database administrator could): the row the
+  # operator's policy-level read must exclude.
+  defp foreign_copy!(table, id) do
+    foreign_id = Ecto.UUID.generate()
+
+    tamper!(
+      "INSERT INTO #{table} SELECT (jsonb_populate_record(NULL::#{table}, to_jsonb(t) || " <>
+        "jsonb_build_object('id', $1::text, 'tenant_id', $2::text))).* FROM #{table} t WHERE id = $3",
+      [foreign_id, Ecto.UUID.generate(), Ecto.UUID.dump!(id)]
+    )
+
+    foreign_id
+  end
+
+  test "Campaign review_read: the binding tenant's campaigns are read; a foreign-tenant row is excluded" do
+    ctx = bound_with_demo!()
+    foreign_id = foreign_copy!("campaigns", ctx.campaign_id)
+
+    assert {:ok, rows} = Ash.read(Sales.Campaign, actor: ctx.operator)
+    ids = Enum.map(rows, & &1.id)
+    assert ctx.campaign_id in ids
+    refute foreign_id in ids
+
+    assert {:ok, %{id: _}} = Sales.fetch(Sales.Campaign, ctx.campaign_id, actor: ctx.operator)
+    refute match?({:ok, _}, Sales.fetch(Sales.Campaign, foreign_id, actor: ctx.operator))
+  end
+
+  test "review_read rows are the binding tenant's only (Lead, through the policy itself)" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "05")
+    foreign_id = foreign_copy!("leads", lead.id)
+
+    assert {:ok, rows} = Ash.read(Sales.Lead, actor: ctx.operator)
+    ids = Enum.map(rows, & &1.id)
+    assert lead.id in ids
+    refute foreign_id in ids
+  end
+
+  test "Campaign review_read: a forged or stale operator reads nothing; ordinary runtime denies" do
+    ctx = bound_with_demo!()
+    forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
+    refute match?({:ok, [_ | _]}, Ash.read(Sales.Campaign, actor: forged))
+
+    assert PrototypeFixtures.put_live_identity(%{database_oid: 1}) == :ok
+    refute match?({:ok, [_ | _]}, Ash.read(Sales.Campaign, actor: ctx.operator))
+
+    PrototypeFixtures.leave_runtime()
+    refute match?({:ok, [_ | _]}, Ash.read(Sales.Campaign, actor: ctx.operator))
+  end
+
+  test "Campaign: the operator gets no Campaign write" do
+    ctx = bound_with_demo!()
+    {:ok, campaign} = Sales.fetch(Sales.Campaign, ctx.campaign_id, actor: ctx.admin)
+
+    for action <- [:update, :activate, :pause, :resume, :complete, :archive] do
+      refute can?(campaign, action, ctx.operator), "the operator may #{action} a campaign"
+    end
+
+    refute Ash.can?({Sales.Campaign, :create}, ctx.operator) == true
   end
 end

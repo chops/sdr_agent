@@ -15,6 +15,11 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     not accepted, and the refusal fails closed on the existing failure
     path. In ordinary runtime an already-claimed delivery is left to its
     outcome (unchanged; the control).
+  - R10 (supplement 1 r2 section 7): a suppressed contact cannot be
+    assigned by the operator (the Store check), and the NoStore check
+    refuses prototype boot. Home stays fail-closed for
+    `released_unverified` output; that case needs a real prototype release
+    and is asserted in the G4 journey.
 
   Synthetic `.test` data only.
   """
@@ -24,13 +29,6 @@ defmodule SdrAgent.Prototype.SuppressionTest do
   import SdrAgent.PrototypeOutreachFixtures
 
   alias SdrAgent.Outreach
-
-  defp crashed?(fun) do
-    fun.()
-    false
-  rescue
-    _ -> true
-  end
 
   defp captured(ctx, delivery), do: Enum.filter(receipts!(ctx, delivery), &(&1.kind == :captured))
 
@@ -61,7 +59,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     variant = "  " <> String.upcase(to_string(ctx.contact.email)) <> " "
     capture_hook!(:before_capture, fn _op -> suppress!(ctx, :email, variant) end)
 
-    _ = crashed?(fn -> deliver!() end)
+    assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
     assert captured(ctx, delivery) == []
     refute outreach!(ctx, delivery).state in [:accepted, :delivered]
     refute Enum.any?(receipts!(ctx, delivery), &(&1.kind == :accepted))
@@ -76,7 +74,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
       suppress!(ctx, :domain, String.upcase(domain(ctx.contact.email)))
     end)
 
-    _ = crashed?(fn -> deliver!() end)
+    assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
     assert captured(ctx, delivery) == []
     refute outreach!(ctx, delivery).state in [:accepted, :delivered]
   end
@@ -91,5 +89,38 @@ defmodule SdrAgent.Prototype.SuppressionTest do
 
     deliver!()
     assert [_] = captured(ctx, delivery)
+  end
+
+  # ------------------------------------------------------------------ R10: enrollment and boot
+
+  test "R10 enrollment: a suppressed (normalised) contact cannot be assigned by the operator" do
+    fixture = bound!(enter_runtime: false)
+    ctx = demo!(fixture)
+    SdrAgent.SDRCase.ensure_offering!(ctx)
+    lead = SdrAgent.SDRCase.fixture_lead!(ctx, "06")
+    email = to_string(contact!(ctx, lead).email)
+    suppress!(ctx, :email, " " <> String.upcase(email))
+    enter!(fixture)
+
+    assert {:ok, :suppressed, %{"suppression_ids" => [_ | _]}} =
+             SdrAgent.SDR.SuppressionCheck.Store.check(email, %{tenant_id: ctx.tenant.id})
+
+    result =
+      SdrAgent.SDR.assign_lead(reload!(ctx, lead),
+        campaign_id: ctx.campaign_id,
+        actor: fixture.actor
+      )
+
+    refute match?({:ok, _}, result), "the operator assigned a suppressed contact's lead"
+    assert reload!(ctx, lead).status == :stopped
+  end
+
+  test "R10 boot: the NoStore suppression check refuses prototype boot" do
+    fixture = bound!(enter_runtime: false)
+    put_env!(:suppression_check, SdrAgent.SDR.SuppressionCheck.NoStore)
+    switch = PrototypeFixtures.switch(fixture)
+
+    assert call(SdrAgent.Prototype.BootCheck, :check, [switch]) ==
+             {:error, :suppression_not_store}
   end
 end

@@ -19,9 +19,12 @@ defmodule SdrAgent.Prototype.OutputTest do
   - Q1 through `op approve`: the three reviewed inputs are each required
     and never refilled; a changed recipient email or a new revision after
     review refuses the approval as stale.
-  - The Mix task allow-list: every task of `lib/mix/tasks` either is on the
-    allow-list `{sdr.prototype.*, sdr.audit.export}` or refuses in
-    prototype runtime as its first statement.
+  - The Mix task allow-list (Codex S4 RED ruling 6: closed, exact names):
+    `sdr.prototype.{setup,provision,import,op,serve}` and `sdr.audit.export`.
+    Every other task of `lib/mix/tasks` has one `run/1` whose first
+    statement is the terminal fixed-code refusal; only that extracted guard
+    is ever evaluated here, so no task body runs. A partial or malformed
+    switch is a refusal, never ordinary permission.
 
   Synthetic `.test` data only.
   """
@@ -46,8 +49,6 @@ defmodule SdrAgent.Prototype.OutputTest do
   @approval_fields ~w(id verdict approval_mode delegation_id draft_revision_id revision_content_sha256)
   @receipt_fields ~w(id status operation_id rendered_sha256 rendered_bytes)
   @run_fields ~w(id status stop_reason release_decision)
-  @allow_listed_prefix "sdr.prototype."
-  @allow_listed ["sdr.audit.export"]
   @nil_uuid "00000000-0000-0000-0000-000000000000"
 
   # ------------------------------------------------------------------ ordinary fixtures
@@ -223,6 +224,12 @@ defmodule SdrAgent.Prototype.OutputTest do
 
   # ------------------------------------------------------------------ the Mix task allow-list
 
+  # Codex S4 RED ruling 6: a CLOSED allow-list of exact task names; no
+  # prefix grants anything to a future task.
+  @allow_listed ~w(sdr.prototype.setup sdr.prototype.provision sdr.prototype.import
+                   sdr.prototype.op sdr.prototype.serve sdr.audit.export)
+  @switch_vars ["SDR_PROTOTYPE", "SDR_PROTOTYPE_INSTANCE"]
+
   defp tasks do
     for path <- Path.wildcard("lib/mix/tasks/*.ex") do
       ast = path |> File.read!() |> Code.string_to_quoted!()
@@ -237,82 +244,139 @@ defmodule SdrAgent.Prototype.OutputTest do
 
   defp defmodule_name(node, acc), do: {node, acc}
 
-  defp allow_listed?(name),
-    do: String.starts_with?(name, @allow_listed_prefix) or name in @allow_listed
+  defp strip(ast), do: Macro.prewalk(ast, &Macro.update_meta(&1, fn _meta -> [] end))
 
-  # The first expression of `def run(_)` calls Output.task_refusal/1 with the task's own name.
-  defp guards_first?(ast, name) do
-    {_ast, found} =
-      Macro.prewalk(ast, :absent, fn
-        {:def, _, [{:run, _, [_arg]}, [do: body]]} = node, :absent -> {node, first_expr(body)}
-        node, acc -> {node, acc}
+  # The one terminal refusal: a fixed Mix.raise whenever the helper does not
+  # return :ok. A bare, ignored task_refusal/1 call does not refuse anything.
+  defp expected_guard(name) do
+    strip(
+      quote do
+        if SdrAgent.Prototype.Output.task_refusal(unquote(name)) != :ok,
+          do: Mix.raise("prototype runtime: task refused")
+      end
+    )
+  end
+
+  defp run_clauses(ast) do
+    {_ast, clauses} =
+      Macro.prewalk(ast, [], fn
+        {:def, _, [{:run, _, [_arg]}, [do: body]]} = node, acc ->
+          {node, [body | acc]}
+
+        {:def, _, [{:when, _, [{:run, _, [_arg]} | _]}, [do: body]]} = node, acc ->
+          {node, [body | acc]}
+
+        node, acc ->
+          {node, acc}
       end)
 
-    match?(
-      {{:., _, [{:__aliases__, _, alias_parts}, :task_refusal]}, _, [^name]}
-      when alias_parts in [[:SdrAgent, :Prototype, :Output], [:Output]],
-      refusal_call(found)
-    )
+    Enum.reverse(clauses)
   end
 
   defp first_expr({:__block__, _, [first | _]}), do: first
   defp first_expr(expr), do: expr
 
-  # `if Output.task_refusal(name) != :ok, do: Mix.raise(...)` or a bare call.
-  defp refusal_call({:if, _, [{:!=, _, [call, :ok]} | _]}), do: call
-  defp refusal_call({:case, _, [call | _]}), do: call
-  defp refusal_call(other), do: other
-
-  defp with_switch(fun) do
-    previous = {System.get_env("SDR_PROTOTYPE"), System.get_env("SDR_PROTOTYPE_INSTANCE")}
-    System.put_env("SDR_PROTOTYPE", "d237-prototype/1")
-    System.put_env("SDR_PROTOTYPE_INSTANCE", Ecto.UUID.generate())
+  # Runs `fun` with exactly `vars` of the switch set (the others unset), then
+  # restores the previous values.
+  defp with_env(vars, fun) do
+    previous = Map.new(@switch_vars, &{&1, System.get_env(&1)})
+    Enum.each(@switch_vars, &System.delete_env/1)
+    Enum.each(vars, fn {key, value} -> System.put_env(key, value) end)
 
     try do
       fun.()
     after
-      for {key, value} <-
-            Enum.zip(["SDR_PROTOTYPE", "SDR_PROTOTYPE_INSTANCE"], Tuple.to_list(previous)) do
-        if value, do: System.put_env(key, value), else: System.delete_env(key)
-      end
+      Enum.each(previous, fn
+        {key, nil} -> System.delete_env(key)
+        {key, value} -> System.put_env(key, value)
+      end)
     end
   end
 
-  test "every lib/mix/tasks task is allow-listed or refuses with the switch set, first" do
+  defp full_switch,
+    do: [{"SDR_PROTOTYPE", "d237-prototype/1"}, {"SDR_PROTOTYPE_INSTANCE", Ecto.UUID.generate()}]
+
+  test "every non-allow-listed task has one run/1 whose first statement is the terminal refusal" do
     all = tasks()
     assert Enum.any?(all, &(&1.name == "sdr.demo.seed"))
     assert Enum.any?(all, &(&1.name == "sdr.audit.export"))
 
-    with_switch(fn ->
-      for task <- all do
-        if allow_listed?(task.name) do
-          assert Output.task_refusal(task.name) == :ok, "#{task.name} is allow-listed but refused"
-        else
-          assert Output.task_refusal(task.name) == {:error, :prototype_task_refused},
-                 "#{task.name} is not refused with the prototype switch set"
+    for task <- all, task.name not in @allow_listed do
+      clauses = run_clauses(task.ast)
 
-          assert guards_first?(task.ast, task.name),
-                 "#{task.path}: run/1 does not refuse in prototype runtime as its first statement"
+      assert length(clauses) == 1,
+             "#{task.path}: run/1 must be a single clause, so the guard covers every entry"
 
-          assert_raise Mix.Error, ~r/\Aprototype runtime: task refused\z/, fn ->
-            Kernel.apply(Function.capture(task.module, :run, 1), [[]])
-          end
+      assert strip(first_expr(hd(clauses))) == expected_guard(task.name),
+             "#{task.path}: run/1 does not begin with the terminal prototype refusal"
+    end
+  end
+
+  test "the extracted guard alone, with the switch set, raises the fixed refusal; no task body runs" do
+    for task <- tasks(), task.name not in @allow_listed do
+      guard =
+        case run_clauses(task.ast) do
+          [body] -> first_expr(body)
+          _other -> nil
         end
+
+      # Only the exact expected guard is ever evaluated, never any other
+      # first statement, so a missing guard cannot reach real task work.
+      assert guard && strip(guard) == expected_guard(task.name),
+             "#{task.path}: no terminal guard to evaluate"
+
+      with_env(full_switch(), fn ->
+        assert_raise Mix.Error, ~r/\Aprototype runtime: task refused\z/, fn ->
+          Code.eval_quoted(guard)
+        end
+      end)
+
+      with_env([], fn -> assert {nil, _binding} = Code.eval_quoted(guard) end)
+    end
+  end
+
+  test "task_refusal: a closed allow-list of exact names; every other task is refused with the switch" do
+    with_env(full_switch(), fn ->
+      for name <- @allow_listed do
+        assert Output.task_refusal(name) == :ok, "#{name} is allow-listed but refused"
+      end
+
+      for name <- ~w(sdr.demo.seed sdr.audit.verify sdr.prototype.other sdr.prototype ecto.migrate
+                     phx.server) ++ [""] do
+        assert Output.task_refusal(name) == {:error, :prototype_task_refused},
+               "#{inspect(name)} was not refused with the switch set"
       end
     end)
   end
 
-  test "without the switch, in ordinary runtime, no task is refused" do
-    for task <- tasks() do
-      assert Output.task_refusal(task.name) == :ok, "#{task.name} refused in ordinary runtime"
+  test "task_refusal: a partial or malformed switch is a refusal, never ordinary permission" do
+    for vars <- [
+          [{"SDR_PROTOTYPE", "d237-prototype/1"}],
+          [{"SDR_PROTOTYPE_INSTANCE", Ecto.UUID.generate()}],
+          [{"SDR_PROTOTYPE", "garbage"}],
+          [{"SDR_PROTOTYPE", ""}],
+          [{"SDR_PROTOTYPE_INSTANCE", "not-a-uuid"}]
+        ] do
+      with_env(vars, fn ->
+        assert Output.task_refusal("sdr.demo.seed") == {:error, :prototype_task_refused},
+               "a partial switch (#{inspect(Enum.map(vars, &elem(&1, 0)))}) was ordinary permission"
+      end)
     end
+  end
+
+  test "without the switch, in ordinary runtime, no task is refused" do
+    with_env([], fn ->
+      for task <- tasks() do
+        assert Output.task_refusal(task.name) == :ok, "#{task.name} refused in ordinary runtime"
+      end
+    end)
   end
 
   # ------------------------------------------------------------------ prototype runtime: views
 
   defp bundle_dir!(context) do
-    dir = Path.join(System.tmp_dir!(), "d237-bundles-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(dir) end)
+    # Output creates the bundle directory inside a root this test owns.
+    dir = Path.join(exclusive_root!("d237-bundles"), "bundles")
     put_env!(SdrAgent.Prototype.Output, bundle_dir: dir)
     Map.put(context, :bundle_dir, dir)
   end

@@ -124,8 +124,51 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     :ok
   end
 
+  @doc """
+  Runs `fun` (an inline delivery drain) and returns the full inspection of
+  the exception it raised, or `:no_raise`. A refused capture fails closed on
+  the existing failure path (the worker raises); the caller asserts the
+  exact named refusal code inside it, never a crash alone.
+  """
+  def raised(fun) do
+    fun.()
+    :no_raise
+  rescue
+    error -> inspect(error, limit: :infinity, printable_limit: :infinity)
+  end
+
   @doc "Events of `type` in `tenant` (kernel read), oldest first."
   def events_of(tenant, type), do: SdrAgent.AuditCase.events_of_type(tenant, type)
+
+  @doc """
+  A private scratch root owned by the calling test: a directory created
+  exclusively (`File.mkdir/1`, mode 0700) under the system temp dir, named
+  `<prefix>-<128 random bits>`. An existing path is never adopted (the
+  test fails instead). On exit it removes only that exact directory, and
+  only while it is still a real directory; a path replaced by a symlink or
+  a file is left alone.
+  """
+  def exclusive_root!(prefix) do
+    name = "#{prefix}-#{Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)}"
+    path = Path.join(System.tmp_dir!(), name)
+
+    case File.mkdir(path) do
+      :ok -> :ok
+      {:error, reason} -> raise "scratch root #{prefix} was not created exclusively: #{reason}"
+    end
+
+    {:ok, %File.Stat{type: :directory}} = File.lstat(path)
+    File.chmod!(path, 0o700)
+    ExUnit.Callbacks.on_exit(fn -> remove_owned_root(path) end)
+    path
+  end
+
+  defp remove_owned_root(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} -> File.rm_rf!(path)
+      _gone_or_replaced -> :ok
+    end
+  end
 end
 
 defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do

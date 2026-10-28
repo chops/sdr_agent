@@ -46,15 +46,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
   @cli Path.expand("../../support/d237_journey_cli.exs", __DIR__)
   @label "UNVERIFIED (PROTOTYPE)"
 
-  defp scratch!(name) do
-    dir =
-      Path.join(System.tmp_dir!(), "d237-journey-#{name}-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(dir)
-    File.chmod!(dir, 0o700)
-    on_exit(fn -> File.rm_rf!(dir) end)
-    dir
-  end
+  defp scratch!(name), do: exclusive_root!("d237-journey-#{name}")
 
   defp private!(dir, name, bytes) do
     path = Path.join(dir, name)

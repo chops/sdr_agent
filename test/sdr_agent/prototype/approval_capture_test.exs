@@ -46,13 +46,6 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     block |> Jason.encode!() |> Jason.decode!()
   end
 
-  defp crashed?(fun) do
-    fun.()
-    false
-  rescue
-    _ -> true
-  end
-
   defp captured(ctx, delivery), do: Enum.filter(receipts!(ctx, delivery), &(&1.kind == :captured))
 
   defp captured_events(ctx) do
@@ -194,7 +187,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     delivery = delivery_of!(ctx, approval)
     enter!(fixture)
 
-    _ = crashed?(fn -> deliver!() end)
+    assert raised(fn -> deliver!() end) =~ "prototype_approval_not_delegated"
     assert captured(ctx, delivery) == []
     assert captured_events(ctx) == []
   end
@@ -208,7 +201,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
       :ok = PrototypeFixtures.put_live_identity(%{system_identifier: 1})
     end)
 
-    _ = crashed?(fn -> deliver!() end)
+    assert raised(fn -> deliver!() end) =~ "prototype_binding_mismatch"
     assert captured(ctx, delivery) == []
     assert captured_events(ctx) == []
   end
@@ -252,8 +245,8 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     {:ok, _key} =
       Audit.register_signing_key(%{key_id: "d237-export", public_key: public_key}, actor: kernel)
 
-    path = Path.join(System.tmp_dir!(), "d237-export-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
+    # The export file lives in a root this test created exclusively.
+    path = Path.join(exclusive_root!("d237-export"), "export.json")
 
     assert {:ok, _result} =
              Export.build(%{scope: :sequence_range, scope_ref: "1:latest"},
@@ -277,14 +270,16 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     us = fn at, n -> DateTime.add(at, n, :microsecond) end
 
     Clock.freeze(us.(window_start(), -1))
-    assert {:error, _} = operator_approve(ctx, ctx.draft)
+    assert {:error, error} = operator_approve(ctx, ctx.draft)
+    assert inspect(error) =~ "prototype_outside_window"
 
     Clock.freeze(window_start())
     assert {:ok, first} = operator_approve(ctx, ctx.draft)
     assert {:ok, _} = Outreach.revoke(first, actor: ctx.operator)
 
     Clock.freeze(window_end())
-    assert {:error, _} = operator_approve(ctx, ctx.draft)
+    assert {:error, error} = operator_approve(ctx, ctx.draft)
+    assert inspect(error) =~ "prototype_outside_window"
 
     Clock.freeze(us.(window_end(), -1))
     assert {:ok, last} = operator_approve(ctx, ctx.draft)
@@ -300,7 +295,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     delivery = delivery_of!(ctx, approval)
     capture_hook!(:before_capture, fn _op -> Clock.freeze(window_end()) end)
 
-    _ = crashed?(fn -> deliver!() end)
+    assert raised(fn -> deliver!() end) =~ "prototype_outside_window"
     assert captured(ctx, delivery) == []
   end
 

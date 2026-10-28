@@ -63,11 +63,8 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
   @sysid "7400000000000000001"
 
   setup do
-    base =
-      Path.join(System.tmp_dir!(), "d237-pg-test-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(base)
-    on_exit(fn -> File.rm_rf!(base) end)
+    # An exclusively created root this test owns; only it is removed on exit.
+    base = SdrAgent.PrototypeOutreachFixtures.exclusive_root!("d237-pg-test")
 
     ctx = %{
       base: base,

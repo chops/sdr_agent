@@ -30,9 +30,8 @@ defmodule SdrAgent.Prototype.ProdArtifactProofTest do
   @authority "Elixir.SdrAgent.Prototype.Authority"
 
   setup_all do
-    build = Path.join(System.tmp_dir!(), "d237-prod-proof-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(build)
-    on_exit(fn -> File.rm_rf!(build) end)
+    # An owned build path, created exclusively; only it is removed on exit.
+    build = SdrAgent.PrototypeOutreachFixtures.exclusive_root!("d237-prod-proof")
 
     env = [{"MIX_ENV", "prod"}, {"MIX_BUILD_PATH", build}]
 
