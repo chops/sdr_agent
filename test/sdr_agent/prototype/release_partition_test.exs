@@ -371,21 +371,21 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
         finalizer: finalizer
       }
 
-      SdrAgent.Agents.ReleaseDecision.Prelocked.run(bindings, fn prelocked ->
-        case Agents.decide_result_release(
-               %{
-                 model_invocation_id: ctx.invocation.id,
-                 disposition: :released_unverified,
-                 reason: :owner_prototype_unverified
-               },
-               actor: ctx.fx.agent,
-               prelocked: prelocked
-             ) do
-          {:ok, release} -> release
-          {:error, error} -> SdrAgent.Repo.rollback(error)
-        end
-      end)
+      SdrAgent.Agents.ReleaseDecision.Prelocked.run(bindings, &unverified_or_rollback(ctx, &1))
     end)
+  end
+
+  defp unverified_or_rollback(ctx, prelocked) do
+    attrs = %{
+      model_invocation_id: ctx.invocation.id,
+      disposition: :released_unverified,
+      reason: :owner_prototype_unverified
+    }
+
+    case Agents.decide_result_release(attrs, actor: ctx.fx.agent, prelocked: prelocked) do
+      {:ok, release} -> release
+      {:error, error} -> SdrAgent.Repo.rollback(error)
+    end
   end
 
   # The transaction rolled back with an Invalid error on `field` with `message`.
