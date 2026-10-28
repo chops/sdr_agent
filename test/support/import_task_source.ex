@@ -3,9 +3,10 @@ defmodule SdrAgent.ImportTaskSource do
   A pure, lexical source guard for `mix sdr.prototype.import`
   (`lib/mix/tasks/sdr.prototype.import.ex`; interfaces r6 IF-2 task row,
   IF-8 "Attached before any private input" and the prototype-code source
-  rule; supplement 1 r2 §5 "Callers"; Codex 8ff184e4). `violations/1`
-  parses a source text (never runs or compiles it) and returns the closed,
-  sorted list of rule violations; `[]` means the source passes every rule.
+  rule; supplement 1 r2 §5 "Callers"; Codex 8ff184e4; the I4 grammar r2
+  R-a1 rules, Codex d3048840). `violations/1` parses a source text (never
+  runs or compiles it) and returns the closed, sorted list of rule
+  violations; `[]` means the source passes every rule.
 
   Only the body of `defmodule Mix.Tasks.Sdr.Prototype.Import` is analysed,
   and only inside a supported grammar (Codex task-harness review R1):
@@ -17,9 +18,10 @@ defmodule SdrAgent.ImportTaskSource do
     `Module.create`, no `defmacro`/`defmacrop`, no `use` other than
     `use Mix.Task`, no `@before_compile`, `@after_compile`,
     `@after_verify`, `@on_definition` or `@on_load`, no `require` with
-    options (`require ..., as:` is an alias), and at most one `def run/1`
-    clause, a top-level statement of the module (none is the closed
-    `:no_run`, not a refusal);
+    options (`require ..., as:` is an alias), at most one `def run/1`
+    clause and at most one `defp body/1` clause, each a top-level statement
+    of the module (no `run/1` is the closed `:no_run` and no `body/1` fails
+    `:body_prologue`; neither is a refusal);
   - those definition, scope and code-generation forms are supported only in
     their literal local syntax: after alias resolution, no call to
     `Module.create`, to `Kernel.def`, `defp`, `defmacro`, `defmacrop`,
@@ -34,16 +36,17 @@ defmodule SdrAgent.ImportTaskSource do
     `@moduledoc`/`@shortdoc`, so none reinterprets an earlier call; each
     name is bound once (no rebinding), never to `Elixir` or to the root of
     a module the rules name (`IO`, `File`, `Logger`, `System`, `Mix`,
-    `Kernel`, `Function`, `Module`, `Application`, `Supervisor`, `Oban`,
-    `Ecto`, `SdrAgent`), and each target expands through the earlier
-    aliases in order.
+    `Kernel`, `Function`, `Module`, `Process`, `Application`, `Supervisor`,
+    `Oban`, `Ecto`, `SdrAgent`), and each target expands through the
+    earlier aliases in order.
 
   Outside that grammar the checker refuses: it returns exactly
   `[:unsupported_scope]` and analyses nothing else (so a helper-local
   alias, a nested module or a rebinding can neither hide a call nor supply
-  the task's `run/1`, `use` or `@moduledoc`). Inside it, `use Mix.Task`,
-  `@moduledoc` and `run/1` are found among the module's own top-level
-  statements only, and every call is resolved against those aliases.
+  the task's `run/1`, `body/1`, `use` or `@moduledoc`). Inside it,
+  `use Mix.Task`, `@moduledoc`, `run/1` and `body/1` are found among the
+  module's own top-level statements only, and every call is resolved
+  against those aliases.
 
   | Violation | Rule |
   |---|---|
@@ -52,34 +55,40 @@ defmodule SdrAgent.ImportTaskSource do
   | `:not_mix_task` | it has `use Mix.Task` |
   | `:no_moduledoc` | it has a non-empty `@moduledoc` |
   | `:no_run` | it defines `run/1` |
-  | `:attach_not_first` | the first statement of `run/1` is `SafeLog.attach/0` |
-  | `:outside_run` | `SafeLog.attach`, `Session.enter` and every `DossierParser.read` / `SpotcheckManifest.read` call sit lexically inside `run/1`, never in another function or at module level |
+  | `:run_shape` | `run/1` is exactly two statements, `var = SafeLog.attach(file: nil)` then `TaskBoundary.run(:import, var, fn -> body(arg) end)`, with `var` one variable and `arg` `run/1`'s own parameter (a variable), and that attach is the module's only `SafeLog.attach` call (with no `run/1`, there is no `SafeLog.attach` call at all) |
+  | `:outside_body` | `Session.enter` and every `DossierParser.read` / `SpotcheckManifest.read` call sit lexically inside the `defp body/1` clause, never in `run/1`, another function or at module level |
+  | `:body_prologue` | the first statement of `body/1` is exactly `Mix.Task.run("app.config", [])` and its second exactly `{:ok, <variable>} = Application.ensure_all_started(:opentelemetry)` |
   | `:enter_count` | `Session.enter` is called exactly once |
   | `:enter_arity` | it is called with exactly one argument |
   | `:read_before_enter` | every `DossierParser.read` and `SpotcheckManifest.read` call comes after it in source order |
-  | `:missing_reader` | `DossierParser.read/2`, `SpotcheckManifest.read/3`, `DossierImport.prepare/5`, `import/2` and `cap_used/1` are each called |
-  | `:start_call` | no `BootCheck.verify!/check`, `Prototype.enter_session`, `Application.ensure_all_started/ensure_started`, `Mix.Task.run`, `Repo.start_link`, `Oban.start_link`, `Supervisor.start_link` or `Ecto.Migrator.with_repo` (no double boot or start) |
+  | `:missing_reader` | each required call is made: `DossierParser.read/2`, `SpotcheckManifest.read/3`, `DossierImport.prepare/5`, `import/2` and `cap_used/1`, `ImportOutcome.reason/2` and `TaskBoundary.run/3` (the name is historical; it covers all seven required calls) |
+  | `:start_call` | no `BootCheck.verify!/check`, `Prototype.enter_session`, `Application.ensure_all_started/ensure_started`, `Mix.Task.run`, `Repo.start_link`, `Oban.start_link`, `Supervisor.start_link` or `Ecto.Migrator.with_repo` call (no double boot or start), except the two `:body_prologue` calls, each exempt only in its exact position and form: a second `app.config`, an argv, a reorder or an unmatched start is a violation, and there is no other startup allowance |
   | `:env_read` | the only environment read is one `System.get_env("SDR_PROTOTYPE_SESSION")` |
   | `:file_call` | no `File` or `:file` call |
-  | `:say_shape` | every `SafeLog.say` has exactly two arguments, the first a literal `:import_row` or `:import_summary`, and both codes occur |
+  | `:say_shape` | every `SafeLog.say` has exactly two arguments, the first a literal `:import_row`, `:import_summary` or `:import_refused`, and all three codes occur |
   | `:other_channel` | no `IO`, `Logger`, `:io`, `:logger`, `Mix.shell` or `SafeLog.event` call |
-  | `:raise_not_literal` | `Mix.raise/1` takes a literal string only |
-  | `:exit_not_literal` | `exit/1` takes a literal `{:shutdown, integer}` only |
+  | `:abnormal_exit` | no local `exit`, `raise`, `reraise` or `throw` form and no `Kernel.exit`, `Mix.raise`, `System.halt`, `System.stop`, `:erlang.halt`, `:init.stop` or `Process.exit` call, anywhere in the task module |
   | `:indirect_dispatch` | no `import`, `defdelegate`, `apply`, `Kernel.apply`, `:erlang.apply`, `Function.capture`, remote capture `&M.f/n`, or call on a variable module or an unexpandable alias (`__MODULE__.f()`): such dispatch is flagged, never analysed |
 
   **Honest scope.** This is a lexical, source-order guard over explicit
-  remote calls. It is not control flow or runtime dominance: it cannot show
-  that `attach/0` succeeded before a read, that the session entry precedes a
-  read on every path, that the environment value is the correlation it
-  passes, or that nothing is printed on a refusal. It does not follow calls
-  into other modules, and it checks only the rules in the table. Those
-  need runtime task tests once the sink and startup holds lift.
+  remote calls and a few literal forms. It is not control flow or runtime
+  dominance: it cannot show that the attach succeeded, that
+  `TaskBoundary.run/3` runs `body/1` or what it does with the result, that
+  the prologue starts succeed (a failed `{:ok, _} =` match still raises),
+  that the session entry precedes a read on every path, that the
+  environment value is the correlation it passes, what is printed on a
+  refusal, or how the task exits. A call counts where it is written, not
+  where it runs: a helper that `body/1` calls is outside `body/1`. It does
+  not follow calls into other modules (an exit or output inside a callee
+  is not seen), and it checks only the rules in the table. Those need
+  runtime task tests once the sink and startup holds lift.
   """
 
   @task [:Mix, :Tasks, :Sdr, :Prototype, :Import]
 
   @safe_log SdrAgent.Prototype.SafeLog
   @session SdrAgent.Prototype.Session
+  @task_boundary SdrAgent.Prototype.TaskBoundary
   @readers [
     {SdrAgent.Prototype.DossierParser, :read},
     {SdrAgent.Prototype.SpotcheckManifest, :read}
@@ -89,7 +98,9 @@ defmodule SdrAgent.ImportTaskSource do
     {SdrAgent.Prototype.SpotcheckManifest, :read, 3},
     {SdrAgent.Prototype.DossierImport, :prepare, 5},
     {SdrAgent.Prototype.DossierImport, :import, 2},
-    {SdrAgent.Prototype.DossierImport, :cap_used, 1}
+    {SdrAgent.Prototype.DossierImport, :cap_used, 1},
+    {SdrAgent.Prototype.ImportOutcome, :reason, 2},
+    {SdrAgent.Prototype.TaskBoundary, :run, 3}
   ]
   @starts [
     {SdrAgent.Prototype.BootCheck, :verify!},
@@ -104,8 +115,18 @@ defmodule SdrAgent.ImportTaskSource do
     {Ecto.Migrator, :with_repo}
   ]
   @env_funs [:get_env, :fetch_env, :fetch_env!]
-  @say_codes [:import_row, :import_summary]
+  @say_codes [:import_row, :import_summary, :import_refused]
   @channels [IO, Logger, :io, :logger]
+  @abnormal [
+    {Kernel, :exit},
+    {Mix, :raise},
+    {System, :halt},
+    {System, :stop},
+    {:erlang, :halt},
+    {:init, :stop},
+    {Process, :exit}
+  ]
+  @abnormal_forms [:exit, :raise, :reraise, :throw]
   @dispatch [{Kernel, :apply}, {:erlang, :apply}, {Function, :capture}]
   @injection [:before_compile, :after_compile, :after_verify, :on_definition, :on_load]
   @nested [:defmodule, :defprotocol, :defimpl, :defmacro, :defmacrop]
@@ -123,9 +144,10 @@ defmodule SdrAgent.ImportTaskSource do
   ]
 
   # The roots of every Elixir module the rules name: an alias may not bind
-  # one of these names (it would reinterpret a ruled call).
+  # one of these names (it would reinterpret a ruled call). `Process` is the
+  # root of `Process.exit` (`:abnormal_exit`).
   @protected for module <-
-                   [@safe_log, @session, IO, Logger, File, System, Mix, Module] ++
+                   [@safe_log, @session, IO, Logger, File, System, Mix, Module, Process] ++
                      Enum.map(@readers ++ @required ++ @starts ++ @dispatch, &elem(&1, 0)),
                  match?("Elixir." <> _, Atom.to_string(module)),
                  uniq: true,
@@ -148,25 +170,26 @@ defmodule SdrAgent.ImportTaskSource do
   end
 
   defp module_violations(body, statements, aliases, calls) do
-    run = run_body(statements)
-    run_calls = if run, do: calls(run, aliases), else: []
+    run = run_clause(statements)
+    block = body_block(statements)
+    prologue = prologue(block, aliases)
 
     [
       unless(Enum.any?(statements, &use_mix_task?/1), do: :not_mix_task),
       unless(Enum.any?(statements, &moduledoc?/1), do: :no_moduledoc),
       unless(run, do: :no_run),
-      run && attach_not_first(run, aliases),
-      outside_run(calls -- run_calls),
+      run_shape(run, aliases, calls),
+      outside_body(calls -- calls(block, aliases)),
+      if(length(prologue) != 2, do: :body_prologue),
       enter(calls),
       read_before_enter(calls),
       missing_reader(calls),
-      if(Enum.any?(calls, &start?(&1)), do: :start_call),
+      if(Enum.any?(calls -- Enum.concat(prologue), &start?/1), do: :start_call),
       env_read(calls),
       if(Enum.any?(calls, fn {m, _, _, _} -> m in [File, :file] end), do: :file_call),
       say_shape(calls),
       if(Enum.any?(calls, &channel?/1), do: :other_channel),
-      raise_literal(calls),
-      exit_literal(body),
+      abnormal_exit(body, calls),
       indirect(body, calls)
     ]
     |> List.flatten()
@@ -210,16 +233,21 @@ defmodule SdrAgent.ImportTaskSource do
   end
 
   # No scope the checker cannot attribute: nested modules, macros, code
-  # injection, local aliases, or a run/1 that is not one top-level clause.
+  # injection, local aliases, or a run/1 or body/1 that is not one top-level
+  # clause.
   defp supported(body, statements) do
     top_aliases = Enum.count(statements, &alias?/1)
 
     if count(body, &unsupported?/1) == 0 and count(body, &alias?/1) == top_aliases and
-         count(body, &run_def?/1) <= 1 and
-         count(body, &run_def?/1) == Enum.count(statements, &run_def?/1),
+         at_most_one_top_level?(body, statements, &run_def?/1) and
+         at_most_one_top_level?(body, statements, &body_def?/1),
        do: :ok,
        else: :unsupported
   end
+
+  # At most one such clause in the module, and that one a top-level statement.
+  defp at_most_one_top_level?(body, statements, clause),
+    do: count(body, clause) <= 1 and count(body, clause) == Enum.count(statements, clause)
 
   defp unsupported?({form, _, args}) when form in @nested and is_list(args), do: true
   defp unsupported?({:use, _, [{:__aliases__, _, [:Mix, :Task]}]}), do: false
@@ -247,6 +275,10 @@ defmodule SdrAgent.ImportTaskSource do
   defp run_def?({:def, _, [{:when, _, [{:run, _, [_arg]}, _guard]} | _]}), do: true
   defp run_def?({:def, _, [{:run, _, [_arg]} | _]}), do: true
   defp run_def?(_node), do: false
+
+  defp body_def?({:defp, _, [{:when, _, [{:body, _, [_arg]}, _guard]} | _]}), do: true
+  defp body_def?({:defp, _, [{:body, _, [_arg]} | _]}), do: true
+  defp body_def?(_node), do: false
 
   # The module's aliases, in order: all in the leading prefix, each name
   # bound once and never to a protected root, each target expanded through
@@ -364,11 +396,21 @@ defmodule SdrAgent.ImportTaskSource do
 
   defp call(_node, _aliases, acc), do: acc
 
-  # The body of the module's one top-level `def run/1` clause, or nil.
-  defp run_body(statements) do
+  # The parameter and block of the module's one top-level `def run/1`
+  # clause, or nil.
+  defp run_clause(statements) do
     Enum.find_value(statements, fn
-      {:def, _, [{:run, _, [_args]}, [do: run]]} -> run
-      {:def, _, [{:when, _, [{:run, _, [_args]}, _guard]}, [do: run]]} -> run
+      {:def, _, [{:run, _, [param]}, [do: block]]} -> {param, block}
+      {:def, _, [{:when, _, [{:run, _, [param]}, _guard]}, [do: block]]} -> {param, block}
+      _other -> nil
+    end)
+  end
+
+  # The block of the module's one top-level `defp body/1` clause, or nil.
+  defp body_block(statements) do
+    Enum.find_value(statements, fn
+      {:defp, _, [{:body, _, [_param]}, [do: block]]} -> block
+      {:defp, _, [{:when, _, [{:body, _, [_param]}, _guard]}, [do: block]]} -> block
       _other -> nil
     end)
   end
@@ -381,24 +423,78 @@ defmodule SdrAgent.ImportTaskSource do
 
   defp moduledoc?(_node), do: false
 
+  defp variable?({name, _, context}), do: is_atom(name) and is_atom(context)
+  defp variable?(_node), do: false
+
+  defp same_variable?({name, _, context} = left, {name, _, context}), do: variable?(left)
+  defp same_variable?(_left, _right), do: false
+
   ## The rules
 
-  defp attach_not_first(run, aliases) do
-    first =
-      case run do
-        {:__block__, _, [first | _]} -> first
-        single -> single
-      end
+  defp run_shape(nil, _aliases, calls), do: if(Enum.any?(calls, &attach_call?/1), do: :run_shape)
 
-    unless match?([{@safe_log, :attach, [], _}], calls(first, aliases)), do: :attach_not_first
+  defp run_shape({param, block}, aliases, calls) do
+    shaped = run_shaped?(param, block, aliases) and Enum.count(calls, &attach_call?/1) == 1
+    unless shaped, do: :run_shape
   end
 
-  defp outside_run(outside) do
+  defp attach_call?({module, fun, _args, _line}), do: {module, fun} == {@safe_log, :attach}
+
+  # `var = SafeLog.attach(file: nil)` then
+  # `TaskBoundary.run(:import, var, fn -> body(param) end)`, nothing else.
+  defp run_shaped?(param, {:__block__, _, [{:=, _, [var, attach]}, boundary]}, aliases),
+    do: attach?(attach, aliases) and boundary?(boundary, var, param, aliases)
+
+  defp run_shaped?(_param, _block, _aliases), do: false
+
+  defp attach?({{:., _, [target, :attach]}, _, [[file: nil]]}, aliases),
+    do: resolve(target, aliases) == @safe_log
+
+  defp attach?(_call, _aliases), do: false
+
+  defp boundary?({{:., _, [target, :run]}, _, [:import, value, task]}, var, param, aliases) do
+    resolve(target, aliases) == @task_boundary and same_variable?(value, var) and
+      calls_body?(task, param)
+  end
+
+  defp boundary?(_call, _var, _param, _aliases), do: false
+
+  defp calls_body?({:fn, _, [{:->, _, [[], {:body, _, [arg]}]}]}, param),
+    do: same_variable?(arg, param)
+
+  defp calls_body?(_task, _param), do: false
+
+  defp outside_body(outside) do
     if Enum.any?(outside, fn {module, fun, _args, _line} ->
-         {module, fun} in [{@safe_log, :attach}, {@session, :enter} | @readers]
+         {module, fun} in [{@session, :enter} | @readers]
        end),
-       do: :outside_run
+       do: :outside_body
   end
+
+  # The exact prologue statements of `body/1`, each as its calls: the first
+  # only if it is `Mix.Task.run("app.config", [])`, the second only if it is
+  # `{:ok, <variable>} = Application.ensure_all_started(:opentelemetry)`.
+  # These calls, and no others, are exempt from `:start_call`.
+  defp prologue(block, aliases) do
+    for {check, statement} <- Enum.zip([&app_config?/2, &otel_started?/2], statements(block)),
+        check.(statement, aliases),
+        do: calls(statement, aliases)
+  end
+
+  defp app_config?({{:., _, [target, :run]}, _, ["app.config", []]}, aliases),
+    do: resolve(target, aliases) == Mix.Task
+
+  defp app_config?(_statement, _aliases), do: false
+
+  defp otel_started?({:=, _, [{:ok, result}, start]}, aliases),
+    do: variable?(result) and otel_start?(start, aliases)
+
+  defp otel_started?(_statement, _aliases), do: false
+
+  defp otel_start?({{:., _, [target, :ensure_all_started]}, _, [:opentelemetry]}, aliases),
+    do: resolve(target, aliases) == Application
+
+  defp otel_start?(_call, _aliases), do: false
 
   defp enter(calls) do
     enters = for {@session, :enter, args, _line} <- calls, do: args
@@ -460,25 +556,15 @@ defmodule SdrAgent.ImportTaskSource do
   defp channel?({module, fun, _args, _line}),
     do: module in @channels or {module, fun} in [{Mix, :shell}, {@safe_log, :event}]
 
-  defp raise_literal(calls) do
-    if Enum.any?(calls, fn
-         {Mix, :raise, [message], _line} -> not is_binary(message)
-         {Mix, :raise, _args, _line} -> true
-         _other -> false
-       end),
-       do: :raise_not_literal
+  defp abnormal_exit(body, calls) do
+    abnormal = count(body, &abnormal_form?/1) > 0 or Enum.any?(calls, &abnormal_call?/1)
+    if abnormal, do: :abnormal_exit
   end
 
-  defp exit_literal(body) do
-    {_ast, bad} =
-      Macro.prewalk(body, false, fn
-        {:exit, _, [{:shutdown, code}]} = node, acc when is_integer(code) -> {node, acc}
-        {:exit, _, args} = node, _acc when is_list(args) -> {node, true}
-        node, acc -> {node, acc}
-      end)
+  defp abnormal_form?({form, _, args}) when form in @abnormal_forms and is_list(args), do: true
+  defp abnormal_form?(_node), do: false
 
-    if bad, do: :exit_not_literal
-  end
+  defp abnormal_call?({module, fun, _args, _line}), do: {module, fun} in @abnormal
 
   defp indirect(body, calls) do
     {_ast, flagged} =
