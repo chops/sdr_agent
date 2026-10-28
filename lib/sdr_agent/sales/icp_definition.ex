@@ -15,6 +15,15 @@ defmodule SdrAgent.Sales.IcpDefinition do
   Actors: ADM create, update, new_version, activate, retire; SEED (dev/test
   only) `:seed` and `:activate`; ADM, REV, AUR, AGT, AUD read. Every write
   appends an AuditEvent (`sales.icp_definition.*`).
+
+  OPR `:seed_prototype` (D-237 seed, slice B; seed design D4 and D6 as
+  ruled by Codex b8d624fe): the live prototype operator's version-1 draft
+  ICP of the GTM seed. It accepts only `name`, `description` and `criteria`,
+  derives the tenant, trace ids and `criteria_sha256` as `:create` does, and
+  requires `seed_provenance_sha256` (exactly 64 lowercase hex characters,
+  never trimmed or coerced), which its one `sales.icp_definition.created`
+  event records as an argument. Policy: `OperatorAction(:seed_settings)`
+  only (the live operator of the exact binding).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -71,6 +80,26 @@ defmodule SdrAgent.Sales.IcpDefinition do
       change Changes.CriteriaHash
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.icp_definition.created", category: :domain_change}
+    end
+
+    # D-237 slice B (seed design D4, D6; Codex b8d624fe): the operator's
+    # version-1 draft ICP, with the seed's provenance digest on its event.
+    create :seed_prototype do
+      description "OPR (D-237): the GTM seed's version-1 draft ICP, with its provenance digest."
+      accept [:name, :description, :criteria]
+
+      argument :seed_provenance_sha256, :string,
+        allow_nil?: false,
+        constraints: [match: ~r/\A[0-9a-f]{64}\z/, trim?: false]
+
+      change SdrAgent.Audit.Changes.SetTenant
+      change Changes.CriteriaHash
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {AppendEvent,
+              event_type: "sales.icp_definition.created",
+              category: :domain_change,
+              arguments: [:seed_provenance_sha256]}
     end
 
     create :new_version do
@@ -140,6 +169,12 @@ defmodule SdrAgent.Sales.IcpDefinition do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    # D-237 slice B: the live prototype operator only (its own line; the
+    # broad create policy above authorizes always, so this one decides).
+    policy action(:seed_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :seed_settings}
     end
 
     policy action_type(:read) do

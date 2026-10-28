@@ -21,6 +21,15 @@ defmodule SdrAgent.Sales do
     * seeding (SEED, dev/test only) — `seed_icp_definition/2`,
       `seed_account/2`, `seed_contact/2`, `seed_sequence/2`,
       `seed_sequence_step/2`, `seed_campaign/2`, `seed_lead/2`;
+    * D-237 prototype import (OPR, prototype runtime only) —
+      `import_prototype_account/2`, `import_prototype_contact/2`,
+      `import_prototype_lead/2` (one operator gate: a refused well-formed
+      actor of an initialized tenant chain is audited once, malformed or
+      unknown-tenant input is a plain refusal; see the functions). Sales
+      never calls Research: the import is coordinated above both domains by the
+      prototype dossier import; in prototype runtime imported
+      domains and addresses are real (`SdrAgent.Sales.Validations.DatasetDomain`),
+      everywhere else the synthetic guard holds;
     * `advance_enrollment/3` (DLV, REC, SCH) — the S8 step advancement;
     * `update/4` — any update or lifecycle action of a Sales record (e.g.
       `update(lead, :start_research, %{decision_id: id}, actor: agt)`); each
@@ -31,6 +40,7 @@ defmodule SdrAgent.Sales do
   use Ash.Domain,
     otp_app: :sdr_agent
 
+  alias SdrAgent.Audit.Guard
   alias SdrAgent.Audit.GuardedCall
   alias SdrAgent.Sales.Account
   alias SdrAgent.Sales.Campaign
@@ -40,6 +50,8 @@ defmodule SdrAgent.Sales do
   alias SdrAgent.Sales.Lead
   alias SdrAgent.Sales.Sequence
   alias SdrAgent.Sales.SequenceStep
+
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   resources do
     resource SdrAgent.Sales.IcpDefinition
@@ -103,6 +115,58 @@ defmodule SdrAgent.Sales do
 
   @doc "SEED: creates a new lead with a fixture `id`."
   def seed_lead(attrs, opts), do: GuardedCall.create(Lead, :seed, attrs, opts)
+
+  @doc """
+  OPR (D-237 prototype runtime): creates the account of one imported dossier
+  row (`name`, `domain`, `website_url`; `source: :dossier`). Called only by the
+  above-domain prototype dossier import, inside its row transaction.
+
+  The three prototype imports share one gate (Codex e59b2e10): only a caller
+  the operator check admits (`SdrAgent.Prototype.Checks.OperatorAction`,
+  `:import_dossier`, the live resolver on every call) reaches the guarded
+  action and its policies, so a later policy denial is audited too. Every
+  other caller is refused before any changeset through
+  `SdrAgent.Audit.Guard.refuse/2`: a well-formed actor of an initialized
+  tenant chain is audited exactly once; a malformed actor envelope or an
+  unknown or malformed tenant is a plain `Forbidden`, with no append and no
+  raise. The refusal never permits anything.
+  """
+  def import_prototype_account(attrs, opts), do: import_prototype(Account, attrs, opts)
+
+  @doc "OPR (D-237 prototype runtime): creates the person contact of one imported dossier row."
+  def import_prototype_contact(attrs, opts), do: import_prototype(Contact, attrs, opts)
+
+  @doc "OPR (D-237 prototype runtime): creates the new lead of one imported dossier row."
+  def import_prototype_lead(attrs, opts), do: import_prototype(Lead, attrs, opts)
+
+  if @prototype_compiled do
+    # Aliased inside the compiled branch only: the production branch never
+    # names the operator check (no unused alias under --warnings-as-errors).
+    alias SdrAgent.Prototype.Checks.OperatorAction
+
+    defp import_prototype(resource, attrs, opts) do
+      if OperatorAction.match?(Keyword.get(opts, :actor), nil, action: :import_dossier),
+        do:
+          GuardedCall.create(
+            resource,
+            :import_prototype,
+            attrs,
+            Keyword.put(opts, :guarded?, true)
+          ),
+        else: refuse_import(resource, opts)
+    end
+  else
+    # No prototype authority in this build: every import is refused before
+    # any changeset.
+    defp import_prototype(resource, _attrs, opts), do: refuse_import(resource, opts)
+  end
+
+  # The pre-decided refusal of the import gate; no input attribute reaches
+  # the audit record.
+  defp refuse_import(resource, opts) do
+    meta = %{resource: resource, action: :import_prototype, guarded?: true, subject_id: nil}
+    Guard.refuse(meta, Keyword.get(opts, :actor))
+  end
 
   @doc "AGT: enrolls a qualified lead in an active campaign (`campaign_id`, `lead_id`)."
   def enroll_lead(attrs, opts), do: GuardedCall.create(CampaignEnrollment, :enroll, attrs, opts)

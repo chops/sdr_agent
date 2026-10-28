@@ -14,6 +14,18 @@ defmodule SdrAgent.Sales.SequenceStep do
 
   Actors: ADM add, update; SEED (dev/test only) `:seed`; ADM, REV, AUR, AGT,
   AUD read. Every write appends an AuditEvent (`sales.sequence_step.*`).
+
+  OPR `:seed_prototype` (D-237 seed, slice B; seed design D4-D6 as ruled by
+  Codex b8d624fe): the live prototype operator's one fixed step of the GTM
+  seed's sequence. It accepts only `sequence_id` and `instructions` and
+  forces position 1, channel `:email`, no delay, approval required and stop
+  on reply. Its sequence must be a row of the new step's own tenant
+  (`SdrAgent.Sales.Validations.ImportTenant`, before the action and before
+  the unchanged draft-parent lock), and the parent must still be draft. It
+  requires `seed_provenance_sha256` (exactly 64 lowercase hex characters,
+  never trimmed or coerced), which its one `sales.sequence_step.created`
+  event records as an argument. Policy: `OperatorAction(:seed_settings)`
+  only.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -79,6 +91,38 @@ defmodule SdrAgent.Sales.SequenceStep do
       change {AppendEvent, event_type: "sales.sequence_step.created", category: :domain_change}
     end
 
+    # D-237 slice B (seed design D4-D6; Codex b8d624fe): the operator's one
+    # fixed step. The tenant-bound reference read runs before the draft-parent
+    # lock, so a foreign or nonexistent sequence is refused before any other
+    # row is locked.
+    create :seed_prototype do
+      description "OPR (D-237): the GTM seed's one fixed step of a same-tenant draft sequence."
+      accept [:sequence_id, :instructions]
+
+      argument :seed_provenance_sha256, :string,
+        allow_nil?: false,
+        constraints: [match: ~r/\A[0-9a-f]{64}\z/, trim?: false]
+
+      change set_attribute(:position, 1)
+      change set_attribute(:channel, :email)
+      change set_attribute(:delay_days, 0)
+      change set_attribute(:requires_approval, true)
+      change set_attribute(:stop_on_reply, true)
+
+      validate {SdrAgent.Sales.Validations.ImportTenant,
+                refs: [sequence_id: SdrAgent.Sales.Sequence]},
+               before_action?: true
+
+      change @draft_parent
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {AppendEvent,
+              event_type: "sales.sequence_step.created",
+              category: :domain_change,
+              arguments: [:seed_provenance_sha256]}
+    end
+
     update :update do
       description "ADM: edit a step of a draft sequence."
       require_atomic? false
@@ -101,6 +145,12 @@ defmodule SdrAgent.Sales.SequenceStep do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    # D-237 slice B: the live prototype operator only (its own line; the
+    # broad create policy above authorizes always, so this one decides).
+    policy action(:seed_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :seed_settings}
     end
 
     policy action_type(:read) do

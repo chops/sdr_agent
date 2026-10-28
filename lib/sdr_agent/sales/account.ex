@@ -72,6 +72,22 @@ defmodule SdrAgent.Sales.Account do
       change {AppendEvent, event_type: "sales.account.created", category: :domain_change}
     end
 
+    create :import_prototype do
+      description """
+      OPR (D-237 prototype runtime, from the above-domain dossier import):
+      create the account of one imported dossier row, `source: :dossier`.
+      Size, industry and geography are not accepted: they stay nil.
+      """
+
+      accept [:name, :domain, :website_url]
+      change set_attribute(:source, :dossier)
+      change Changes.NormalizeDomain
+      validate {Validations.DatasetDomain, attribute: :domain, kind: :domain}
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {AppendEvent, event_type: "sales.account.created", category: :domain_change}
+    end
+
     create :seed do
       description "SEED (dev/test only): create an account with a fixture id."
       accept [:id, :source | @editable]
@@ -112,6 +128,10 @@ defmodule SdrAgent.Sales.Account do
 
     policy action([:create, :update, :archive]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:import_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :import_dossier}
     end
 
     policy action(:seed) do

@@ -20,6 +20,19 @@ defmodule SdrAgent.Sales.Campaign do
   resume (pausing is safety-increasing); SEED (dev/test only) `:seed` and
   `:activate`; ADM, REV, AUR, AGT, AUD read. Every write appends an
   AuditEvent (`sales.campaign.*`).
+
+  OPR `:seed_prototype` (D-237 seed, slice B; seed design D4-D6 as ruled by
+  Codex b8d624fe): the live prototype operator's tier-0 draft campaign of
+  the GTM seed. It accepts only `name`, `icp_definition_id`, `sequence_id`,
+  `sender_name`, `sender_email` and `footer_template_version`; the status,
+  tier, timezone and quiet hours keep the resource defaults. The unchanged
+  reserved-sender and timezone guards apply, and BOTH references (the ICP,
+  then the sequence, which this action requires) must be rows of the new
+  campaign's own tenant (`SdrAgent.Sales.Validations.ImportTenant`, before
+  the action). It requires `seed_provenance_sha256` (exactly 64 lowercase
+  hex characters, never trimmed or coerced), which its one
+  `sales.campaign.created` event records as an argument. Policy:
+  `OperatorAction(:seed_settings)` only.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -100,6 +113,44 @@ defmodule SdrAgent.Sales.Campaign do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.campaign.created", category: :domain_change}
+    end
+
+    # D-237 slice B (seed design D4-D6; Codex b8d624fe): the operator's
+    # tier-0 draft campaign, with the unchanged sender guard (Codex 683a74e6)
+    # and both references bound to the new row's tenant.
+    create :seed_prototype do
+      description "OPR (D-237): the GTM seed's tier-0 draft campaign, with its provenance digest."
+
+      accept [
+        :name,
+        :icp_definition_id,
+        :sequence_id,
+        :sender_name,
+        :sender_email,
+        :footer_template_version
+      ]
+
+      argument :seed_provenance_sha256, :string,
+        allow_nil?: false,
+        constraints: [match: ~r/\A[0-9a-f]{64}\z/, trim?: false]
+
+      validate {Validations.Reserved, attribute: :sender_email, kind: :email}
+      validate {Validations.Timezone, attribute: :timezone}
+
+      validate {Validations.ImportTenant,
+                refs: [
+                  icp_definition_id: SdrAgent.Sales.IcpDefinition,
+                  sequence_id: SdrAgent.Sales.Sequence
+                ]},
+               before_action?: true
+
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {AppendEvent,
+              event_type: "sales.campaign.created",
+              category: :domain_change,
+              arguments: [:seed_provenance_sha256]}
     end
 
     update :update do
@@ -203,6 +254,12 @@ defmodule SdrAgent.Sales.Campaign do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    # D-237 slice B: the live prototype operator only (its own line; the
+    # broad create policy above authorizes always, so this one decides).
+    policy action(:seed_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :seed_settings}
     end
 
     policy action_type(:read) do

@@ -35,6 +35,20 @@ defmodule SdrAgent.Agents.SettingsRevision do
   Reads of rows and of the content and note: admin, reviewer (read-only,
   OQ-6), auditor (audited by the views), `agent_runtime`, `auditor_cli`,
   kernel, each in its own tenant.
+
+  Action `:seed_prototype` (D-237, S3; supplement 1 r2 §4, Codex b8d624fe
+  D1(a), 969bf261): the prototype operator's revision 1 of the GTM seed's
+  offering profile or writing guide. Inputs `kind` (those two only),
+  `content` and `note`. The content passes exactly the same
+  `SettingsRevisionChain` as `:create_revision` (expected number forced to
+  0, so number 1 only); the creator is the binding's anchor
+  (`SdrAgent.Prototype.Changes.SeedAnchor`); the note is the closed
+  provenance reference to a Payload of the tenant
+  (`SdrAgent.Prototype.Changes.SeedNote`). Writes: only
+  `SdrAgent.Prototype.Checks.OperatorAction` `:seed_settings` (the live
+  prototype operator; refused in ordinary runtime and in production). The
+  event actor is the delegation. No settings read is granted.
+  O1
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -178,10 +192,57 @@ defmodule SdrAgent.Agents.SettingsRevision do
               category: :domain_change,
               arguments: [:expected_number]}
     end
+
+    # D-237 S3 (Codex b8d624fe D1(a), 969bf261): the operator's revision 1 of
+    # the seed profile or guide. SeedNote is declared before the shared chain
+    # (it takes and clears the note argument); the chain itself is unchanged.
+    create :seed_prototype do
+      description """
+      OPR (D-237 prototype runtime): revision 1 of the GTM seed's offering
+      profile or writing guide, with the anchor as creator and the closed
+      provenance reference as note.
+      """
+
+      accept [:kind]
+      argument :content, :term, allow_nil?: false, sensitive?: true
+      argument :note, :term, allow_nil?: false, sensitive?: true
+
+      # Number 1 only: never a public input; a private value other than its
+      # default 0 is refused by the constraints.
+      argument :expected_number, :integer,
+        public?: false,
+        allow_nil?: false,
+        default: 0,
+        constraints: [min: 0, max: 0]
+
+      validate one_of(:kind, [:offering_profile, :writing_guide])
+
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change SdrAgent.Prototype.Changes.SeedAnchor
+      change SdrAgent.Prototype.Changes.SeedNote
+      change SdrAgent.Agents.Changes.SettingsRevisionChain
+
+      change {AppendEvent,
+              event_type: "settings.revision.created",
+              category: :domain_change,
+              arguments: [:expected_number]}
+    end
   end
 
   policies do
-    policy action_type([:create, :update, :destroy, :action]) do
+    # D-237 (R4, Codex 969bf261): the seed revision is the live prototype
+    # operator's only. The admin rule below no longer names :seed_prototype;
+    # it keeps every other create, update, destroy and generic action.
+    policy action(:seed_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :seed_settings}
+    end
+
+    policy action(:create_revision) do
+      authorize_if CurrentAdmin
+    end
+
+    policy action_type([:update, :destroy, :action]) do
       authorize_if CurrentAdmin
     end
 
