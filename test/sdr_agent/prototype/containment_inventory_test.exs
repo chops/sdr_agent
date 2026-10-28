@@ -47,7 +47,8 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
     "owl/lib/owl/live_screen.ex" => {1, :dev_tool},
     "phoenix/lib/phoenix/logger.ex" => {1, :app_start},
     "phoenix_live_dashboard/lib/phoenix/live_dashboard/application.ex" => {1, :app_start},
-    "phoenix_live_dashboard/lib/phoenix/live_dashboard/telemetry_listener.ex" => {1, :user_invoked},
+    "phoenix_live_dashboard/lib/phoenix/live_dashboard/telemetry_listener.ex" =>
+      {1, :user_invoked},
     "phoenix_live_reload/lib/phoenix_live_reload/web_console_logger.ex" => {1, :user_invoked},
     "phoenix_live_view/lib/phoenix_live_view/logger.ex" => {1, :app_start},
     "req/lib/req/test.ex" => {1, :test_only},
@@ -103,5 +104,6 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
            "lib calls a user-invoked dependency attacher outside the reviewed exceptions"
   end
 
-  defp count(path, pattern), do: path |> File.read!() |> then(&Regex.scan(pattern, &1)) |> length()
+  defp count(path, pattern),
+    do: path |> File.read!() |> then(&Regex.scan(pattern, &1)) |> length()
 end

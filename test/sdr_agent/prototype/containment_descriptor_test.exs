@@ -97,7 +97,8 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
 
     rows = [
       {%{@tracer | sampler: {:otel_sampler_always_on, "AlwaysOnSampler", []}}, :tracer_sampler},
-      {%{@tracer | on_end: %{@on_end | env: [[{:otel_batch_processor, %{}}]]}}, :tracer_processor},
+      {%{@tracer | on_end: %{@on_end | env: [[{:otel_batch_processor, %{}}]]}},
+       :tracer_processor},
       {%{@tracer | on_start: %{@on_start | env: [[{:otel_simple_processor, %{}}]]}},
        :tracer_processor},
       {%{@tracer | on_start: %{@on_start | name: :"-on_start/1-fun-1-"}}, :tracer_processor},
@@ -123,10 +124,15 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
            }) == {:ok, @query_log},
            "a pinned external handler was not projected"
 
-    base = %{id: "x.test.h", event_name: [:x, :test], function: &SdrAgent.Repo.QueryLog.handle_event/4}
+    base = %{
+      id: "x.test.h",
+      event_name: [:x, :test],
+      function: &SdrAgent.Repo.QueryLog.handle_event/4
+    }
 
     rows = [
-      {Map.merge(base, %{function: fn _e, _m, _md, _c -> :ok end, config: nil}), :handler_closure},
+      {Map.merge(base, %{function: fn _e, _m, _md, _c -> :ok end, config: nil}),
+       :handler_closure},
       {Map.put(base, :config, %{owner: self()}), :descriptor_unknown},
       {Map.put(base, :config, String.duplicate("a", 257)), :descriptor_unbounded},
       {Map.merge(base, %{function: &OpentelemetryOban.JobHandler.handle_job_start/4, config: %{}}),
@@ -269,14 +275,20 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
       {%{@descriptor | tracers: noop, distributed: true}, :tracer_noop},
       {%{@descriptor | tracers: [{:other, @tracer}]}, :tracer_provider},
       {put_in(@descriptor, [:sdk_tree, :processors], 1), :sdk_tree},
-      {%{@descriptor | tree: %{children: [SdrAgentWeb.Endpoint | @descriptor.tree.children], endpoint: true}},
-       :endpoint_present},
+      {%{
+         @descriptor
+         | tree: %{children: [SdrAgentWeb.Endpoint | @descriptor.tree.children], endpoint: true}
+       }, :endpoint_present},
       {put_in(@descriptor, [:tree, :children], [DNSCluster | @descriptor.tree.children]), :tree},
       {%{@descriptor | applications: [:phoenix_live_reload | @descriptor.applications]},
        :applications},
       {%{@descriptor | handlers: [put_elem(@query_log, 3, %{changed: true})]}, :handlers},
-      {%{@descriptor | handlers: [put_elem(@query_log, 2, {OpentelemetryOban.JobHandler, :handle_job_start, 4})]},
-       :handler_forbidden},
+      {%{
+         @descriptor
+         | handlers: [
+             put_elem(@query_log, 2, {OpentelemetryOban.JobHandler, :handle_job_start, 4})
+           ]
+       }, :handler_forbidden},
       {update_in(@descriptor, [:logger, :filters], &Enum.reverse/1), :logger_filters},
       {put_in(@descriptor, [:logger, :handlers], [%{@std_projection | destination: :file}]),
        :logger_handlers},
@@ -302,12 +314,24 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
   end
 
   test "evaluate: the precheck checks predicates, not equality with the pinned set" do
-    extra = %{@descriptor | handlers: [{"x.test.extra", [:x, :test], {SdrAgent.Repo.QueryLog, :handle_event, 4}, nil} | @descriptor.handlers]}
+    extra = %{
+      @descriptor
+      | handlers: [
+          {"x.test.extra", [:x, :test], {SdrAgent.Repo.QueryLog, :handle_event, 4}, nil}
+          | @descriptor.handlers
+        ]
+    }
 
     assert Containment.evaluate(:precheck, :serve, extra, @pinned) == :ok,
            "the precheck required equality with the pinned set"
 
-    forbidden = %{@descriptor | handlers: [{"x.test.otel", [:oban, :job, :start], {OpentelemetryOban.JobHandler, :handle_job_start, 4}, %{}}]}
+    forbidden = %{
+      @descriptor
+      | handlers: [
+          {"x.test.otel", [:oban, :job, :start],
+           {OpentelemetryOban.JobHandler, :handle_job_start, 4}, %{}}
+        ]
+    }
 
     assert Containment.evaluate(:precheck, :serve, forbidden, @pinned) ==
              {:error, :handler_forbidden},
@@ -330,7 +354,10 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
              fingerprint,
            "the primary filter order did not change the fingerprint"
 
-    assert Containment.fingerprint(%{@descriptor | tracers: [{:global, @tracer}, {:global, @tracer}]}) ==
+    assert Containment.fingerprint(%{
+             @descriptor
+             | tracers: [{:global, @tracer}, {:global, @tracer}]
+           }) ==
              fingerprint,
            "a new valid tracer cache entry changed the fingerprint"
   end
@@ -350,9 +377,16 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
       {Containment.advance_decision({:setup, 3}, :setup, :sealed), {:error, :seal_phase}},
       {Containment.advance_decision({:serve, 0}, :setup, :maintenance), {:error, :seal_phase}},
       {Containment.advance_decision(nil, :setup, :maintenance), {:error, :seal_absent}},
-      {Containment.recheck_decision({:serve, 0}, String.duplicate("a", 64), String.duplicate("a", 64)), :ok},
-      {Containment.recheck_decision({:serve, 0}, String.duplicate("a", 64), String.duplicate("b", 64)),
-       {:error, :seal_mismatch}},
+      {Containment.recheck_decision(
+         {:serve, 0},
+         String.duplicate("a", 64),
+         String.duplicate("a", 64)
+       ), :ok},
+      {Containment.recheck_decision(
+         {:serve, 0},
+         String.duplicate("a", 64),
+         String.duplicate("b", 64)
+       ), {:error, :seal_mismatch}},
       {Containment.recheck_decision(nil, String.duplicate("a", 64), String.duplicate("a", 64)),
        {:error, :seal_absent}}
     ]

@@ -122,7 +122,14 @@ defmodule SdrAgent.Prototype.ContainmentConfigTest do
   end
 
   test "paused_queues: a malformed queue list is refused" do
-    rows = [[], [default: 0], [default: "10"], [{"default", 10}], [default: 10, default: 5], :none]
+    rows = [
+      [],
+      [default: 0],
+      [default: "10"],
+      [{"default", 10}],
+      [default: 10, default: 5],
+      :none
+    ]
 
     for {queues, index} <- Enum.with_index(rows) do
       assert Containment.paused_queues(queues) == {:error, :descriptor_unknown},
