@@ -67,6 +67,9 @@ defmodule SdrAgent.Prototype.TestSeamTest do
         receive do: (:exit -> :ok)
       end)
 
+    # Reap the unlinked caller even when an assertion below fails.
+    on_exit(fn -> Process.exit(caller, :kill) end)
+
     assert_receive {^ref, :ok}, 2_000
     monitor = Process.monitor(caller)
     send(caller, :exit)
