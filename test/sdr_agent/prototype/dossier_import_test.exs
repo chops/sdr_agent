@@ -545,14 +545,19 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       assert {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))} == before
     end
 
-    # Codex 8ff184e4: a read failure is pinned to the closed :import_failed
-    # (never {:ok, 0}, a raw Ash error or a MatchError), and a call inside an
+    # Codex 6d1ead6d (option 2, superseding the :import_failed expectation of
+    # 79ff218 on dependency evidence): a real failed count read gives no
+    # count, no closed code and nothing written; the actual Ash error is
+    # raised. The test holds a savepoint so that, after the aborted read, it
+    # can roll back and check that nothing was written. A call inside an
     # open transaction, where a failed Ash read would roll the caller back by
-    # throw, is refused before any read.
-    test "a failed count read is the closed {:error, :import_failed}, never a count or a raw error",
+    # throw, is still refused before any read with :import_failed.
+    test "a real failed count read raises its Ash error: no count, no code, nothing written",
          ctx do
       [row] = rows!([F.company(1)], ["row-1"])
       import!([row], ctx.actor)
+      tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads audit_accesses)
+      before = {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))}
 
       # A real PostgreSQL failure of the count read: the test-build seam sets
       # an empty search path just before it, so the table is not found.
@@ -561,8 +566,14 @@ defmodule SdrAgent.Prototype.DossierImportTest do
         :ok
       end
 
+      Repo.query!("SAVEPOINT s3_count_read", [])
       result = capture(fn -> call(@import, :cap_used, [ctx.actor, [before_count: fail]]) end)
-      assert result == {:error, :import_failed}, "cap_used/2 returned #{inspect(result)}"
+      Repo.query!("ROLLBACK TO SAVEPOINT s3_count_read", [])
+
+      assert match?({:raised, Ash.Error.Unknown, _, _}, result),
+             "cap_used/2 returned #{inspect(result)}"
+
+      assert {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))} == before
     end
 
     test "inside an open transaction it is refused before any read; that transaction stays usable",
@@ -583,14 +594,16 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       end
     end
 
-    # Codex 42f5b1e0: the returned read error is classified, not folded. The
-    # evidence first: what a real failed count read returns (the same kernel
-    # read, an empty search path). Then the mapping, through the test-seam
-    # count fault (no query runs): the observed PostgreSQL structure is the
-    # expected store failure (:import_failed); an exact Forbidden is
-    # :forbidden; a wrapped programming error keeps its identity (it is
-    # raised, never returned as :import_failed).
-    test "evidence: a failed count read returns Ash.Error.Unknown of UnknownError leaves wrapping a Postgrex.Error",
+    # Codex 42f5b1e0 / 6d1ead6d: the evidence (discovered at cdaed31, whose
+    # expected nested Postgrex struct was wrong): a real failed count read
+    # returns an Ash.Error.Unknown whose only leaf is an UnknownError holding
+    # a BINARY. Splode formats the raised exception (splode.ex:526-531), so
+    # the typed database cause is gone and a formatted programming error
+    # looks the same. No classifier recovers it from that text. Then the
+    # mapping, through the test-seam count fault (no query runs): an exact
+    # Forbidden is :forbidden; every other returned error, the observed
+    # lossy shape included, is raised as itself, never :import_failed.
+    test "evidence: a failed count read returns an Ash.Error.Unknown whose only leaf holds a binary",
          ctx do
       query =
         SdrAgent.Research.DossierEntry
@@ -610,30 +623,21 @@ defmodule SdrAgent.Prototype.DossierImportTest do
             shape(other)
         end
 
-      assert leaves == [{Ash.Error.Unknown.UnknownError, {Postgrex.Error, :undefined_table}}],
-             "observed #{inspect(leaves)}"
+      assert leaves == [{Ash.Error.Unknown.UnknownError, :value}], "observed #{inspect(leaves)}"
+      assert [%Ash.Error.Unknown.UnknownError{error: text}] = elem(result, 1).errors
+      assert is_binary(text)
     end
 
-    test "the observed PostgreSQL structure is :import_failed; an exact Forbidden is :forbidden",
-         ctx do
-      postgres =
-        Ash.Error.Unknown.exception(
-          errors: [
-            Ash.Error.Unknown.UnknownError.exception(
-              error: %Postgrex.Error{postgres: %{code: :undefined_table}}
-            )
-          ]
-        )
-
-      assert count_faulted(ctx, {:error, postgres}) == {:error, :import_failed}
-
+    test "an exact Forbidden read is :forbidden", ctx do
       assert count_faulted(ctx, {:error, Ash.Error.Forbidden.exception([])}) ==
                {:error, :forbidden}
     end
 
-    test "a wrapped programming error of the count read keeps its identity, never :import_failed",
-         ctx do
+    test "any other returned error keeps its identity: raised, never :import_failed", ctx do
+      # The observed lossy shape (a binary leaf) and two wrapped programming
+      # errors are all raised as the injected Ash error itself.
       for wrapped <- [
+            "formatted failure text",
             "synthetic programming error",
             %RuntimeError{message: "synthetic programming error"}
           ] do
@@ -648,7 +652,6 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     end
   end
 
-  defp leaf(%Postgrex.Error{postgres: %{code: code}}), do: {Postgrex.Error, code}
   defp leaf(%module{}), do: module
   defp leaf(other), do: shape(other)
 
