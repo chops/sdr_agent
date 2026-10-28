@@ -548,8 +548,11 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     # Codex 6d1ead6d (option 2, superseding the :import_failed expectation of
     # 79ff218 on dependency evidence): a real failed count read gives no
     # count, no closed code and nothing written; the actual Ash error is
-    # raised. The test holds a savepoint so that, after the aborted read, it
-    # can roll back and check that nothing was written. A call inside an
+    # raised. The sandbox runs each top-level query under its own savepoint
+    # (postgrex_query), so the failed read leaves the test transaction
+    # usable; the test then restores the exact prior search path (the seam's
+    # SET LOCAL survives that savepoint's release) and checks that nothing
+    # was written. A call inside an
     # open transaction, where a failed Ash read would roll the caller back by
     # throw, is still refused before any read with :import_failed.
     test "a real failed count read raises its Ash error: no count, no code, nothing written",
@@ -566,9 +569,9 @@ defmodule SdrAgent.Prototype.DossierImportTest do
         :ok
       end
 
-      Repo.query!("SAVEPOINT s3_count_read", [])
+      %{rows: [[path]]} = Repo.query!("SHOW search_path", [])
       result = capture(fn -> call(@import, :cap_used, [ctx.actor, [before_count: fail]]) end)
-      Repo.query!("ROLLBACK TO SAVEPOINT s3_count_read", [])
+      Repo.query!("SELECT set_config('search_path', $1, true)", [path])
 
       assert match?({:raised, Ash.Error.Unknown, _, _}, result),
              "cap_used/2 returned #{inspect(result)}"
