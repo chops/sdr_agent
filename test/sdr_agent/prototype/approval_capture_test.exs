@@ -403,6 +403,60 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     refute Map.has_key?(event.payload["arguments"] || %{}, "prototype")
   end
 
+  # Codex f9a45a0c R2: the boundary reads the receipt's operation and approval
+  # through the policy-authorized DLV path, by id AND the binding tenant. A
+  # missing or foreign row (negative synthetic tampering: deleted or moved to
+  # a random tenant by SQL with triggers off) refuses as not delegated with
+  # nothing kept; the valid delegation (the captured controls above) passes.
+
+  defp foreign_tenant!(table, id) do
+    tamper!("UPDATE #{table} SET tenant_id = $1 WHERE id = $2", [
+      Ecto.UUID.dump!(Ecto.UUID.generate()),
+      Ecto.UUID.dump!(id)
+    ])
+  end
+
+  defp not_delegated!(ctx, delivery, record) do
+    assert refusal_of(record) =~ "prototype_approval_not_delegated"
+    no_capture!(ctx, delivery)
+  end
+
+  test "the boundary refuses a capture whose approval row is missing (not delegated, nothing kept)" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    tamper!("DELETE FROM approvals WHERE id = $1", [Ecto.UUID.dump!(approval.id)])
+
+    not_delegated!(ctx, delivery, fn -> record_captured(ctx, delivery) end)
+  end
+
+  test "the boundary refuses a capture whose approval row is in a foreign tenant (not delegated, nothing kept)" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    foreign_tenant!("approvals", approval.id)
+
+    not_delegated!(ctx, delivery, fn -> record_captured(ctx, delivery) end)
+  end
+
+  test "the boundary refuses a capture whose operation row is in a foreign tenant (not delegated, nothing kept)" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    operation = outreach!(ctx, delivery)
+    foreign_tenant!("delivery_operations", operation.id)
+
+    refusal = refusal_of(fn -> record_operation(ctx, operation) end)
+
+    tamper!("UPDATE delivery_operations SET tenant_id = $1 WHERE id = $2", [
+      Ecto.UUID.dump!(ctx.tenant.id),
+      Ecto.UUID.dump!(operation.id)
+    ])
+
+    assert refusal =~ "prototype_approval_not_delegated"
+    no_capture!(ctx, delivery)
+  end
+
   # ------------------------------------------------------------------ replay
   #
   # Codex 845d0959 / e9688dca: a genuine existing captured receipt replays

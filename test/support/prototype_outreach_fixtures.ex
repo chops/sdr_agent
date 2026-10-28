@@ -200,8 +200,11 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   adapter does; returns the action result.
   """
   def record_captured(ctx, delivery) do
-    operation = OutreachFixtures.outreach!(ctx, delivery)
+    record_operation(ctx, OutreachFixtures.outreach!(ctx, delivery))
+  end
 
+  @doc "As `record_captured/2`, for an operation already loaded (its fields as stored then)."
+  def record_operation(ctx, operation) do
     Outreach.record_receipt(
       %{
         delivery_operation_id: operation.id,
@@ -222,8 +225,11 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   inspection of the raised or returned error, or `"recorded"` when the
   receipt was recorded.
   """
-  def capture_refusal(ctx, delivery) do
-    case record_captured(ctx, delivery) do
+  def capture_refusal(ctx, delivery), do: refusal_of(fn -> record_captured(ctx, delivery) end)
+
+  @doc "The refusal text of `record` (a direct receipt record): see `capture_refusal/2`."
+  def refusal_of(record) do
+    case record.() do
       {:ok, _receipt} -> "recorded"
       {:error, error} -> inspect(error, limit: :infinity, printable_limit: :infinity)
     end
