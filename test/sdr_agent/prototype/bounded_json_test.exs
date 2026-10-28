@@ -109,14 +109,26 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
                {:error, {"[0]", :too_deep}}
     end
 
+    # The JSON escape is built from the backslash byte (92) so that no editor
+    # or formatter can turn the escape into the character it names: each
+    # second key below is spelled as a JSON \u escape in the input bytes.
+    defp json_escape(hex4), do: <<92>> <> "u" <> hex4
+
     test "escaped-equivalent keys are duplicates (compared after JSON unescaping)" do
-      assert BoundedJson.decode(~S({"a":1,"a":2}), max_bytes: 1_024, max_depth: 1) ==
+      escaped_a = ~s({"a":1,"#{json_escape("0061")}":2})
+      escaped_e = ~s({"é":1,"#{json_escape("00e9")}":2})
+      nested = ~s({"companies":[{"contact":{"name":1,"#{json_escape("006e")}ame":2}}]})
+
+      # The inputs really carry the escape (a construction check, not RED).
+      assert :binary.match(escaped_a, <<92, "u0061">>) != :nomatch
+      assert :binary.match(escaped_e, <<92, "u00e9">>) != :nomatch
+      assert :binary.match(nested, <<92, "u006e">>) != :nomatch
+
+      assert BoundedJson.decode(escaped_a, max_bytes: 1_024, max_depth: 1) ==
                {:error, {"(root)", :duplicate_key}}
 
-      assert BoundedJson.decode(~S({"é":1,"é":2}), max_bytes: 1_024, max_depth: 1) ==
+      assert BoundedJson.decode(escaped_e, max_bytes: 1_024, max_depth: 1) ==
                {:error, {"(root)", :duplicate_key}}
-
-      nested = ~S({"companies":[{"contact":{"name":1,"name":2}}]})
 
       assert BoundedJson.decode(nested,
                max_bytes: 1_024,
