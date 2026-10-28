@@ -50,8 +50,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     Stage (D-237 S1): the four entry accessors (Codex bd3eb9e1, constants
     only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d), and
-    B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read)
-    are implemented. Every other
+    B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
+    and B2b1's `snapshot/1` are implemented. Every other
     function is still a non-permissive RED declaration returning
     `{:error, :not_implemented}`; none fabricates success.
     """
@@ -286,9 +286,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       defp seam(_name, _arg), do: :ok
     end
 
-    @doc "The boot snapshot of a binding row."
-    @spec snapshot(struct()) :: {:ok, SdrAgent.Prototype.Binding.t()} | {:error, atom()}
-    def snapshot(_binding), do: red({:error, :not_implemented})
+    @doc """
+    The boot snapshot of a binding row: exactly the `SdrAgent.Prototype.Binding`
+    fields of a real `PrototypeDatabaseBinding` struct. Anything else (a map,
+    another resource's row, nil) is `{:error, :not_a_binding}`.
+    """
+    @spec snapshot(term()) :: {:ok, Binding.t()} | {:error, :not_a_binding}
+    def snapshot(%PrototypeDatabaseBinding{} = row),
+      do: {:ok, struct!(Binding, Map.new(Binding.fields(), &{&1, Map.fetch!(row, &1)}))}
+
+    def snapshot(_other), do: {:error, :not_a_binding}
 
     @doc "Resolver steps 3-7 (IF-1) for `snapshot` and a delegation row or nil."
     @spec resolve_delegation(SdrAgent.Prototype.Binding.t(), struct() | nil) ::
