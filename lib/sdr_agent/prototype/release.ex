@@ -81,6 +81,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
             {:withheld, struct(), struct()} | {:error, term()}
     def finalize(invocation, gate, {kind, receipt} = outcome, opts)
         when kind in [:ok, :timeout, :interrupted] and is_map(receipt) do
+      seamed(invocation, fn -> bounded(invocation, gate, outcome, opts) end)
+    end
+
+    defp bounded(invocation, gate, outcome, opts) do
       guard = Keyword.get(opts, :guard, fn _run -> :ok end)
       actor = Actor.system(:agent_runtime, invocation.tenant_id)
       attempt = fn -> attempt(invocation, gate, outcome, {guard, actor}) end
@@ -143,6 +147,33 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     else
       defp before_head(_invocation), do: :ok
+    end
+
+    # D-237 TF-1 RED seam (Codex cc688175 RL; plan r2 section 3), test-seam
+    # builds only: a `finalize_result: fun/1` in this module's Application env
+    # injects a TECHNICAL outcome in place of the bounded attempts, so the
+    # facade's and the sweeper's handling of a failed finalize can be tested.
+    # A deny/no-positive declaration: the fun returns `{:error, _}` (injected
+    # as the outcome) or `:passthrough` (the real attempts run, for another
+    # invocation); any other value (a release, a withheld decision, a
+    # success) raises a fixed, value-free ArgumentError, so it can never
+    # manufacture a decision. Every other build has no seam path.
+    if @test_seams do
+      defp seamed(invocation, attempts) do
+        case Keyword.get(Application.get_env(:sdr_agent, __MODULE__, []), :finalize_result) do
+          fun when is_function(fun, 1) ->
+            case fun.(invocation) do
+              {:error, _error} = injected -> injected
+              :passthrough -> attempts.()
+              _other -> raise ArgumentError, "finalize_result injects {:error, _} only"
+            end
+
+          _none ->
+            attempts.()
+        end
+      end
+    else
+      defp seamed(_invocation, attempts), do: attempts.()
     end
 
     ## Known evidence (plain reads, no lock)
