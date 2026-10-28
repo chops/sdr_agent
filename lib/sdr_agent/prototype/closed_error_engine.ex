@@ -1,33 +1,66 @@
-# DRAFT r4 (outside the repository; review only; NOT formatted, compiled or
-# run). Deny-only declarations: no callback delegates to Oban.Engines.Basic
-# in this stage (a delegating stub would execute production behaviour).
-# Compiled only with the prototype authority.
+# Containment pure GREEN (proposal r1). The pure functions are implemented;
+# every engine callback stays deny-only: none delegates to
+# Oban.Engines.Basic in this stage (delegating would execute production
+# behaviour that no pure test covers). Compiled only with the prototype
+# authority.
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.ClosedErrorEngine do
     @moduledoc """
     E2 (containment packet r4 section 5): the prototype-runtime Oban engine.
 
-    GREEN contract (not this stage):
-      * every callback of `Oban.Engines.Basic` (oban 2.24.0, basic.ex:29-377)
-        delegates with identical arguments and returns Basic's result;
-      * `discard_job/2`, `error_job/3` and `cancel_job/2` first replace the
-        job's `unsaved_error` with `closed_unsaved/1` of it;
-      * `closed_unsaved/1` maps any map to
-        `%{kind: :error, reason: %SdrAgent.Prototype.JobFailedError{}, stacktrace: []}`
-        and `nil` to `nil`;
+    Pure (this stage):
+      * `closed_unsaved/1` maps `nil` to `nil` and any other value to
+        `%{kind: :error, reason: %SdrAgent.Prototype.JobFailedError{}, stacktrace: []}`;
       * `delegation/0` is the reviewed table `[{callback, arity, mode}]`
-        with mode `:close_then_delegate` for the three above and
-        `:delegate` for the other twenty.
+        with mode `:close_then_delegate` for `discard_job/2`, `error_job/3`
+        and `cancel_job/2`, and `:delegate` for the other twenty.
 
-    Stage: deny-only. Every callback returns `{:error, :not_implemented}`.
+    Held (a later, separately granted IT-2 GREEN): every callback of
+    `Oban.Engines.Basic` (oban 2.24.0, basic.ex:29-377) delegates with
+    identical arguments and returns Basic's result, and the three
+    `:close_then_delegate` callbacks first replace the job's
+    `unsaved_error` with `closed_unsaved/1` of it.
+
+    Stage: pure GREEN. Every callback returns `{:error, :not_implemented}`.
     """
     @behaviour Oban.Engine
 
+    alias SdrAgent.Prototype.JobFailedError
+
+    @delegation [
+      {:init, 2, :delegate},
+      {:put_meta, 4, :delegate},
+      {:check_meta, 3, :delegate},
+      {:refresh, 2, :delegate},
+      {:shutdown, 2, :delegate},
+      {:insert_job, 3, :delegate},
+      {:insert_all_jobs, 3, :delegate},
+      {:fetch_jobs, 3, :delegate},
+      {:stage_jobs, 3, :delegate},
+      {:prune_jobs, 3, :delegate},
+      {:rescue_jobs, 3, :delegate},
+      {:check_available, 1, :delegate},
+      {:complete_job, 2, :delegate},
+      {:discard_job, 2, :close_then_delegate},
+      {:error_job, 3, :close_then_delegate},
+      {:snooze_job, 3, :delegate},
+      {:cancel_job, 2, :close_then_delegate},
+      {:cancel_all_jobs, 2, :delegate},
+      {:delete_job, 2, :delegate},
+      {:delete_all_jobs, 2, :delegate},
+      {:retry_job, 2, :delegate},
+      {:retry_all_jobs, 2, :delegate},
+      {:update_job, 3, :delegate}
+    ]
+
     @doc "Pure: the closed replacement of an `unsaved_error`; see the moduledoc."
-    def closed_unsaved(_unsaved), do: red({:error, :not_implemented})
+    @spec closed_unsaved(term()) :: nil | %{kind: :error, reason: Exception.t(), stacktrace: []}
+    def closed_unsaved(nil), do: nil
+    def closed_unsaved(_unsaved), do: %{kind: :error, reason: %JobFailedError{}, stacktrace: []}
 
     @doc "Pure: the reviewed delegation table; see the moduledoc."
-    def delegation, do: red({:error, :not_implemented})
+    @spec delegation() :: [{atom(), non_neg_integer(), :delegate | :close_then_delegate}]
+    def delegation, do: @delegation
 
     @impl Oban.Engine
     def init(_conf, _opts), do: red({:error, :not_implemented})
@@ -98,7 +131,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @impl Oban.Engine
     def update_job(_conf, _job, _changes), do: red({:error, :not_implemented})
 
-    # RED stub result, typed dynamic() so callers compile against it.
+    # Deny-only callback result (held for IT-2), typed dynamic() so callers
+    # compile against it.
     defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   end
 end
