@@ -23,7 +23,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     fresh, must resolve the actor's own delegation to exactly the same actor;
     anything else is `:forbidden`). An empty `rows` list is no bypass: the
     caller is checked first. `import_row/2` never relies on `import/2`
-    having been called.
+    having been called. The sole caller is the import task at top level: a
+    call inside an already-open transaction (a nested Audit or Repo
+    transaction is not a per-row savepoint) is refused with
+    `:import_failed` before any query or write, and that transaction stays
+    usable.
 
     - `prepare/5` is pure: `DossierParser.select/4` (which validates EVERY
       flagged row, selected or not, and refuses the whole input on any), then
@@ -36,11 +40,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       under the binding lock: `used` (distinct imported contacts) plus `new`
       (the rows that are not identical replays) over the policy entry's
       `max_contacts` refuses with `:contact_cap_exceeded` before any write. It
-      reserves no slot. Then `import_row/2` per row in selection order,
+      reserves no slot. A row that is not an identical replay counts as new
+      even if the per-row check would call it a conflict, so at the cap such
+      a selection is `:contact_cap_exceeded` (the precheck's precedence),
+      never silently switched. Then `import_row/2` per row in selection order,
       stopping at the first failure: committed rows stay, and the same
       command resumes (they replay, the failed row is retried).
     - `import_row/2` runs ONE `SdrAgent.Audit.transaction/1` per row:
-      1. lock the live binding row (`FOR UPDATE`; a lock only);
+      1. lock the live binding row (`FOR UPDATE`; a lock only), then, holding
+         it, run the full live check again (`:binding_mismatch`);
       2. replay: an existing entry for `(dossier_sha256, row_id)` with the
          same manifest, claims and notes digests returns its own entry and
          lead ids, writes nothing and uses no slot (its importing delegation
@@ -54,8 +62,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       6. the entry and its verified-excerpt sources (Research).
 
       Every error inside the callback calls `SdrAgent.Repo.rollback/1`, so a
-      failed row leaves no Sales or Research row, no Payload and no slot.
-      Denial records of the guarded Sales calls are appended by
+      failed row leaves no Sales or Research row, no Payload and no slot. A
+      database failure inside a query or an action aborts the transaction;
+      its structured rollback (an Ash query, changeset or action input) is
+      returned after the rollback as the closed `:import_failed`, never
+      inspected. Reads are never raising (a read failure is the same closed
+      rollback). Denial records of the guarded calls are appended by
       `SdrAgent.Audit.transaction/1` after the rollback, and so are kept.
 
     Results carry codes, row ids and ids only, never values; the codes are
@@ -83,6 +95,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Sales.Contact
 
     @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+
+    # The coordinator's own result codes (members of
+    # SdrAgent.Prototype.SafeLog.reasons(:import)).
+    @codes [
+      :contact_cap_exceeded,
+      :dossier_conflict,
+      :binding_mismatch,
+      :not_prototype_runtime,
+      :forbidden,
+      :import_failed
+    ]
 
     @source_types %{
       "company_site" => :company_site,
@@ -134,7 +157,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "Imports `rows` in order; see the moduledoc."
     @spec import([map()], SdrAgent.Actor.t()) :: {:ok, map()} | {:error, map()}
     def import(rows, actor) when is_list(rows) do
-      with :ok <- live(actor),
+      with :ok <- not_nested(),
+           :ok <- live(actor),
            :ok <- precheck(rows, actor) do
         Enum.reduce_while(rows, {:ok, %{imported: [], replayed: []}}, &import_next(&1, &2, actor))
       else
@@ -168,15 +192,34 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp run_row(row, actor, seams) do
-      with :ok <- live(actor) do
+      with :ok <- not_nested(),
+           :ok <- live(actor) do
         fn -> write_row(row, actor, seams) end
         |> Audit.transaction()
         |> case do
           {:ok, {status, ids}} -> {:ok, status, ids}
-          {:error, code} when is_atom(code) -> {:error, code}
+          {:error, reason} -> {:error, closed(reason)}
         end
       end
     end
+
+    # The sole caller is the import task, at top level. A nested Audit or
+    # Repo transaction is not a per-row savepoint (Codex 22958123), so a call
+    # inside an already-open transaction is refused before any query or
+    # write, and that transaction stays usable.
+    defp not_nested, do: if(Repo.in_transaction?(), do: {:error, :import_failed}, else: :ok)
+
+    # After the row's (or the precheck's) transaction has rolled back: one of
+    # this coordinator's codes stays; Ash's structured rollback of a failed
+    # query, changeset or action (a database failure inside it, which
+    # aborts the transaction) and any other atom are the closed
+    # :import_failed, never inspected or returned. Any other value is not
+    # matched: a programming defect still raises.
+    defp closed(code) when code in @codes, do: code
+    defp closed(code) when is_atom(code), do: :import_failed
+    defp closed(%Ash.Query{}), do: :import_failed
+    defp closed(%Ash.Changeset{}), do: :import_failed
+    defp closed(%Ash.ActionInput{}), do: :import_failed
 
     @doc "Distinct imported contacts of the binding."
     @spec cap_used(SdrAgent.Actor.t()) :: non_neg_integer()
@@ -218,12 +261,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       |> Audit.transaction()
       |> case do
         {:ok, :ok} -> :ok
-        {:error, code} when is_atom(code) -> {:error, code}
+        {:error, reason} -> {:error, closed(reason)}
       end
     end
 
     # SELECT ... FOR UPDATE of the live binding row: a lock only (its
     # append-only trigger fires on UPDATE), so imports serialize.
+    # Then, holding the lock, the full live check again (Codex 22958123): the
+    # locked row and the live database identity still match the whole boot
+    # snapshot, since the entry's check ran before the lock was acquired and
+    # a replay makes no later domain write that would check it.
     defp lock_binding!(actor) do
       with {:ok, %{id: binding_id}} <- Prototype.binding(),
            {:ok, [_binding]} <-
@@ -231,10 +278,20 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
              |> Ash.Query.for_read(:read, %{}, Kernel.opts(actor.tenant_id))
              |> Ash.Query.filter(id == ^binding_id and tenant_id == ^actor.tenant_id)
              |> Ash.Query.lock(:for_update)
-             |> Ash.read() do
+             |> read(),
+           :ok <- Prototype.check_live() do
         :ok
       else
         _ -> Repo.rollback(:binding_mismatch)
+      end
+    end
+
+    # A read inside the row's transaction: its rows, or the closed
+    # :import_failed rollback on a read failure (never raised).
+    defp read(query) do
+      case Ash.read(query) do
+        {:ok, records} -> {:ok, records}
+        {:error, _error} -> Repo.rollback(:import_failed)
       end
     end
 
@@ -249,9 +306,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # Distinct imported contacts: every entry is an operator import into the
     # binding's one tenant. A kernel read, tenant-filtered.
     defp used(actor) do
-      entries(actor)
-      |> Ash.Query.select([:contact_id])
-      |> Ash.read!()
+      {:ok, records} = entries(actor) |> Ash.Query.select([:contact_id]) |> read()
+
+      records
       |> MapSet.new(& &1.contact_id)
       |> MapSet.size()
     end
@@ -273,9 +330,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp existing(row, actor) do
       row_id = row.row_id
 
-      entries(actor)
-      |> Ash.Query.filter(dossier_sha256 == ^row.dossier_sha256 and row_id == ^row_id)
-      |> Ash.read_one!()
+      {:ok, records} =
+        entries(actor)
+        |> Ash.Query.filter(dossier_sha256 == ^row.dossier_sha256 and row_id == ^row_id)
+        |> read()
+
+      List.first(records)
     end
 
     defp identical?(entry, row) do
@@ -345,8 +405,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       |> Ash.Query.for_read(:read, %{}, Kernel.opts(actor.tenant_id))
       |> Ash.Query.filter(tenant_id == ^actor.tenant_id)
       |> Ash.Query.limit(1)
-      |> Ash.read!()
-      |> Enum.any?()
+      |> read()
+      |> then(fn {:ok, records} -> records != [] end)
     end
 
     defp cap_recheck(actor) do
