@@ -425,25 +425,27 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
+    operation = hold_before_capture!(ctx, delivery)
     tamper!("DELETE FROM approvals WHERE id = $1", [Ecto.UUID.dump!(approval.id)])
 
-    not_delegated!(ctx, delivery, fn -> record_captured(ctx, delivery) end)
+    not_delegated!(ctx, delivery, fn -> record_operation(ctx, operation) end)
   end
 
   test "the boundary refuses a capture whose approval row is in a foreign tenant (not delegated, nothing kept)" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
+    operation = hold_before_capture!(ctx, delivery)
     foreign_tenant!("approvals", approval.id)
 
-    not_delegated!(ctx, delivery, fn -> record_captured(ctx, delivery) end)
+    not_delegated!(ctx, delivery, fn -> record_operation(ctx, operation) end)
   end
 
   test "the boundary refuses a capture whose operation row is in a foreign tenant (not delegated, nothing kept)" do
     ctx = prototype_drafted!()
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
-    operation = outreach!(ctx, delivery)
+    operation = hold_before_capture!(ctx, delivery)
     foreign_tenant!("delivery_operations", operation.id)
 
     refusal = refusal_of(fn -> record_operation(ctx, operation) end)

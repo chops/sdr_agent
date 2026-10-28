@@ -195,6 +195,21 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
+  Runs `delivery` with its capture held by a retryable fault at
+  `:before_capture`: the operation is claimed (its rendered message and
+  digest stored) and nothing is captured. Returns the stored operation.
+  """
+  def hold_before_capture!(ctx, delivery) do
+    capture_hook!(:before_capture, fn _operation -> {:error, {:retryable, :held_by_test}} end)
+    OutreachFixtures.deliver!()
+    Process.delete({SdrAgent.PrototypeOutreachFixtures.CaptureHook, :before_capture})
+    operation = OutreachFixtures.outreach!(ctx, delivery)
+    assert is_binary(operation.rendered_sha256), "the delivery was not claimed"
+    no_capture!(ctx, delivery)
+    operation
+  end
+
+  @doc """
   Records a `captured` receipt for `delivery` directly, as the delivery
   worker (DLV), with its stored operation fields, exactly as the capture
   adapter does; returns the action result.
@@ -272,20 +287,29 @@ defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do
   @moduledoc """
   Capture-adapter fault seam (`config :sdr_agent, :capture_faults`) for S4
   tests: `fault/2` runs the function the test registered for the phase in
-  the delivering process (Oban's inline drain runs in the test process) and
-  returns `:ok`. It can only change what the test controls (the clock, a
-  suppression row) before the real capture runs.
+  the delivering process (Oban's inline drain runs in the test process),
+  records that the phase was reached, and returns `:ok` or the function's
+  own `{:error, {class, reason}}` fault. It can only change what the test
+  controls (the clock, a suppression row) before the real capture runs, or
+  make the delivery fail before it.
   """
 
-  @doc "Runs the registered function for `phase`, if any; always `:ok`."
+  @doc """
+  Runs the registered function for `phase`, if any, and records that the
+  delivering process reached `phase` (a `{CaptureHook, :reached, phase}`
+  message to itself). Returns `:ok`, or the function's own
+  `{:error, {class, reason}}` fault, which can only make the delivery fail
+  before the capture (`hold_before_capture!/2`).
+  """
   def fault(phase, operation) do
-    case Process.get({__MODULE__, phase}) do
-      nil ->
-        :ok
+    send(self(), {__MODULE__, :reached, phase})
 
-      fun ->
-        _ = fun.(operation)
-        :ok
+    case Process.get({__MODULE__, phase}) do
+      nil -> :ok
+      fun -> fault_of(fun.(operation))
     end
   end
+
+  defp fault_of({:error, {_class, _reason}} = fault), do: fault
+  defp fault_of(_other), do: :ok
 end
