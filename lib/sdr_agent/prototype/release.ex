@@ -18,6 +18,16 @@ defmodule SdrAgent.Prototype.Release do
   In test-seam builds only, a `before_head` hook (see the source) runs
   just before the head.
 
+  **Under the head, the Failures again** (Codex 0235e6fd ruling 2). Failure
+  writers append under the chain head, so the invocation's Failures are
+  read again there (a plain read; still no lock after the head). If they
+  change the mismatch branch's cause, the known-evidence code or the
+  preferred bound cause, nothing is written: the transaction rolls back
+  and the gate decides once more, refusal-only, taking its locks before
+  the head again. A second change returns `{:error, :recheck_failed}` with
+  nothing written (the facade then runs `ResultGate.Recovery`, which never
+  releases); there is no third attempt.
+
   **Outcomes** (the existing `finalize/4` shapes; this increment never
   releases):
 
@@ -69,7 +79,17 @@ defmodule SdrAgent.Prototype.Release do
       when kind in [:ok, :timeout, :interrupted] and is_map(receipt) do
     guard = Keyword.get(opts, :guard, fn _run -> :ok end)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
+    attempt = fn -> attempt(invocation, gate, outcome, {guard, actor}) end
 
+    # A bounded repeat: one more refusal-only attempt after a failed recheck;
+    # a second failure is returned, never a third attempt.
+    case attempt.() do
+      {:error, :recheck_failed} -> attempt.()
+      result -> result
+    end
+  end
+
+  defp attempt(invocation, gate, outcome, {guard, actor}) do
     fn -> locked(invocation, gate, outcome, guard, actor) end
     |> Audit.transaction()
     |> case do
@@ -92,7 +112,8 @@ defmodule SdrAgent.Prototype.Release do
          {:ok, plan, cause} <-
            hold(plan(outcome, evidence, invocation), receipt, evidence, {invocation, run}),
          :ok <- before_head(invocation),
-         {:ok, _head} <- Kernel.lock_head(tenant_id) do
+         {:ok, _head} <- Kernel.lock_head(tenant_id),
+         :ok <- recheck(plan, cause, evidence, {invocation, run}) do
       ResultGate.under_head(plan, invocation, run, nil, cause, actor)
     else
       {:error, error} -> Repo.rollback(error)
@@ -131,17 +152,18 @@ defmodule SdrAgent.Prototype.Release do
       )
       |> Ash.read!()
 
-    failures =
-      Failure
-      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
-      |> Ash.Query.filter(
-        tenant_id == ^invocation.tenant_id and subject_resource == @subject and
-          subject_id == ^invocation.id and class == :reconciliation_required
-      )
-      |> Ash.Query.sort(inserted_at: :asc, id: :asc)
-      |> Ash.read!()
+    %{links: links, failures: failures(invocation)}
+  end
 
-    %{links: links, failures: failures}
+  defp failures(invocation) do
+    Failure
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^invocation.tenant_id and subject_resource == @subject and
+        subject_id == ^invocation.id and class == :reconciliation_required
+    )
+    |> Ash.Query.sort(inserted_at: :asc, id: :asc)
+    |> Ash.read!()
   end
 
   ## The plan
@@ -214,15 +236,8 @@ defmodule SdrAgent.Prototype.Release do
     do: Recovery.mismatch(invocation, run)
 
   defp hold(plan, receipt, evidence, {invocation, run} = held) do
-    preferred =
-      case Map.get(plan, :prototype_refusal) do
-        :known_integrity_signal -> live_cause(evidence, held, :critical)
-        :witness_evidence_present -> live_cause(evidence, held, :warning)
-        _other -> nil
-      end
-
     result =
-      case preferred do
+      case preferred(Map.get(plan, :prototype_refusal), evidence, held) do
         %Failure{id: id} -> ResultGate.lock(Failure, id, invocation.tenant_id, "FOR UPDATE")
         nil -> ResultGate.select_cause(plan, receipt, invocation, run)
       end
@@ -230,11 +245,71 @@ defmodule SdrAgent.Prototype.Release do
     with {:ok, cause} <- result, do: {:ok, plan, cause}
   end
 
-  # A usable live cause of `severity` stays the bound cause.
+  # A usable live critical (known_integrity_signal) or warning
+  # (witness_evidence_present) stays the bound cause.
+  defp preferred(:known_integrity_signal, evidence, held),
+    do: live_cause(evidence, held, :critical)
+
+  defp preferred(:witness_evidence_present, evidence, held),
+    do: live_cause(evidence, held, :warning)
+
+  defp preferred(_code, _evidence, _held), do: nil
+
   defp live_cause(evidence, {invocation, run}, severity) do
     Enum.find(evidence.failures, fn failure ->
       failure.severity == severity and failure.status in @live and
         ResultGate.gate_capable?(failure, invocation, run)
     end)
   end
+
+  ## Under the head: the Failures again
+
+  # Failure writers append under the chain head, so the invocation's
+  # Failures are read again here: a plain read, no lock (the links stay as
+  # read: link writers lock the invocation FOR UPDATE). Evidence that changes
+  # the branch's cause or the refusal code fails the recheck: the attempt
+  # rolls back with nothing written, and `finalize/4` decides once more.
+  defp recheck(plan, cause, evidence, {invocation, _run} = held) do
+    reread = %{evidence | failures: failures(invocation)}
+
+    if unchanged?(plan, cause, {evidence, reread}, held),
+      do: :ok,
+      else: {:error, :recheck_failed}
+  end
+
+  # A mismatch: the critical cause run recovery would select now.
+  defp unchanged?(%{reason: :witness_mismatch}, cause, {_evidence, reread}, held),
+    do: mismatch_cause_id(reread, held) == cause_id(cause)
+
+  # A refusal: the same known-evidence code and the same preferred cause.
+  defp unchanged?(%{prototype_refusal: code}, _cause, {evidence, reread}, held) do
+    evidence_code(reread) == evidence_code(evidence) and
+      cause_id(preferred(code, reread, held)) == cause_id(preferred(code, evidence, held))
+  end
+
+  # Interrupted and timed-out gates: neither branch nor cause depends on
+  # the known Failures.
+  defp unchanged?(_plan, _cause, _evidence, _held), do: true
+
+  defp evidence_code(evidence) do
+    case no_known_evidence(evidence) do
+      {:refuse, code} -> code
+      :ok -> nil
+    end
+  end
+
+  # As `ResultGate.Recovery.mismatch/2` selects: the oldest gate-capable live
+  # critical, nil when there is no live critical, :unbound otherwise.
+  defp mismatch_cause_id(%{failures: failures}, {invocation, run}) do
+    live = Enum.filter(failures, &(&1.severity == :critical and &1.status in @live))
+
+    case {live, Enum.find(live, &ResultGate.gate_capable?(&1, invocation, run))} do
+      {[], nil} -> nil
+      {_live, %Failure{id: id}} -> id
+      {_unusable, nil} -> :unbound
+    end
+  end
+
+  defp cause_id(nil), do: nil
+  defp cause_id(%Failure{id: id}), do: id
 end
