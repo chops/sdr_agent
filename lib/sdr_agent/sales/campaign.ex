@@ -20,6 +20,9 @@ defmodule SdrAgent.Sales.Campaign do
   resume (pausing is safety-increasing); SEED (dev/test only) `:seed` and
   `:activate`; ADM, REV, AUR, AGT, AUD read. Every write appends an
   AuditEvent (`sales.campaign.*`).
+
+  OPR `:seed_prototype` (D-237 seed, slice B): declared and refused for
+  every caller until its reviewed GREEN.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -100,6 +103,24 @@ defmodule SdrAgent.Sales.Campaign do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.campaign.created", category: :domain_change}
+    end
+
+    # D-237 slice B, RED stage (Codex 66449b01): declared only so that the
+    # reached RED runs. It has no body and is refused for every caller by its
+    # own policy below until its reviewed GREEN.
+    create :seed_prototype do
+      description "OPR (D-237): the seed's campaign; RED declaration, refused for every caller."
+
+      accept [
+        :name,
+        :icp_definition_id,
+        :sequence_id,
+        :sender_name,
+        :sender_email,
+        :footer_template_version
+      ]
+
+      argument :seed_provenance_sha256, :string, allow_nil?: false
     end
 
     update :update do
@@ -203,6 +224,13 @@ defmodule SdrAgent.Sales.Campaign do
 
     policy action(:seed) do
       authorize_if Checks.SeedingAllowed
+    end
+
+    # D-237 slice B, RED stage: the declared :seed_prototype is refused for
+    # every caller. A missing allow line alone would not refuse it: the broad
+    # create policy above authorizes always.
+    policy action(:seed_prototype) do
+      forbid_if always()
     end
 
     policy action_type(:read) do
