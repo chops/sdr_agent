@@ -191,6 +191,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       # transaction: `before_lock:` after the entry checks and before the
       # binding lock; `after_sales:` between the Sales and the Research writes.
       def import_row(row, actor, seams) when is_list(seams), do: run_row(row, actor, seams)
+
+      @doc false
+      # Test-seam builds only: `before_count:`, a 0-arity function run just
+      # before cap_used's count read (here, before the RED stub).
+      def cap_used(actor, seams) when is_list(seams) do
+        :ok = seam(seams, :before_count)
+        cap_used(actor)
+      end
     end
 
     defp run_row(row, actor, seams) do
