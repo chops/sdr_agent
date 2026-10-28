@@ -25,6 +25,12 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
   The cases that need S1's provisioned grant (a release, each later refusal
   code, the bounded repeat seam and the release-branch lock order) follow
   as RED-b2.
+
+  **The b1 own-context guard** (Codex 5a6fdd75; controls before RED-b2
+  replaces it): until the closed basis exists, `released_unverified` is
+  refused inside the prototype gate's own Prelocked context (finalizer
+  `:prototype_gate`) with "needs its closed basis", and inside any other
+  Prelocked context as not the gate's own; nothing is written.
   """
   use SdrAgent.PrototypeCase, async: false
 
@@ -308,4 +314,87 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
            ) == [],
            inspect(after_head)
   end
+
+  describe "the b1 own-context guard (ReleaseDecision; Codex 5a6fdd75)" do
+    # Until the closed basis exists (RED-b2), released_unverified is refused
+    # even inside the prototype gate's own Prelocked context, and inside any
+    # other Prelocked context it is refused as not the gate's own.
+    setup do
+      fx = G.pre_runtime!()
+      %{fx: fx, run: fx.run, invocation: fx.invocation}
+    end
+
+    test "inside the prototype gate's own context (finalizer :prototype_gate): refused, nothing written",
+         ctx do
+      result = decide_under(ctx, :prototype_gate)
+
+      assert refused_on?(result, :disposition, "needs its closed basis (d237-basis/1)"),
+             "decided: #{inspect(result)}"
+
+      assert G.release(ctx.invocation) == nil
+      assert events_of_type(ctx.fx.tenant, "model.result.released_unverified") == []
+    end
+
+    test "inside another Prelocked context (no finalizer): refused as not the gate's own", ctx do
+      result = decide_under(ctx, nil)
+
+      assert refused_on?(
+               result,
+               :disposition,
+               "is decided only by the prototype gate's own context"
+             ),
+             "decided: #{inspect(result)}"
+
+      assert G.release(ctx.invocation) == nil
+      assert events_of_type(ctx.fx.tenant, "model.result.released_unverified") == []
+    end
+  end
+
+  # A finalizer stand-in: the invocation FOR SHARE, the head, then a
+  # released_unverified decision under a Prelocked context with `finalizer`.
+  defp decide_under(ctx, finalizer) do
+    tenant_id = ctx.invocation.tenant_id
+
+    SdrAgent.Audit.transaction(fn ->
+      {:ok, _held} =
+        SdrAgent.Agents.ModelInvocation
+        |> Ash.Query.for_read(:read, %{}, SdrAgent.Audit.Kernel.opts(tenant_id))
+        |> Ash.Query.filter(id == ^ctx.invocation.id)
+        |> Ash.Query.lock("FOR SHARE")
+        |> Ash.read_one()
+
+      {:ok, _head} = SdrAgent.Audit.Kernel.lock_head(tenant_id)
+
+      bindings = %{
+        tenant_id: tenant_id,
+        model_invocation_id: ctx.invocation.id,
+        finalizer: finalizer
+      }
+
+      SdrAgent.Agents.ReleaseDecision.Prelocked.run(bindings, fn prelocked ->
+        case Agents.decide_result_release(
+               %{
+                 model_invocation_id: ctx.invocation.id,
+                 disposition: :released_unverified,
+                 reason: :owner_prototype_unverified
+               },
+               actor: ctx.fx.agent,
+               prelocked: prelocked
+             ) do
+          {:ok, release} -> release
+          {:error, error} -> SdrAgent.Repo.rollback(error)
+        end
+      end)
+    end)
+  end
+
+  # The transaction rolled back with an Invalid error on `field` with `message`.
+  defp refused_on?({:error, error}, field, message) do
+    error
+    |> Ash.Error.to_error_class()
+    |> Map.get(:errors, [])
+    |> Enum.any?(&(Map.get(&1, :field) == field and Map.get(&1, :message) == message))
+  end
+
+  defp refused_on?(_result, _field, _message), do: false
 end

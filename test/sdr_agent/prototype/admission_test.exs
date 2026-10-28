@@ -29,8 +29,15 @@ defmodule SdrAgent.Prototype.AdmissionTest do
     `provider_error` Failure and a `model.reservation.refused` event.
     Ordinary reservations record no authority. The admitted call and its
     recorded 14 keys need S1's provisioned grant (RED-b2).
+  - **The b1 charge brake** (Codex 5a6fdd75; controls before RED-b2 replaces
+    it). In prototype runtime an in-scope call the prototype gate admits
+    is Forbidden at the charge (no Refused, no invocation, no event, no
+    counter or grant change); a charge carrying an authority is Forbidden
+    on `:reserve` in either runtime.
   """
   use SdrAgent.PrototypeCase, async: false
+
+  require Ash.Query
 
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.Agents
@@ -318,5 +325,95 @@ defmodule SdrAgent.Prototype.AdmissionTest do
 
       assert event.payload["arguments"]["prototype_authority"] == nil
     end
+  end
+
+  describe "the b1 charge brake (AdmissionCharge; Codex 5a6fdd75)" do
+    # An ordinary grant funding every bucket is present. Until a reservation
+    # records its prototype authority (RED-b2), AdmissionCharge makes no
+    # ClaudeCLI charge in prototype runtime, and an ordinary charge never
+    # carries an authority.
+    setup do
+      fx = PrototypeGateFixtures.bound!()
+      grant = AgentsFixtures.grant!(fx.tenant, %{}, fx.admin)
+      fx = Map.put(fx, :grant, grant)
+      %{fx: fx, grant: grant}
+    end
+
+    test "prototype runtime: an in-scope call the prototype gate admits is never charged", ctx do
+      PrototypeGateFixtures.enter!(ctx.fx)
+      run = PrototypeGateFixtures.run!(ctx.fx)
+      {:ok, before} = Agents.get_run(run.id, actor: ctx.fx.agent)
+
+      result = PrototypeGateFixtures.reserve(ctx.fx, run)
+
+      # Forbidden, not a gate Refused: the call passed the prototype gate and
+      # the charge brake refused it; the reservation rolled back entirely.
+      assert match?({:error, %Ash.Error.Forbidden{}}, result), "reserve: #{inspect(result)}"
+      assert PrototypeGateFixtures.invocations(ctx.fx) == 0
+      assert events_of_type(ctx.fx.tenant, "model.invocation.reserved") == []
+      assert events_of_type(ctx.fx.tenant, "model.reservation.refused") == []
+      {:ok, reread} = Agents.get_run(run.id, actor: ctx.fx.agent)
+      assert reread.budget.model_calls_reserved == before.budget.model_calls_reserved
+      assert charged(grant_id: ctx.grant.id) == 0
+    end
+
+    test "prototype runtime: a charge carrying an authority is Forbidden on :reserve", ctx do
+      PrototypeGateFixtures.enter!(ctx.fx)
+      run = PrototypeGateFixtures.run!(ctx.fx)
+      result = direct_charged(ctx, run, authority())
+
+      assert match?({:error, %Ash.Error.Forbidden{}}, result), "reserve: #{inspect(result)}"
+      assert claude_invocations(ctx.fx) == 0
+      assert charged(grant_id: ctx.grant.id) == 0
+    end
+
+    test "ordinary runtime: a charge carrying an authority is Forbidden on :reserve", ctx do
+      run = PrototypeGateFixtures.run!(ctx.fx)
+      result = direct_charged(ctx, run, authority())
+
+      assert match?({:error, %Ash.Error.Forbidden{}}, result), "reserve: #{inspect(result)}"
+      assert claude_invocations(ctx.fx) == 0
+      assert charged(grant_id: ctx.grant.id) == 0
+    end
+  end
+
+  # A direct ClaudeCLI :reserve in `run` with the admission context of an
+  # admitted charge of `ctx.grant` carrying `authority` (a stand-in for
+  # Admission.admit/5's context; the request digest is a Fake seed's).
+  defp direct_charged(ctx, run, authority) do
+    n = System.unique_integer([:positive])
+
+    {:ok, seed} =
+      Agents.reserve_model_invocation(run, AgentsFixtures.model_attrs("brake-seed-#{n}"),
+        actor: ctx.fx.agent
+      )
+
+    attrs =
+      "brake-#{n}"
+      |> AgentsFixtures.claude_attrs()
+      |> Map.drop([:request])
+      |> Map.merge(%{
+        agent_run_id: run.id,
+        sequence_in_run: 100 + n,
+        request_sha256: seed.request_sha256
+      })
+
+    context =
+      AdmissionContext.context(%{
+        grant_id: ctx.grant.id,
+        allocation_id: hd(ctx.grant.allocations).id,
+        reserved_at: SdrAgent.Clock.utc_now(),
+        prototype_authority: authority
+      })
+
+    ModelInvocation
+    |> Ash.Changeset.for_create(:reserve, attrs, actor: ctx.fx.agent, context: context)
+    |> Ash.create()
+  end
+
+  defp claude_invocations(fx) do
+    ModelInvocation
+    |> Ash.Query.filter(tenant_id == ^fx.tenant.id and provider == :claude_cli)
+    |> Ash.count!(SdrAgent.Audit.Kernel.opts(fx.tenant.id))
   end
 end
