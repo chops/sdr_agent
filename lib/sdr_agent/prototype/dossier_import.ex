@@ -16,18 +16,60 @@ defmodule SdrAgent.Prototype.DossierImport do
   failed_row: nil, imported: [], replayed: []}}`, `import_row/2` as
   `{:error, code}`. Codes only.
 
-  GREEN-2a stage (D-237 S3): the caller checks are implemented; `prepare/5`
-  and the writes still return `{:error, :not_implemented}` (`cap_used/1`
-  returns 0) until S1's `:store_prototype_input` scope, the Research
-  `record_*` names and OperatorAction exist.
+  `prepare/5` is pure: `DossierParser.select/4` (which validates EVERY
+  flagged row, selected or not, and refuses the whole input on any), then
+  `DossierParser.import_plan/4` per selected row, composed and never
+  re-implemented. Rows keep the selection order, each row's original index
+  in the dossier, and the exact dossier and manifest digests; a parser
+  refusal is returned unchanged. No database, network, evaluation or write;
+  only the parser's own bounded artifact reads.
+
+  Stage (D-237 S3): the caller checks and `prepare/5` are implemented; the
+  writes still return `{:error, :not_implemented}` (`cap_used/1` returns 0,
+  never a measured cap) until their own RED and prerequisites.
   """
 
   alias SdrAgent.Prototype
+  alias SdrAgent.Prototype.DossierParser
 
   @doc "The import rows of `row_ids` (at most 3), or the parser's refusal."
   @spec prepare(map(), String.t(), map(), [String.t()], Path.t()) ::
           {:ok, [map()]} | {:error, term()}
-  def prepare(_dossier, _sha256, _manifest, _row_ids, _dir), do: red({:error, :not_implemented})
+  def prepare(dossier, dossier_sha256, manifest, row_ids, artifacts_dir) do
+    with {:ok, rows} <- DossierParser.select(dossier, manifest, row_ids, artifacts_dir) do
+      collect(rows, &prepared(&1, dossier, dossier_sha256, manifest, artifacts_dir))
+    end
+  end
+
+  defp prepared(row, dossier, dossier_sha256, manifest, artifacts_dir) do
+    row_id = row["row_id"]
+
+    with {:ok, plan} <- DossierParser.import_plan(dossier, manifest, row_id, artifacts_dir) do
+      {:ok,
+       %{
+         row_id: row_id,
+         row_index: Enum.find_index(dossier["companies"], &(&1["row_id"] == row_id)),
+         dossier_sha256: dossier_sha256,
+         spotcheck_sha256: manifest.sha256,
+         plan: plan
+       }}
+    end
+  end
+
+  # {:ok, values} in input order, or the first error unchanged.
+  defp collect(items, fun) do
+    items
+    |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
+      case fun.(item) do
+        {:ok, value} -> {:cont, {:ok, [value | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> {:ok, Enum.reverse(values)}
+      error -> error
+    end
+  end
 
   @doc "Imports `rows` in order; see the moduledoc."
   @spec import([map()], SdrAgent.Actor.t()) :: {:ok, map()} | {:error, term()}
