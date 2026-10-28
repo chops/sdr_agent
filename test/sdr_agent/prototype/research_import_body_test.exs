@@ -132,13 +132,21 @@ defmodule SdrAgent.Prototype.ResearchImportBodyTest do
       assert {event.actor_type, event.actor_id} == {:prototype_operator, ctx.actor.id}
     end
 
-    test "a caller-supplied delegation or tenant is not an input", ctx do
+    # Codex 2cf8613e: tested against the real positive, not a blanket stub
+    # refusal: the forged metadata is refused, and the same attributes
+    # without it write the row as the operator's delegation in its tenant.
+    test "a caller-supplied delegation or tenant is not an input; the real positive is unforged",
+         ctx do
       for extra <- [%{delegation_id: Ecto.UUID.generate()}, %{tenant_id: Ecto.UUID.generate()}] do
         result = Research.record_dossier_entry(entry_attrs(ctx, extra), actor: ctx.actor)
         assert match?({:error, _}, result), "record_dossier_entry/2 returned #{inspect(result)}"
       end
 
       assert count("dossier_entries") == 0
+
+      entry = entry!(ctx)
+      assert {entry.delegation_id, entry.tenant_id} == {ctx.actor.id, ctx.tenant.id}
+      assert count("dossier_entries") == 1
     end
 
     test "a second entry for the same dossier row is refused, writing nothing", ctx do
@@ -160,7 +168,8 @@ defmodule SdrAgent.Prototype.ResearchImportBodyTest do
                {ctx.tenant.id, entry.id, ctx.lead.id, "s2"}
 
       assert source.content_sha256 == ctx.excerpt
-      assert [_event] = events_of_type(ctx.tenant, "research.dossier_source.imported")
+      assert [event] = events_of_type(ctx.tenant, "research.dossier_source.imported")
+      assert {event.actor_type, event.actor_id} == {:prototype_operator, ctx.actor.id}
     end
 
     test "a source for an entry of another lead is refused, writing nothing", ctx do
