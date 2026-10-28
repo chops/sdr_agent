@@ -31,10 +31,16 @@ defmodule SdrAgent.Prototype.EvidenceTest do
 
   describe "mapping" do
     test "the contact: first token, the rest, the role as title, the trimmed lowercase email" do
+      # The claims carry the renamed person, so the row stays eligible (R2).
+      name = "Ana de Souza Testperson"
+
       row =
         F.company(1)
-        |> F.put(["contact", "name"], "Ana de Souza Testperson")
+        |> F.put(["contact", "name"], name)
         |> F.put(["contact", "email"], "Ana.Souza@acme1.test")
+        |> F.put(["contact", "evidence", "name", "excerpt"], "#{name}, Head of Growth")
+        |> F.put(["contact", "evidence", "role", "excerpt"], "#{name}, Head of Growth")
+        |> F.put(["contact", "evidence", "email", "excerpt"], "#{name}: Ana.Souza@acme1.test")
 
       plan = plan!([row], "row-1")
 

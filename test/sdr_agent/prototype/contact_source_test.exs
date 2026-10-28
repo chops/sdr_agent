@@ -31,16 +31,15 @@ defmodule SdrAgent.Prototype.ContactSourceTest do
     DossierParser.select(dossier, manifest, Enum.map(rows, & &1["row_id"]), dir)
   end
 
-  defp edit_result(row_id, item, fun) do
-    fn manifest ->
-      F.update(manifest, ["results"], fn results ->
-        Enum.map(
-          results,
-          &if(&1["row_id"] == row_id and &1["item"] == item, do: fun.(&1), else: &1)
-        )
-      end)
-    end
-  end
+  defp edit_result(row_id, item, fun),
+    do: fn manifest -> F.update(manifest, ["results"], &edit_matching(&1, row_id, item, fun)) end
+
+  defp edit_matching(results, row_id, item, fun),
+    do:
+      Enum.map(
+        results,
+        &if(&1["row_id"] == row_id and &1["item"] == item, do: fun.(&1), else: &1)
+      )
 
   defp email_excerpt(row, excerpt),
     do: F.put(row, ["contact", "evidence", "email", "excerpt"], excerpt)

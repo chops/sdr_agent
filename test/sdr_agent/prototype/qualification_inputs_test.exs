@@ -25,13 +25,11 @@ defmodule SdrAgent.Prototype.QualificationInputsTest do
 
   defp dated(fact_index, date), do: F.put(F.company(1), ["facts", fact_index, "stated_on"], date)
 
-  defp edit_result(item, fun) do
-    fn manifest ->
-      F.update(manifest, ["results"], fn results ->
-        Enum.map(results, &if(&1["item"] == item, do: fun.(&1), else: &1))
-      end)
-    end
-  end
+  defp edit_result(item, fun),
+    do: fn manifest -> F.update(manifest, ["results"], &edit_matching(&1, item, fun)) end
+
+  defp edit_matching(results, item, fun),
+    do: Enum.map(results, &if(&1["item"] == item, do: fun.(&1), else: &1))
 
   describe "the freshness floor (ruling 6), with the check on 2026-10-27 (-06:00)" do
     test "2025-10-27, the day before the floor, is insufficient_source" do
