@@ -106,8 +106,9 @@ defmodule SdrAgent.Sales.Campaign do
     end
 
     # D-237 slice B, RED stage (Codex 66449b01): declared only so that the
-    # reached RED runs. It has no body and is refused for every caller by its
-    # own policy below until its reviewed GREEN.
+    # reached RED runs, and refused for every caller by its own policy below
+    # until its reviewed GREEN. Its one piece of body so far is the unchanged
+    # sender guard (Codex 683a74e6, the reached reserved-sender GREEN).
     create :seed_prototype do
       description "OPR (D-237): the seed's campaign; RED declaration, refused for every caller."
 
@@ -121,6 +122,7 @@ defmodule SdrAgent.Sales.Campaign do
       ]
 
       argument :seed_provenance_sha256, :string, allow_nil?: false
+      validate {Validations.Reserved, attribute: :sender_email, kind: :email}
     end
 
     update :update do
