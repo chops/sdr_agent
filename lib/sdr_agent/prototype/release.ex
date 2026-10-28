@@ -89,9 +89,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     withheld or calibration one, the flow above applies unchanged. The
     output of a new release is read the same way.
 
-    **β stage P (not landable):** the verified read is complete; the raw
-    existing-release decision does not yet verify the original
-    historically (B1; see `SdrAgent.Prototype.ReleasedScope`).
+    **The raw existing-release decision** uses the same single historical
+    trust owner (`SdrAgent.Prototype.ReleasedScope.original_basis/2`, B1),
+    so an invalid original is refused there too, never replayed.
     """
 
     require Ash.Query

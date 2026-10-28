@@ -33,9 +33,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        `SdrAgent.Prototype.Basis.compare_existing/2`): identical is a
        replay, a valid different basis a `ReleaseConflict`, anything
        invalid is refused on `:basis` ("must be a valid d237-basis/1 with
-       its digest"); never the current grant or window. β stage P (not
-       landable): that original is checked for its event identity only, not
-       yet historically (B1).
+       its digest"); never the current grant or window. That original is
+       fully historically verified first (B1): an invalid original is
+       refused on `:basis`, never a replay or a `ReleaseConflict`.
     3. Per disposition (any validated link's projection and method are
        copied onto the release, whatever the disposition):
        * D-237 b2c α, a NEW `:released_unverified` in the prototype gate's
@@ -273,8 +273,8 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     # from the current grant or window and never time-forced: identical is
     # a replay (the upsert returns the row, no event), a valid different
     # basis is a ReleaseConflict, anything invalid is refused on :basis; a
-    # read error keeps its identity. β stage P: the original is checked for
-    # its event identity only, not yet historically (B1).
+    # read error keeps its identity. The original is fully historically
+    # verified by `original_basis/2` (B1), so an invalid one is refused.
     defp unverified_existing(changeset, invocation) do
       if Ash.Changeset.get_attribute(changeset, :disposition) == :released_unverified,
         do: compare_original(changeset, invocation),
