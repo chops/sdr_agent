@@ -129,13 +129,14 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
 
   @doc """
   Runs `fun` (an inline delivery drain) and returns the full inspection of
-  the exception it raised, or `:no_raise`. A refused capture fails closed on
-  the existing failure path (the worker raises); the caller asserts the
-  exact named refusal code inside it, never a crash alone.
+  the exception it raised, or the string `"no exception raised"` (a binary,
+  so `=~` fails as an assertion, never a crash). A refused capture fails
+  closed on the existing failure path (the worker raises); the caller
+  asserts the exact named refusal code inside it, never a crash alone.
   """
   def raised(fun) do
     fun.()
-    :no_raise
+    "no exception raised"
   rescue
     error -> inspect(error, limit: :infinity, printable_limit: :infinity)
   end

@@ -109,7 +109,11 @@ defmodule SdrAgent.Prototype.JourneyTest do
         [actor: actor, evidence_root: root]
       ])
 
-    assert match?({:ok, _}, grant), "provision (S1): #{inspect(grant)}"
+    # S1 contract (IF-2): the grant itself, never a wrapper.
+    assert match?({:ok, %SdrAgent.Agents.ModelCallGrant{}}, grant),
+           "provision (S1): #{inspect(grant)}"
+
+    {:ok, grant_record} = grant
 
     # One row prepared through the real route by S3's route_rows/2 (never a
     # bespoke row). The variant is decided by the ICP and the fake CLI's
@@ -126,7 +130,6 @@ defmodule SdrAgent.Prototype.JourneyTest do
     {:ok, :imported, %{lead_id: lead_id, entry_id: entry_id}} = imported
     {:ok, lead} = SdrAgent.Sales.fetch(SdrAgent.Sales.Lead, lead_id, actor: actor)
     {:ok, campaign} = SdrAgent.Sales.fetch(SdrAgent.Sales.Campaign, campaign_id, actor: actor)
-    {:ok, %{grant: grant_record}} = grant
 
     %{
       fixture: fixture,
@@ -147,7 +150,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
 
     source_digests =
       for source <- sources,
-          source.dossier_entry_id == ctx.entry_id,
+          source.entry_id == ctx.entry_id,
           into: MapSet.new(),
           do: source.content_sha256
 

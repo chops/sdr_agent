@@ -582,11 +582,25 @@ defmodule SdrAgent.Prototype.OutputTest do
       recipient_email: email
     }
 
+  # The review step of the Q1 tests: the pending-revision view must succeed
+  # (an assertion, never a bare match) before its recipient is reused.
+  defp reviewed_email!(ctx) do
+    result = Output.view(:pending_revision, ctx.draft.id, ctx.operator)
+
+    assert match?(
+             {:ok, %{"fields" => %{"recipient_email" => email}}} when is_binary(email),
+             result
+           ),
+           "the review step (pending-revision view) failed: #{inspect(result)}"
+
+    {:ok, %{"fields" => %{"recipient_email" => email}}} = result
+    email
+  end
+
   test "Q1: review, then the contact's email changes, then approve with the reviewed address → stale",
        context do
     ctx = prototype_drafted!() |> Map.merge(bundle_dir!(context))
-    {:ok, view} = Output.view(:pending_revision, ctx.draft.id, ctx.operator)
-    reviewed = view["fields"]["recipient_email"]
+    reviewed = reviewed_email!(ctx)
 
     {:ok, _} =
       Sales.update(ctx.contact, :change_email, %{email: "changed-after-review@example.test"},
@@ -604,8 +618,7 @@ defmodule SdrAgent.Prototype.OutputTest do
   test "Q1: review, then a new revision, then approve with the reviewed revision → stale",
        context do
     ctx = prototype_drafted!() |> Map.merge(bundle_dir!(context))
-    {:ok, view} = Output.view(:pending_revision, ctx.draft.id, ctx.operator)
-    reviewed = view["fields"]["recipient_email"]
+    reviewed = reviewed_email!(ctx)
     PrototypeFixtures.leave_runtime()
 
     {:ok, _edited} =
@@ -624,8 +637,7 @@ defmodule SdrAgent.Prototype.OutputTest do
   test "Q1: op approve with the reviewed inputs grants exactly that revision to that address",
        context do
     ctx = prototype_drafted!() |> Map.merge(bundle_dir!(context))
-    {:ok, view} = Output.view(:pending_revision, ctx.draft.id, ctx.operator)
-    reviewed = view["fields"]["recipient_email"]
+    reviewed = reviewed_email!(ctx)
 
     assert {:ok, %{id: approval_id}} =
              call(@op, :execute, [approve_parsed(ctx.revision, reviewed), ctx.operator])

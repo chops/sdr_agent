@@ -18,7 +18,9 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     Decision, ResearchArtifact, EvidenceClaim), plus Campaign (Codex S4
     RED ruling 2), and only rows of the binding tenant, through the policy
     itself and nothing else here; a
-    forged operator struct reads none of them in ordinary runtime;
+    forged operator struct reads none of them in ordinary runtime, except
+    AgentRun and Decision, whose existing read policy admits any present
+    actor (unchanged);
   - the auditor cannot assign, approve or capture.
 
   Grant, provisioning, user-administration and settings refusals are S1's
@@ -50,6 +52,10 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     SdrAgent.Research.EvidenceClaim,
     SdrAgent.Sales.Campaign
   ]
+
+  # Review resources whose existing read policy is `authorize_if actor_present()`
+  # (unchanged by D-237): any present actor reads them, a forged struct included.
+  @any_present_actor_reads [SdrAgent.Agents.AgentRun, SdrAgent.Agents.Decision]
 
   @not_review_read [
     SdrAgent.Agents.ModelInvocation,
@@ -175,8 +181,9 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     forged = ctx.operator
     PrototypeFixtures.leave_runtime()
 
-    # AgentRun's existing read policy admits any present actor (unchanged).
-    for resource <- @review_read -- [SdrAgent.Agents.AgentRun] do
+    # AgentRun's and Decision's existing read policy admits any present
+    # actor (unchanged), so they are exempt here.
+    for resource <- @review_read -- @any_present_actor_reads do
       refute match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
              "a forged operator reads #{inspect(resource)} in ordinary runtime"
     end
@@ -186,9 +193,41 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     ctx = prototype_drafted!()
     forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
 
-    for resource <- @review_read -- [SdrAgent.Agents.AgentRun] do
+    for resource <- @review_read -- @any_present_actor_reads do
       refute match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
              "a forged operator reads #{inspect(resource)}"
+    end
+  end
+
+  # Codex S4 RED-2 Q1: the exemption above documents existing semantics, not
+  # least privilege. AgentRun's and Decision's :read keeps its existing first
+  # line `authorize_if actor_present()` (no D-237 line ahead of it), so any
+  # present actor, a forged operator struct included, reads their rows.
+  test "existing semantics, not least privilege: AgentRun and Decision :read still admit any present actor" do
+    ctx = prototype_drafted!()
+    forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
+
+    for resource <- @any_present_actor_reads do
+      read_lines =
+        for policy <- Ash.Policy.Info.policies(resource),
+            match?([{Ash.Policy.Check.ActionType, opts}] when is_list(opts), policy.condition),
+            [{Ash.Policy.Check.ActionType, opts}] = policy.condition,
+            Keyword.get(opts, :type) == [:read],
+            do: Enum.map(policy.policies, &{&1.type, &1.check_module})
+
+      assert match?([[{:authorize_if, Ash.Policy.Check.ActorPresent} | _]], read_lines),
+             "#{inspect(resource)} :read no longer starts with authorize_if actor_present(): " <>
+               inspect(read_lines)
+
+      assert match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
+             "#{inspect(resource)} rows are not readable by any present actor (prototype runtime)"
+    end
+
+    PrototypeFixtures.leave_runtime()
+
+    for resource <- @any_present_actor_reads do
+      assert match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
+             "#{inspect(resource)} rows are not readable by any present actor (ordinary runtime)"
     end
   end
 
