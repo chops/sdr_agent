@@ -1,45 +1,92 @@
 defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   @moduledoc """
   Read failures bound to the named in-action sites of `SettingsRevision
-  :seed_prototype` (Codex ed0a67b5 item 2; targeting ruling d8fc857a). Ash
-  authorizes a create in a pre-flight (`Ash.can`) before the action's
-  transaction and its `before_action` hooks, and the policy's
-  `OperatorAction` runs the full live path there, so a fault scope around the
-  whole create would fire in the pre-flight, not at the in-action site.
-
-  This stage is the RED of the seam-independent part, with the sites only
-  declared (no-op) in `SdrAgent.Prototype.Changes.SeedAnchor` and
+  :seed_prototype` (Codex ed0a67b5 item 2; targeting ruling d8fc857a; oracle
+  corrections T1-T4 of 3749bfb0). Ash authorizes a create in a pre-flight
+  (`Ash.can`) before the action's transaction and its `before_action` hooks,
+  and the policy's `OperatorAction` runs the full live path there, so a fault
+  scope around the whole create would fire in the pre-flight, not at the
+  in-action site. The sites are local test-build seams of
+  `SdrAgent.Prototype.Changes.SeedAnchor` and
   `SdrAgent.Prototype.Changes.SeedNote`:
 
   - **G0, the in-action live-check site** (`{SeedAnchor, :live_wrap}`): a
-    recording wrapper must be entered exactly once per create, after the
-    pre-flight and inside the transaction, with the real live check running
-    inside it exactly once and the create otherwise unchanged. Harness and
-    regression controls (scope restoration, another process's wrapper) pass
-    already and are not RED.
+    recording wrapper is entered exactly once per create, inside the
+    transaction, after the pre-flight's live read; inside it the real check
+    runs exactly once, as exactly this read sequence: the binding row and the
+    live identity (`check_live/0`), the binding row and the live identity
+    again (`operator_actor/1`'s own `check_live/0`), then the delegation; and
+    the create succeeds exactly as without a wrapper. Harness and regression
+    controls (scope restoration, another process's wrapper, the closed
+    observer labels) are not RED.
   - **G2 and G3, a real SQL abort at the anchor and the provenance Payload
-    reads** (`{SeedAnchor | SeedNote, :read_fault} = {:abort, ref}`): one
-    tagged `SELECT 1 / 0` (`:division_by_zero`), then the real read at that
-    site observing the aborted transaction (`:in_failed_sql_transaction`,
-    25P02), then no later business read or write before the owner's
-    rollback; no SettingsRevision, `settings.revision.created` event, Payload
-    or audit survivor and no seed success, under the action's own transaction
-    and under an `SdrAgent.Audit.transaction/1` caller.
+    reads** (`{SeedAnchor | SeedNote, :read_fault} = {:abort, ref}`): exactly
+    one tagged `SELECT 1 / 0` (`:division_by_zero`), then the real read at
+    that site observing the aborted transaction (`:in_failed_sql_transaction`,
+    25P02), then exactly one successful rollback by the owner and nothing
+    else (no later business read or write, no recovery); the exact owner
+    outcome; no SettingsRevision, `settings.revision.created` event, Payload
+    or audit survivor; and `SELECT 1` usable after. Under the action's own
+    transaction and under an `SdrAgent.Audit.transaction/1` caller.
 
-  Owner result shapes are recorded as diagnostics only; they are pinned after
-  the seam's reviewed GREEN characterizes them. The G1 controls, which open
-  S1's live-read fault scope inside the G0 wrapper, follow S1's seam gate.
-  Observations keep finite labels (statement verb, table, result code, tag),
-  never SQL text, parameters or error terms. Synthetic `.test` data.
+  Owner outcomes are closed shapes (an unknown one fails). The sandbox owner
+  unwinding is a logical-transaction control, not a committed durability
+  proof. The G1 controls, which open S1's live-read fault scope inside the G0
+  wrapper, follow S1's seam gate. Observations keep closed labels only
+  (statement verb, table, result code, fault tag), never SQL text,
+  parameters or error terms. Synthetic `.test` data.
   """
   use SdrAgent.PrototypeCase, async: false
 
+  alias SdrAgent.Accounts.User
   alias SdrAgent.Agents.SettingsRevision
+  alias SdrAgent.Audit.Payload
   alias SdrAgent.DossierFixtures, as: F
   alias SdrAgent.Prototype.Changes.SeedAnchor
   alias SdrAgent.Prototype.Changes.SeedNote
 
-  @owners [:action, :audit]
+  # The closed observer vocabulary (T3): anything else is :other.
+  @verbs %{
+    "select" => :select,
+    "insert" => :insert,
+    "update" => :update,
+    "delete" => :delete,
+    "begin" => :begin,
+    "commit" => :commit,
+    "rollback" => :rollback,
+    "savepoint" => :savepoint,
+    "release" => :release
+  }
+  @tables %{
+    "prototype_database_bindings" => :bindings,
+    "prototype_delegations" => :delegations,
+    "users" => :users,
+    "payloads" => :payloads,
+    "settings_revisions" => :settings_revisions,
+    "audit_events" => :audit_events
+  }
+  @codes [:division_by_zero, :in_failed_sql_transaction]
+  @fault_sites [:anchor_read, :payload_read]
+
+  # The closed owner-outcome vocabulary (T4): anything else is :other or
+  # :unknown, which no expectation names.
+  @result_modules [
+    SettingsRevision,
+    Ash.Error.Invalid,
+    Ash.Error.Forbidden,
+    Ash.Error.Unknown,
+    Ash.Error.Framework
+  ]
+  @query_resources [User, Payload]
+
+  # The real check inside the wrapper, exactly (T1).
+  @live_check [
+    {:select, :bindings, :ok, nil},
+    {:select, :none, :ok, nil},
+    {:select, :bindings, :ok, nil},
+    {:select, :none, :ok, nil},
+    {:select, :delegations, :ok, nil}
+  ]
 
   setup do
     fixture = bound!()
@@ -58,27 +105,28 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   end
 
   # The owner of the create's transaction: the action itself, or an Audit
-  # transaction around it. The result, a raise or a throw, as a shape.
+  # transaction around it. The result, a raise or a throw, as a closed shape.
   defp owned(:action, fun), do: outcome(fun)
   defp owned(:audit, fun), do: outcome(fn -> SdrAgent.Audit.transaction(fun) end)
 
   defp outcome(fun) do
     shape(fun.())
   rescue
-    error -> {:raised, error.__struct__}
+    error -> {:raised, closed(error.__struct__, @result_modules)}
   catch
-    :throw, value -> {:thrown, shape(value)}
+    :throw, _value -> :thrown
   end
 
-  defp shape({tag, %Ash.Query{resource: resource}}), do: {tag, {Ash.Query, resource}}
-  defp shape({tag, {inner, value}}), do: {tag, shape({inner, value})}
-  defp shape({tag, %module{}}), do: {tag, module}
-  defp shape({tag, value}) when is_atom(value), do: {tag, value}
-  defp shape(value) when is_atom(value), do: value
-  defp shape(_value), do: :value
+  defp shape({tag, value}) when tag in [:ok, :error], do: {tag, inner(value)}
+  defp shape(_other), do: :unknown
 
-  defp success?(shape),
-    do: shape in [{:ok, SettingsRevision}, {:ok, {:ok, SettingsRevision}}]
+  defp inner(%Ash.Query{resource: resource}), do: {Ash.Query, closed(resource, @query_resources)}
+  defp inner(%module{}), do: closed(module, @result_modules)
+  defp inner({tag, _value} = nested) when tag in [:ok, :error], do: shape(nested)
+  defp inner(:rollback), do: :rollback
+  defp inner(_other), do: :unknown
+
+  defp closed(module, allowed), do: if(module in allowed, do: module, else: :other)
 
   # Puts `value` under `key` for `fun`, then restores the previous value (or
   # its absence) on every exit, so an outer scope is never erased.
@@ -94,8 +142,8 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   end
 
   # The repo statements of this process while `fun` runs, in order, as
-  # finite labels {verb, table, result code, fault tag}, interleaved with the
-  # wrapper's own {:wrap, ...} markers; and `fun`'s value.
+  # closed labels, interleaved with the wrapper's own markers; and `fun`'s
+  # value.
   defp observed(fun) do
     parent = self()
     handler = "s3-inaction-#{System.unique_integer([:positive])}"
@@ -128,20 +176,39 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
     end
   end
 
-  defp label(metadata) do
-    tag = Keyword.get(Map.get(metadata, :options) || [], :d237_s3_fault)
-    {verb(metadata[:query]), metadata[:source], code(metadata[:result]), tag}
+  # A closed label {verb, table, result code, fault tag}: each part from its
+  # reviewed set, else :other; nothing else of the event leaves the handler.
+  defp label(metadata) when is_map(metadata) do
+    {verb(Map.get(metadata, :query)), table(Map.get(metadata, :source)),
+     code(Map.get(metadata, :result)), tag(Map.get(metadata, :options))}
   end
 
-  defp verb(query) when is_binary(query) or is_atom(query),
-    do: query |> to_string() |> String.split(" ", parts: 2) |> hd() |> String.downcase()
+  defp verb(query) when is_binary(query) do
+    word = query |> String.split(" ", parts: 2) |> hd() |> String.downcase()
+    Map.get(@verbs, word, :other)
+  end
 
-  defp verb(_query), do: "other"
+  defp verb(_query), do: :other
+
+  defp table(nil), do: :none
+  defp table(source) when is_binary(source), do: Map.get(@tables, source, :other)
+  defp table(_source), do: :other
 
   defp code({:ok, _result}), do: :ok
-  defp code({:error, %Postgrex.Error{postgres: %{code: code}}}), do: code
-  defp code({:error, %module{}}), do: module
+  defp code({:error, %Postgrex.Error{postgres: %{code: code}}}) when code in @codes, do: code
+  defp code({:error, %Postgrex.Error{}}), do: :other_pg_error
+  defp code({:error, _error}), do: :other_error
   defp code(_result), do: :other
+
+  defp tag(options) when is_list(options) do
+    case List.keyfind(options, :d237_s3_fault, 0) do
+      nil -> nil
+      {_key, {site, ref}} when site in @fault_sites and is_reference(ref) -> {site, ref}
+      _other -> :other
+    end
+  end
+
+  defp tag(_options), do: nil
 
   defp survivors(ctx) do
     tables =
@@ -153,11 +220,12 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
     Map.put(tables, :created, length(events_of_type(ctx.tenant, "settings.revision.created")))
   end
 
-  defp sources(labels), do: for({_verb, source, _code, _tag} <- labels, source, do: source)
-
   describe "G0: the in-action live-check site" do
-    for owner <- @owners do
-      test "a recording wrapper is entered once, after the pre-flight and inside the transaction, around the real check (#{owner} owner)",
+    for {owner, success} <- [
+          action: {:ok, SettingsRevision},
+          audit: {:ok, {:ok, SettingsRevision}}
+        ] do
+      test "a recording wrapper is entered once, after the pre-flight and inside the transaction, around exactly the real check (#{owner} owner)",
            ctx do
         ref = make_ref()
         parent = self()
@@ -188,15 +256,15 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
         assert {before, [_entered | rest]} =
                  Enum.split_while(stream, &(not match?({:s3_wrap, ^ref, {:entered, _}}, &1)))
 
-        {inside, _after} = Enum.split_while(rest, &(not match?({:s3_wrap, ^ref, :returned}, &1)))
+        assert {inside, [_returned | _after]} =
+                 Enum.split_while(rest, &(not match?({:s3_wrap, ^ref, :returned}, &1)))
 
-        # The pre-flight's live read precedes the wrapper; the real check runs
-        # inside it (the binding and the delegation reads).
-        assert "prototype_database_bindings" in sources(before)
-        assert "prototype_database_bindings" in sources(inside)
-        assert "prototype_delegations" in sources(inside)
-        # Otherwise unchanged: the create succeeds as without a wrapper.
-        assert success?(result), "the create returned #{inspect(result)}"
+        # The pre-flight's live read precedes the wrapper (T3 positive).
+        assert {:select, :bindings, :ok, nil} in before, "no pre-flight read before the wrapper"
+        # Inside it, exactly the real check, once (T1).
+        assert inside == @live_check, "inside the wrapper: #{inspect(inside)}"
+        # Otherwise unchanged: the create succeeds exactly as without a wrapper.
+        assert result == unquote(Macro.escape(success)), "the create returned #{inspect(result)}"
       end
     end
 
@@ -234,21 +302,64 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
           end
         end)
 
-      result = create(ctx)
+      result = owned(:action, fn -> create(ctx) end)
       send(other, :stop)
 
       refute_received {:s3_wrap, ^ref, :foreign}
-      assert success?(shape(result)), "the create returned #{inspect(shape(result))}"
+      assert result == {:ok, SettingsRevision}, "the create returned #{inspect(result)}"
+    end
+
+    test "the observer keeps closed labels only, never query text, parameters or error terms" do
+      secret = "s3-probe-#{System.unique_integer([:positive])}"
+      ref = make_ref()
+
+      cases = [
+        {%{
+           query: "DROP TABLE #{secret}",
+           source: secret,
+           params: [secret],
+           result:
+             {:error, %Postgrex.Error{postgres: %{code: :unique_violation, message: secret}}},
+           options: [d237_s3_fault: {:other_site, ref}]
+         }, {:other, :other, :other_pg_error, :other}},
+        {%{
+           query: "SELECT #{secret} FROM users",
+           source: "users",
+           result: {:error, %RuntimeError{message: secret}},
+           options: [d237_s3_fault: secret]
+         }, {:select, :users, :other_error, :other}},
+        {%{query: ["SELECT"], source: nil, result: secret, options: :not_a_list},
+         {:other, :none, :other, nil}},
+        {%{
+           query: "rollback",
+           source: nil,
+           result: {:ok, secret},
+           options: [d237_s3_fault: {:anchor_read, ref}]
+         }, {:rollback, :none, :ok, {:anchor_read, ref}}},
+        {%{}, {:other, :none, :other, nil}}
+      ]
+
+      for {metadata, expected} <- cases do
+        result = label(metadata)
+        assert result == expected
+        refute inspect(result) =~ secret
+      end
     end
   end
 
   # G2 and G3: the anchor read (SeedAnchor's before_action) and the
-  # provenance Payload read (SeedNote's, after it).
-  @sites [anchor_read: {SeedAnchor, "users"}, payload_read: {SeedNote, "payloads"}]
+  # provenance Payload read (SeedNote's, after it), with each owner's exact
+  # outcome (T4).
+  @g23 [
+    {:anchor_read, SeedAnchor, :users, :action, {:error, Ash.Error.Unknown}},
+    {:anchor_read, SeedAnchor, :users, :audit, {:error, {Ash.Query, User}}},
+    {:payload_read, SeedNote, :payloads, :action, {:error, Ash.Error.Unknown}},
+    {:payload_read, SeedNote, :payloads, :audit, {:error, {Ash.Query, Payload}}}
+  ]
 
   describe "G2/G3: a real SQL abort at the anchor and the Payload reads" do
-    for {site, {module, table}} <- @sites, owner <- @owners do
-      test "#{site}: one tagged abort, the real read sees 25P02, no later business statement, no survivor (#{owner} owner)",
+    for {site, module, table, owner, expected} <- @g23 do
+      test "#{site}: one tagged abort, the real read sees 25P02, then exactly the owner's rollback, no survivor (#{owner} owner)",
            ctx do
         site = unquote(site)
         table = unquote(table)
@@ -262,23 +373,27 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
             end)
           end)
 
-        tagged = Enum.filter(stream, &match?({_verb, _source, _code, {^site, ^ref}}, &1))
+        tagged = Enum.filter(stream, &match?({_verb, _table, _code, {^site, ^ref}}, &1))
 
         assert length(tagged) == 1,
                "#{site}: #{length(tagged)} tagged abort statements (expected 1); " <>
                  "result #{inspect(result)}"
 
-        assert {_head, [{_verb, nil, :division_by_zero, {^site, ^ref}} | rest]} =
-                 Enum.split_while(stream, &(not match?({_v, _s, _c, {^site, ^ref}}, &1)))
+        assert {_head, [{:select, :none, :division_by_zero, {^site, ^ref}} | rest]} =
+                 Enum.split_while(stream, &(not match?({_v, _t, _c, {^site, ^ref}}, &1))),
+               "#{site}: stream #{inspect(stream)}"
 
-        # The real read at the named site observes the aborted transaction.
-        assert [{"select", ^table, :in_failed_sql_transaction, nil} | later] = rest
+        # The real read at the named site observes the aborted transaction,
+        # then exactly one successful owner rollback and nothing else (T2).
+        assert rest == [
+                 {:select, table, :in_failed_sql_transaction, nil},
+                 {:rollback, :none, :ok, nil}
+               ],
+               "#{site}: after the abort #{inspect(rest)}"
 
-        # After it only the owner's rollback: no later business read or write.
-        assert Enum.all?(later, &match?({"rollback", nil, _code, nil}, &1)),
-               "#{site}: later statements #{inspect(later)}"
+        assert result == unquote(Macro.escape(expected)),
+               "#{site}: owner outcome #{inspect(result)}"
 
-        refute success?(result), "#{site}: the create succeeded: #{inspect(result)}"
         assert survivors(ctx) == before
         assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
       end
