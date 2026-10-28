@@ -52,7 +52,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d),
     B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
     B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
-    `resolve_delegation/2` and `operator?/1` are implemented. Every other
+    `resolve_delegation/2` and `operator?/1`, and `assurance/0` are
+    implemented. Every other
     function is still a non-permissive RED declaration returning
     `{:error, :not_implemented}`; none fabricates success.
     """
@@ -74,6 +75,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
     @database "sdr_agent_prototype"
+    @label "UNVERIFIED (PROTOTYPE)"
     @agents [:claude_code, :codex_cli]
     @correlation ~r/\A[A-Za-z0-9._:-]{8,128}\z/
     @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
@@ -90,7 +92,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       witness_mode: :absent,
       funding_id: "d237-funding/1",
       max_contacts: 3,
-      label: "UNVERIFIED (PROTOTYPE)",
+      label: @label,
       acceptance_ref: "D-249",
       text_sha256: "99a2869ea7501eeeb4615137f23f830de5ddabc2ac746ae6638fbc6fafde9ac0"
     }
@@ -151,6 +153,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
     else
       defp current, do: red(:ordinary)
+    end
+
+    @doc """
+    The IF-5 assurance block, in prototype runtime only: the constant label,
+    the boot snapshot's policy id, instance and dataset class, and the
+    compiled policy entry's digest. It confers no authority.
+    """
+    @spec assurance() :: {:ok, map()} | {:error, :not_prototype_runtime}
+    def assurance do
+      with {:ok, snapshot} <- binding() do
+        {:ok,
+         %{
+           "label" => @label,
+           "policy_id" => snapshot.policy_id,
+           "entry_sha256" => policy_entry_sha256(),
+           "instance_id" => snapshot.instance_id,
+           "dataset_class" => snapshot.dataset_class
+         }}
+      end
     end
 
     @doc "Setup phase 2; see the moduledoc."
