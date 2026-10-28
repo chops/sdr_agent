@@ -189,9 +189,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     anchor forced from the snapshot.
 
     A concurrent creator's unique violation on that identity is re-read
-    only AFTER the failed transaction (or savepoint) has rolled back, never
+    only AFTER the failed top-level transaction has rolled back, never
     inside the aborted transaction; any other failure is
-    `:binding_mismatch`, never a replay.
+    `:binding_mismatch`, never a replay. A call inside an already-open
+    transaction (a nested Audit or Repo transaction is not a savepoint) is
+    refused with `:binding_mismatch` after the input checks and before any
+    query or write; the one caller, the task entry, never nests.
     """
     @spec enter_session(term(), term()) ::
             {:ok, Ecto.UUID.t()} | {:error, SdrAgent.Prototype.enter_error()}
@@ -199,10 +202,18 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       with {:ok, snapshot} <- binding(),
            {:ok, agent} <- setup_agent(agent),
            {:ok, correlation} <- setup_correlation(correlation),
+           :ok <- not_nested(),
            :ok <- check_live() do
         enter(snapshot, agent, correlation)
       end
     end
+
+    # A nested Audit.transaction is a plain nested Repo.transaction, not a
+    # savepoint (Codex a95a89fb R1): the unique-race recovery could only run
+    # in an aborted caller transaction. The task entry is the one caller and
+    # never nests, so an already-open transaction is refused before any
+    # query or write.
+    defp not_nested, do: if(Repo.in_transaction?(), do: {:error, :binding_mismatch}, else: :ok)
 
     defp enter(snapshot, agent, correlation) do
       fn -> replay_or_create(snapshot, agent, correlation) end
