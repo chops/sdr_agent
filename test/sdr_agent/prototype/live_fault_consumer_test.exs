@@ -73,8 +73,10 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
   @binding_failed {{:live_read, :binding_read}, :in_failed_sql_transaction}
   @state_probe_failed {:state_probe, :in_failed_sql_transaction}
 
-  setup do
-    %{fx: G.prototype!()}
+  # Prototype runtime with the provisioned grant; the ordinary controls
+  # (`@describetag ordinary: true`) bind in ordinary runtime and stay there.
+  setup ctx do
+    if ctx[:ordinary], do: %{fx: G.bound!()}, else: %{fx: G.prototype!()}
   end
 
   ## The seam: one scope around the consumer only
@@ -157,11 +159,20 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
   defp kind("commit", _source, _options, _in_tx, _texts), do: :commit
   defp kind("rollback", _source, _options, _in_tx, _texts), do: :rollback
 
-  defp kind(query, source, options, in_tx, texts) do
-    cond do
-      Keyword.has_key?(options, :d237_live_fault) ->
-        {:fault, options[:d237_live_fault], in_tx}
+  defp kind(query, source, options, in_tx, texts),
+    do: tag(options, in_tx) || statement(query, source, texts)
 
+  # Test-tagged statements: S1's injected fault, or this file's sentinel.
+  defp tag(options, in_tx) do
+    cond do
+      Keyword.has_key?(options, :d237_live_fault) -> {:fault, options[:d237_live_fault], in_tx}
+      Keyword.get(options, :d237_tf2_sentinel) == true -> :sentinel
+      true -> nil
+    end
+  end
+
+  defp statement(query, source, texts) do
+    cond do
       query == texts.binding_read and source == "prototype_database_bindings" ->
         {:live_read, :binding_read}
 
@@ -210,17 +221,28 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
 
     refute Enum.any?(events, &match?({{:live_read, ^stage}, _}, &1)),
            "the faulted #{stage} read ran"
+
+    assert probes(events) in [[], [{:state_probe, :ok}]], "probes: #{inspect(probes(events))}"
   end
 
-  # The no-business-statement oracle after a failed read: at most one
-  # state probe, then the owner's rollback, and nothing else.
+  defp probes(events), do: Enum.filter(events, &match?({:state_probe, _}, &1))
+
+  # The no-business-statement oracle after a failed read (plan r2, Codex
+  # 8052289d): EXACTLY one state probe, then the owner's rollback, and
+  # nothing else (no sentinel, no business statement).
   defp owner_only!(post, failed_read) do
-    assert post in [
-             [failed_read, {:rollback, :ok}],
-             [failed_read, @state_probe_failed, {:rollback, :ok}]
-           ],
+    assert post == [failed_read, @state_probe_failed, {:rollback, :ok}],
            "after the failed read: #{inspect(post)}"
   end
+
+  # The probe's typed result (plan r2 section 4): the aborted owner's
+  # `in_failed_sql_transaction`, unchanged.
+  defp typed_abort?(result),
+    do:
+      match?(
+        {:error, %Postgrex.Error{postgres: %{code: :in_failed_sql_transaction}}},
+        result
+      )
 
   # Exactly one later transaction of its own (Codex 7e2eb9ab): one `begin`
   # first, one `commit` last, no `rollback` and no other boundary, and
@@ -300,6 +322,9 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
   defp ident({:error, %Refused{} = r}), do: {:error, Refused, r.stage, r.reason, r.check}
   defp ident({:error, %Ash.Query{resource: resource}}), do: {:error, Ash.Query, resource}
 
+  defp ident({:error, %Postgrex.Error{postgres: %{code: code}}}),
+    do: {:error, Postgrex.Error, code}
+
   defp ident({:error, %{__struct__: module} = error}),
     do: {:error, module, Enum.map(Map.get(error, :errors, []), &leaf/1)}
 
@@ -330,6 +355,21 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
   ## The consumer calls
 
   defp reserve(fx, run), do: G.reserve(fx, run)
+
+  # The allowed inherited owner (Codex 8052289d P1): the reservation inside
+  # the caller's `Audit.transaction/1`, then a SENTINEL in the caller that
+  # must NOT run when the owner is exited: a message and one tagged
+  # statement, either of which would show an inner normal return.
+  defp in_caller(fx, run) do
+    test = self()
+
+    SdrAgent.Audit.transaction(fn ->
+      inner = reserve(fx, run)
+      send(test, {:tf2_inner_returned, ident(inner)})
+      _ = Repo.query("SELECT 1", [], telemetry_options: [d237_tf2_sentinel: true])
+      inner
+    end)
+  end
 
   defp release_call(:direct, invocation, run), do: G.finalize(invocation, run)
   defp release_call(:facade, invocation, run), do: ResultGate.gate(invocation, G.gate(run))
@@ -405,6 +445,8 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
 
         assert new_failures(fx, before) == [refused.failure_id]
         assert new_types(fx, before) == @reservation_refusal
+        # Top-level R1 never probes (plan r2: the KEEP path is outside every probe branch).
+        assert probes(events) == [], "a probe at top level"
       end
     end
 
@@ -458,40 +500,28 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
       before = snapshot(fx, run, nil)
 
       {{owner, hits, trip}, events} =
-        captured(
-          fn ->
-            armed(:binding_read, :abort, fn ->
-              SdrAgent.Audit.transaction(fn -> reserve(fx, run) end)
-            end)
-          end,
-          texts
-        )
+        captured(fn -> armed(:binding_read, :abort, fn -> in_caller(fx, run) end) end, texts)
 
       reached!(:binding_read, hits, trip)
       assert after_fault!(events, :binding_read) == [@binding_failed, {:rollback, :ok}]
+      refute_received {:tf2_inner_returned, _}, "the reservation returned into the caller"
       assert binding_throw?(owner), "owner: #{inspect(ident(owner))}"
       nothing!(fx, run, nil, before)
     end
 
-    test "identity_read/abort: no business statement after the failed read before the owner's rollback",
+    test "identity_read/abort: one probe, then the owner's rollback; the caller's sentinel never runs",
          %{fx: fx} do
       texts = live_texts!()
       run = G.run!(fx)
       before = snapshot(fx, run, nil)
 
       {{owner, hits, trip}, events} =
-        captured(
-          fn ->
-            armed(:identity_read, :abort, fn ->
-              SdrAgent.Audit.transaction(fn -> reserve(fx, run) end)
-            end)
-          end,
-          texts
-        )
+        captured(fn -> armed(:identity_read, :abort, fn -> in_caller(fx, run) end) end, texts)
 
       reached!(:identity_read, hits, trip)
       owner_only!(after_fault!(events, :identity_read), @identity_failed)
-      assert match?({:error, _}, owner), "owner: #{inspect(ident(owner))}"
+      refute_received {:tf2_inner_returned, _}, "the reservation returned into the caller"
+      assert typed_abort?(owner), "owner: #{inspect(ident(owner))}"
       nothing!(fx, run, nil, before)
     end
   end
@@ -564,8 +594,25 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
 
       reached!(:identity_read, hits, trip)
       owner_only!(after_fault!(events, :identity_read), @identity_failed)
-      assert match?({:error, _}, result) and not refused?(result, :launch)
+      assert typed_abort?(result), "launch: #{inspect(ident(result))}"
       nothing!(ctx.fx, ctx.run, ctx.reserved, before)
+    end
+
+    test "probe incidence: a non-aborting live refusal probes exactly once, successfully, before the refusal is written",
+         ctx do
+      texts = live_texts!()
+
+      {{result, hits, trip}, events} =
+        captured(
+          fn ->
+            armed(:identity_read, :returned_error, fn -> G.launch(ctx.fx, ctx.reserved) end)
+          end,
+          texts
+        )
+
+      reached!(:identity_read, hits, trip)
+      assert refused?(result, :launch), "launch: #{inspect(ident(result))}"
+      assert probes(events) == [{:state_probe, :ok}], "probes: #{inspect(probes(events))}"
     end
   end
 
@@ -653,10 +700,96 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
 
         reached!(:identity_read, hits, trip)
         owner_only!(after_fault!(events, :identity_read), @identity_failed)
-        assert match?({:error, _}, result), "release: #{inspect(ident(result))}"
+        assert typed_abort?(result), "release: #{inspect(ident(result))}"
         assert G.release(ctx.invocation) == nil
         nothing!(ctx.fx, ctx.run, ctx.invocation, before)
       end
+
+      test "probe incidence: a non-aborting live refusal probes exactly once, successfully, before the cause read",
+           ctx do
+        texts = live_texts!()
+
+        {{result, hits, trip}, events} =
+          captured(
+            fn ->
+              armed(:identity_read, :returned_error, fn ->
+                release_call(unquote(path), ctx.invocation, ctx.run)
+              end)
+            end,
+            texts
+          )
+
+        reached!(:identity_read, hits, trip)
+
+        assert match?({:withheld, %{reason: :prototype_authority_refused}, _}, result),
+               "release: #{inspect(ident(result))}"
+
+        assert probes(events) == [{:state_probe, :ok}], "probes: #{inspect(probes(events))}"
+      end
     end
   end
+
+  ## Ordinary runtime (Codex 8052289d Q-G3): genuine ordinary paths through
+  ## the two changed shared clauses; the trace has no state probe.
+
+  describe "ordinary runtime controls" do
+    @describetag ordinary: true
+
+    setup do
+      assert SdrAgent.Prototype.runtime() == :ordinary, "prerequisite: ordinary runtime"
+      :ok
+    end
+
+    test "OR1: a top-level ordinary reservation refusal records its refusal and never probes",
+         %{fx: fx} do
+      run = G.run!(fx)
+      {result, rows} = raw(fn -> reserve(fx, run) end)
+
+      assert match?({:error, %Refused{stage: :reservation}}, result),
+             "reserve: #{inspect(ident(result))}"
+
+      refute_probe!(rows)
+    end
+
+    test "OR1i: an ordinary reservation refusal inside an allowed Audit.transaction never probes",
+         %{fx: fx} do
+      run = G.run!(fx)
+      {owner, rows} = raw(fn -> SdrAgent.Audit.transaction(fn -> reserve(fx, run) end) end)
+
+      assert match?({:ok, {:error, %Refused{stage: :reservation}}}, owner),
+             "owner: #{inspect(owner_ident(owner))}"
+
+      refute_probe!(rows)
+    end
+
+    test "OL1: an ordinary launch refusal is written and never probes", %{fx: fx} do
+      _grant = SdrAgent.AgentsFixtures.grant!(fx.tenant, %{}, fx.admin)
+      run = G.run!(fx)
+      reserved = SdrAgent.AdmissionFixtures.admitting(fn -> reserve(fx, run) end)
+      assert match?({:ok, %ModelInvocation{status: :reserved}}, reserved), "prerequisite"
+      {:ok, reserved} = reserved
+      {result, rows} = raw(fn -> G.launch(fx, reserved) end)
+
+      assert match?({:error, %Refused{stage: :launch}}, result),
+             "launch: #{inspect(ident(result))}"
+
+      refute_probe!(rows)
+    end
+  end
+
+  # No `SELECT 1` and no test-tagged statement in an ordinary trace.
+  defp refute_probe!(rows) do
+    probes = for {"SELECT 1", nil, _options, _code, _tx} <- rows, do: :state_probe
+
+    tagged =
+      for {_query, _source, options, _code, _tx} <- rows,
+          key <- Keyword.keys(options),
+          key in [:d237_live_fault, :d237_tf2_sentinel],
+          do: key
+
+    assert {probes, tagged} == {[], []}, "in ordinary runtime: #{inspect({probes, tagged})}"
+  end
+
+  defp owner_ident({:ok, inner}), do: {:ok, ident(inner)}
+  defp owner_ident(other), do: ident(other)
 end
