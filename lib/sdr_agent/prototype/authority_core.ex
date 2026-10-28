@@ -351,6 +351,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    @doc """
+    `true` when `value` is a binary matching the session-correlation
+    pattern that session entry and setup phase 2 apply (the same module
+    attribute, not a copy), `false` otherwise. Pure; for setup's argument
+    validation (setup contract r3 R1).
+    """
+    @spec valid_correlation?(term()) :: boolean()
+    def valid_correlation?(value) when is_binary(value), do: Regex.match?(@correlation, value)
+    def valid_correlation?(_value), do: false
+
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
     def bootstrap(opts) do
