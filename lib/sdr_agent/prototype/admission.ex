@@ -65,8 +65,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         unchanged, so a launch at the window's end keeps
         `grant_ineligible_at_launch`/`grant_expired`.
 
-    The release decision (`SdrAgent.Prototype.Release`) reuses `live/0` and
-    `recorded/1`.
+    The release decision (`SdrAgent.Prototype.Release`) reuses `live/0`,
+    `recorded/1`, the closed comparator `check_recorded/3` and the charged
+    grant's checks `check_charge/3` (the launch's own order and codes). A
+    returned read error of the charged grant is never a refusal: it leaves
+    through the owning transaction's rollback with its identity (S2-A).
     """
 
     require Ash.Query
@@ -122,12 +125,53 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            :ok <- gate_active(),
            :ok <- witness_absent(live.binding, observation),
            {:ok, recorded} <- recorded(invocation),
-           :ok <- closed_authority(recorded),
-           :ok <- recorded_values(recorded, live, invocation),
-           {:ok, grant, allocations} <- charged_grant(invocation),
+           :ok <- check_recorded(recorded, live, invocation),
+           {:ok, _grant} <- check_charge(invocation, live, recorded) do
+        :ok
+      end
+    end
+
+    @doc """
+    The closed comparator of a `recorded` 14-key prototype authority (the
+    launch's and the release decision's): the closed dictionary (exactly the
+    14 keys, each strictly typed), else `authority_mismatch`; then every
+    recorded value but the revision against the `live` binding and the
+    invocation's own charge, the general keys first (`authority_mismatch`),
+    then the operator anchor (`operator_mismatch`), then the witness mode
+    (`witness_mode_mismatch`). `:ok` or `{:error, reason, check}`.
+
+    An INTERNAL helper: its only remote caller is `SdrAgent.Prototype.Release`
+    (`ReleaseGuardTest`); `launch/3` uses it locally.
+    """
+    @spec check_recorded(map(), map(), struct()) :: :ok | {:error, atom(), atom()}
+    def check_recorded(recorded, live, invocation) do
+      with :ok <- closed_authority(recorded), do: recorded_values(recorded, live, invocation)
+    end
+
+    @doc """
+    The charged grant's current checks (the launch's and the release
+    decision's): this binding's provenance grant (`grant_not_eligible`), its
+    status (`grant_not_eligible`), the anchor as creator and updater
+    (`operator_mismatch`), the exact terms and allocation set
+    (`grant_not_eligible`), then the `recorded` revision against the current
+    one (`grant_changed`). `{:ok, grant}` or `{:error, reason, check}`.
+
+    S2-A (Codex 3122b0d4 Q6): an absent grant (`{:ok, nil}`) is the business
+    refusal `grant_not_eligible`; a returned read error is never folded into
+    a refusal: it leaves through `Repo.rollback/1` of the caller's owning
+    transaction (the launch's `audit_transact`, the gate's attempt), with
+    its identity, before any refusal, `mark_sent` or decision is written. A
+    raise propagates. An INTERNAL helper: its only remote caller is
+    `SdrAgent.Prototype.Release` (`ReleaseGuardTest`); `launch/3` uses it
+    locally.
+    """
+    @spec check_charge(struct(), map(), map()) :: {:ok, struct()} | {:error, atom(), atom()}
+    def check_charge(invocation, live, recorded) do
+      with {:ok, grant, allocations} <- charged_grant(invocation),
            :ok <- provenance(grant, live),
-           :ok <- provisioned(grant, allocations, live) do
-        same_revision(recorded, grant)
+           :ok <- provisioned(grant, allocations, live),
+           :ok <- same_revision(recorded, grant) do
+        {:ok, grant}
       end
     end
 
@@ -180,15 +224,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # proves concurrency against SQL written behind the application.
     #
     # RED-b2c seam (Codex 79819840 R1): in test-seam builds only, an injected
-    # result replaces these reads (`charged_grant_read/1` below). It is a
-    # deny/no-positive declaration: the injected result takes the SAME path
-    # as a real one, so `{:ok, nil}` and a returned error are both still
-    # refused `grant_not_eligible` (S2-A, unchanged until the Q6 GREEN).
-    # Every other build has no seam path.
+    # result replaces these reads (`charged_grant_read/1` below); it takes the
+    # SAME path as a real one. S2-A (Codex 3122b0d4 Q6): `{:ok, nil}` is the
+    # business refusal `grant_not_eligible`; a returned error leaves through
+    # the owning transaction's rollback with its identity (see
+    # `check_charge/3`). Every other build has no seam path.
     defp charged_grant(%{grant_id: grant_id} = invocation) when is_binary(grant_id) do
       case charged_grant_read(invocation) do
-        {:ok, grant, allocations} -> {:ok, grant, allocations}
-        _missing_or_error -> refuse(:grant_not_eligible)
+        {:ok, %ModelCallGrant{} = grant, allocations} -> {:ok, grant, allocations}
+        {:ok, nil} -> refuse(:grant_not_eligible)
+        {:error, error} -> Repo.rollback(error)
       end
     end
 

@@ -4,8 +4,9 @@
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.Release do
     @moduledoc """
-    The prototype gate's release decision (ADR-0005 D-237 amendment item 5;
-    interfaces r6 IF-4; Codex A1, A2). It is reached only through
+    The prototype gate's release decision (ADR-0005 D-237 amendment items 5
+    and 6; interfaces r6 IF-4; Codex A1, A2; b2c α, correction r2 and the
+    boundary delta a7bbcac3). It is reached only through
     `SdrAgent.Agents.ResultGate.finalize/4`, which dispatches here at its
     head in prototype runtime with its own four arguments; no other module
     references it (an xref test asserts this). No caller supplies the
@@ -17,60 +18,91 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     of every wire-witness link of the invocation (current or superseded;
     link writers lock the invocation `FOR UPDATE`, which this transaction
     holds `FOR SHARE`) and every `reconciliation_required` Failure of it
-    (live or resolved): the known evidence; then the selected cause
-    `FOR UPDATE`; then the chain head. No lock is taken after the head.
-    In test-seam builds only, a `before_head` hook (see the source) runs
-    just before the head.
+    (live or resolved): the known evidence; then, by branch, the charged
+    grant and its one charged allocation `FOR SHARE`
+    (`SdrAgent.Agents.Admission.lock_charge/1`; release) or the selected
+    cause `FOR UPDATE` (refusal, mismatch); then the chain head. No lock is
+    taken after the head. In test-seam builds only, a `before_head` hook
+    (see the source) runs just before the head.
 
-    **Under the head, the Failures again** (Codex 0235e6fd ruling 2). Failure
-    writers append under the chain head, so the invocation's Failures are
-    read again there (a plain read; still no lock after the head). If they
-    change the mismatch branch's cause, the known-evidence code or the
-    preferred bound cause, nothing is written: the transaction rolls back
-    and the gate decides once more, refusal-only, taking its locks before
-    the head again. A second change returns `{:error, :recheck_failed}` with
+    **The plan, before the head,** for a completed call with no mismatch,
+    in this order (each refusal is withheld `prototype_authority_refused`
+    with one code): known evidence first (`known_integrity_signal`: a
+    critical Failure, live or resolved, a usable live critical staying the
+    bound cause, no mismatch claimed; `witness_evidence_present`: any other
+    link, or a live warning, which stays the bound cause); the live binding
+    (`binding_mismatch`); the absent store's empty receipt
+    (`witness_mode_mismatch`, a reconciled receipt recorded with its true
+    classification `:reconciled`); the one original reservation event's
+    authority (`authority_unrecorded`); the identity (`identity_mismatch`:
+    ClaudeCLI, generation 2, a compiled profile); the recorded authority by
+    the launch's comparator (`authority_mismatch`, `operator_mismatch`,
+    `witness_mode_mismatch`); the scope (`scope_mismatch`: a running,
+    non-proof run, a completed invocation, origin, purpose and profile in
+    the policy and the funded scope); the output (`output_invalid`); the
+    charged grant by the launch's checks (`grant_not_eligible`,
+    `operator_mismatch`, `grant_changed`; a technical read error rolls the
+    attempt back with its identity); the window (`outside_window`, the end
+    exclusive). If all hold, the plan is the release.
+
+    **Under the head** (Codex 0235e6fd ruling 2; 3122b0d4 Q2): the Failures
+    are read again (plain), and
+
+      * a release plan is recomputed in full at ONE instant read here
+        (`SdrAgent.Clock.utc_now/0`): if it is still the release, the
+        decision is `released_unverified` / `owner_prototype_unverified`
+        with the `d237-basis/1` built from those facts
+        (`SdrAgent.Prototype.Basis.build/1`), decided in this gate's own
+        `Prelocked` context (`finalizer: :prototype_gate`, bound to that
+        instant), and the output is read through
+        `SdrAgent.Agents.ReleasedOutput.fetch/2`; the run stays running.
+        Anything else writes nothing: the attempt rolls back carrying the
+        under-head refusal code;
+      * a refusal or mismatch plan keeps the b1 rule: if the known-evidence
+        code or the preferred or mismatch cause changed, nothing is written
+        and the attempt rolls back; otherwise it is withheld with the
+        pre-head code and the run stops (`witness_unreconciled`, or
+        `witness_mismatch`).
+
+    **The bounded repeat:** after a failed recheck the gate decides once
+    more in REFUSAL-ONLY mode. A release plan becomes a refusal with the
+    carried code (or, with none, `{:error, :recheck_failed}` and nothing
+    written); under the head a CURRENT refusal at that instant wins over
+    the carried code (a `binding_mismatch` first passes the TF-2 state
+    probe). A second failed recheck returns `{:error, :recheck_failed}` with
     nothing written; the facade returns it unchanged and the sweeper leaves
-    it to its next pass (D-237 TF-1). There is no third attempt and no
-    fallback.
+    it to its next pass (D-237 TF-1). There is no third attempt, no
+    fallback and no release in the repeat.
 
-    **Outcomes** (the existing `finalize/4` shapes; this increment never
-    releases):
+    `{:interrupted, _}` and `{:timeout, _}` keep their existing outcomes
+    (`gate_interrupted`; `witness_timeout` / `capture_pending`) and never
+    release.
 
-      * a mismatch link (current or superseded), or a mismatch receipt:
-        withheld `witness_mismatch` on the invocation's critical cause as run
-        recovery selects it (`ResultGate.Recovery.mismatch/2`); the run stops
-        `witness_mismatch`;
-      * `{:interrupted, _}` and `{:timeout, _}` otherwise keep their existing
-        outcomes (`gate_interrupted`; `witness_timeout` / `capture_pending`)
-        and causes; neither ever releases;
-      * otherwise withheld `prototype_authority_refused` with one code, known
-        evidence first: `known_integrity_signal` (a critical Failure, live or
-        resolved; a usable live critical stays the bound cause and no
-        mismatch is claimed), `witness_evidence_present` (any other link, or
-        a live warning, which stays the bound cause); then `binding_mismatch`
-        (the live binding), `witness_mode_mismatch` (the observation is not
-        the absent store's empty receipt; a reconciled receipt is recorded
-        with its true classification `:reconciled`), and
-        `authority_unrecorded` (no single original reservation event records
-        a `prototype_authority`). No reservation records one yet, so a
-        recorded one is refused `authority_mismatch`; the remaining
-        eligibility checks, the release and its basis come with the
-        recording. The run stops `witness_unreconciled`.
+    **Increment α (partial, not landable):** `ReleasedOutput.fetch/2` does
+    not yet verify a `released_unverified` row (b2c β), so a release attempt
+    rolls back at the fetch and `finalize/4` returns
+    `{:error, :result_not_released}` with nothing written.
     """
 
     require Ash.Query
 
     alias SdrAgent.Actor
+    alias SdrAgent.Agents
+    alias SdrAgent.Agents.Admission, as: AgentAdmission
     alias SdrAgent.Agents.AgentRun
     alias SdrAgent.Agents.ModelInvocation
+    alias SdrAgent.Agents.ReleaseDecision.Prelocked
+    alias SdrAgent.Agents.ReleasedOutput
     alias SdrAgent.Agents.ResultGate
     alias SdrAgent.Agents.ResultGate.Recovery
     alias SdrAgent.Agents.WireWitnessLink
     alias SdrAgent.Agents.Witness
     alias SdrAgent.Audit
     alias SdrAgent.Audit.Kernel
+    alias SdrAgent.Clock
     alias SdrAgent.Operations.Failure
     alias SdrAgent.Prototype.Admission, as: PrototypeAdmission
+    alias SdrAgent.Prototype.Basis
     alias SdrAgent.Repo
 
     @subject "SdrAgent.Agents.ModelInvocation"
@@ -79,7 +111,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc false
     @spec finalize(struct(), map(), {:ok | :timeout | :interrupted, map()}, keyword()) ::
-            {:withheld, struct(), struct()} | {:error, term()}
+            {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
     def finalize(invocation, gate, {kind, receipt} = outcome, opts)
         when kind in [:ok, :timeout, :interrupted] and is_map(receipt) do
       seamed(invocation, fn -> bounded(invocation, gate, outcome, opts) end)
@@ -88,18 +120,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp bounded(invocation, gate, outcome, opts) do
       guard = Keyword.get(opts, :guard, fn _run -> :ok end)
       actor = Actor.system(:agent_runtime, invocation.tenant_id)
-      attempt = fn -> attempt(invocation, gate, outcome, {guard, actor}) end
+      attempt = fn mode -> attempt(invocation, gate, outcome, {guard, actor, mode}) end
 
-      # A bounded repeat: one more refusal-only attempt after a failed recheck;
-      # a second failure is returned, never a third attempt.
-      case attempt.() do
-        {:error, :recheck_failed} -> attempt.()
+      # A bounded repeat: one more refusal-only attempt after a failed recheck,
+      # carrying attempt 1's under-head code; a second failure is returned
+      # plain, never a third attempt.
+      case attempt.(:normal) do
+        {:error, {:recheck_failed, code}} -> attempt.({:refusal_only, code}) |> plain()
         result -> result
       end
     end
 
-    defp attempt(invocation, gate, outcome, {guard, actor}) do
-      fn -> locked(invocation, gate, outcome, guard, actor) end
+    defp plain({:error, {:recheck_failed, _code}}), do: {:error, :recheck_failed}
+    defp plain(result), do: result
+
+    defp attempt(invocation, gate, outcome, ctx) do
+      fn -> locked(invocation, gate, outcome, ctx) end
       |> Audit.transaction()
       |> case do
         {:ok, result} -> result
@@ -108,7 +144,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    defp locked(invocation, gate, {_kind, receipt} = outcome, guard, actor) do
+    defp locked(invocation, gate, {_kind, receipt} = outcome, {guard, actor, mode}) do
       tenant_id = invocation.tenant_id
 
       with {:ok, run} <- ResultGate.lock(AgentRun, gate.run_id, tenant_id, "FOR UPDATE"),
@@ -117,14 +153,20 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            :ok <- guard.(run),
            {:ok, invocation} <-
              ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
+           held = {invocation, run},
            evidence = known_evidence(invocation),
-           plan = plan(outcome, evidence, invocation),
+           {:ok, plan} <- moded(plan(outcome, evidence, held, Clock.utc_now()), mode),
            :ok <- usable_after_live_refusal(plan),
-           {:ok, plan, cause} <- hold(plan, receipt, evidence, {invocation, run}),
+           {:ok, plan, cause} <- hold(plan, receipt, evidence, held),
            :ok <- before_head(invocation),
-           {:ok, _head} <- Kernel.lock_head(tenant_id),
-           :ok <- recheck(plan, cause, evidence, {invocation, run}) do
-        ResultGate.under_head(plan, invocation, run, nil, cause, actor)
+           {:ok, _head} <- Kernel.lock_head(tenant_id) do
+        under_head(plan, cause, %{
+          outcome: outcome,
+          evidence: evidence,
+          held: held,
+          mode: mode,
+          actor: actor
+        })
       else
         {:error, error} -> Repo.rollback(error)
       end
@@ -205,7 +247,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     ## The plan
 
-    defp plan({kind, receipt}, evidence, invocation) do
+    defp plan({kind, receipt}, evidence, held, now) do
       cond do
         Enum.any?(evidence.links, &(&1.link_status == :mismatch)) or
             Map.get(receipt, :status) == :mismatch ->
@@ -215,14 +257,39 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           ResultGate.plan(kind, receipt)
 
         true ->
-          %{
-            release?: false,
-            reason: :prototype_authority_refused,
-            classification: classification(receipt),
-            prototype_refusal: refusal_code(receipt, evidence, invocation)
-          }
+          decision(receipt, evidence, held, now)
       end
     end
+
+    defp decision(receipt, evidence, held, now) do
+      classification = classification(receipt)
+
+      case eligibility(receipt, evidence, held, now) do
+        {:ok, facts} -> %{release?: :unverified, classification: classification, facts: facts}
+        {:refuse, code} -> refusal(classification, code)
+      end
+    end
+
+    defp refusal(classification, code) do
+      %{
+        release?: false,
+        reason: :prototype_authority_refused,
+        classification: classification,
+        prototype_refusal: code
+      }
+    end
+
+    # The repeat is refusal-only: a release plan becomes a refusal with the
+    # carried code, or, with none, no decision at all.
+    defp moded(plan, :normal), do: {:ok, plan}
+
+    defp moded(%{release?: :unverified}, {:refusal_only, nil}),
+      do: {:error, {:recheck_failed, nil}}
+
+    defp moded(%{release?: :unverified} = plan, {:refusal_only, code}),
+      do: {:ok, refusal(plan.classification, code)}
+
+    defp moded(plan, {:refusal_only, _code}), do: {:ok, plan}
 
     # The true observation classification (amendment item 5; Codex 2c9450b7
     # ruling 3b): a reconciled receipt is recorded as :reconciled.
@@ -234,16 +301,30 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp classification(_receipt), do: :unclassified
 
-    # Known evidence first, then the live binding, the observation and the
-    # recorded authority.
-    defp refusal_code(receipt, evidence, invocation) do
+    # Known evidence first, then the live binding, the observation, the
+    # recorded authority, the identity, the recorded values, the scope, the
+    # output, the charged grant and the window (amendment item 5).
+    defp eligibility(receipt, evidence, {invocation, run}, now) do
       with :ok <- no_known_evidence(evidence),
            {:ok, live} <- step(PrototypeAdmission.live()),
            :ok <- absent_observation(receipt, live),
-           {:ok, _recorded} <- step(PrototypeAdmission.recorded(invocation)) do
-        :authority_mismatch
-      else
-        {:refuse, code} -> code
+           {:ok, recorded} <- step(PrototypeAdmission.recorded(invocation)),
+           :ok <- identity(invocation, live),
+           :ok <- step(PrototypeAdmission.check_recorded(recorded, live, invocation)),
+           :ok <- in_scope(run, invocation, live),
+           :ok <- valid_output(invocation),
+           {:ok, grant} <- step(PrototypeAdmission.check_charge(invocation, live, recorded)),
+           :ok <- in_window(now, live.funding) do
+        {:ok,
+         %{
+           snapshot: live.binding,
+           entry: live.entry,
+           funding: live.funding,
+           invocation: invocation,
+           run: run,
+           grant: grant,
+           decided_at: now
+         }}
       end
     end
 
@@ -267,15 +348,61 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp absent_observation(_receipt, _live), do: {:refuse, :witness_mode_mismatch}
 
-    ## The cause, locked before the head
+    # Before the recorded authority (Codex 3122b0d4 Q4): ClaudeCLI,
+    # generation 2, a profile of the compiled identity.
+    defp identity(invocation, %{entry: entry}) do
+      if invocation.provider == :claude_cli and invocation.ledger_generation == 2 and
+           invocation.profile_id in entry.identity.profile_ids,
+         do: :ok,
+         else: {:refuse, :identity_mismatch}
+    end
+
+    defp in_scope(run, invocation, live) do
+      if running?(run, invocation) and scoped?(run.usage_origin, invocation, live),
+        do: :ok,
+        else: {:refuse, :scope_mismatch}
+    end
+
+    defp running?(run, invocation),
+      do:
+        run.status == :running and run.usage_origin != :proof and invocation.status == :completed
+
+    defp scoped?(origin, invocation, %{entry: entry, funding: funding}) do
+      funded? =
+        Enum.any?(funding.funded_scope, fn {funded_origin, purposes} ->
+          funded_origin == origin and invocation.purpose in purposes
+        end)
+
+      funded? and origin in entry.usage_origins and invocation.purpose in entry.purposes and
+        invocation.profile_id in funding.profile_ids
+    end
+
+    defp valid_output(%{validation_status: :valid}), do: :ok
+    defp valid_output(_invocation), do: {:refuse, :output_invalid}
+
+    # The funding entry's window: the start inclusive, the end exclusive.
+    defp in_window(now, funding) do
+      if DateTime.compare(now, funding.starts_at) != :lt and
+           DateTime.compare(now, funding.expires_at) == :lt,
+         do: :ok,
+         else: {:refuse, :outside_window}
+    end
+
+    ## Before the head: the branch's locks
 
     # D-237 TF-2 (plan r2): only the refusal code `binding_mismatch` can
-    # follow a live read (`refusal_code/3`); one state probe before the cause
-    # read. An error leaves through `locked/5`'s owner rollback.
+    # follow a live read; one state probe before the cause read. An error
+    # leaves through `locked/4`'s owner rollback.
     defp usable_after_live_refusal(%{prototype_refusal: :binding_mismatch}),
       do: PrototypeAdmission.state_probe()
 
     defp usable_after_live_refusal(_plan), do: :ok
+
+    # The release branch: the charged grant, then the one charged allocation,
+    # FOR SHARE (the launch's order); no cause.
+    defp hold(%{release?: :unverified} = plan, _receipt, _evidence, {invocation, _run}) do
+      with :ok <- AgentAdmission.lock_charge(invocation), do: {:ok, plan, nil}
+    end
 
     defp hold(%{reason: :witness_mismatch}, _receipt, _evidence, {invocation, run}),
       do: Recovery.mismatch(invocation, run)
@@ -307,20 +434,73 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end)
     end
 
-    ## Under the head: the Failures again
+    ## Under the head
+
+    # The release branch: the plan again, in full, at ONE instant read here;
+    # only the same release is decided, anything else writes nothing and
+    # rolls back carrying the under-head refusal code.
+    defp under_head(%{release?: :unverified}, nil, ctx) do
+      %{outcome: outcome, evidence: evidence, held: {invocation, _run} = held} = ctx
+      reread = %{evidence | failures: failures(invocation)}
+      now = Clock.utc_now()
+
+      case plan(outcome, reread, held, now) do
+        %{release?: :unverified} = current -> release(current, held, ctx.actor, now)
+        current -> Repo.rollback({:recheck_failed, Map.get(current, :prototype_refusal)})
+      end
+    end
 
     # Failure writers append under the chain head, so the invocation's
     # Failures are read again here: a plain read, no lock (the links stay as
     # read: link writers lock the invocation FOR UPDATE). Evidence that changes
-    # the branch's cause or the refusal code fails the recheck: the attempt
-    # rolls back with nothing written, and `finalize/4` decides once more.
-    defp recheck(plan, cause, evidence, {invocation, _run} = held) do
+    # the branch's cause or the known-evidence code fails the recheck: the
+    # attempt rolls back with nothing written, and `finalize/4` decides once
+    # more, refusal-only.
+    defp under_head(plan, cause, ctx) do
+      %{evidence: evidence, held: {invocation, _run} = held} = ctx
       reread = %{evidence | failures: failures(invocation)}
 
       if unchanged?(plan, cause, {evidence, reread}, held),
-        do: :ok,
-        else: {:error, :recheck_failed}
+        do: withhold(plan, cause, reread, ctx),
+        else: Repo.rollback({:recheck_failed, carried(plan, reread)})
     end
+
+    defp carried(%{prototype_refusal: code}, reread), do: evidence_code(reread) || code
+    defp carried(_plan, _reread), do: nil
+
+    defp withhold(plan, cause, reread, %{held: {invocation, run}} = ctx) do
+      case current_code(plan, reread, ctx) do
+        {:ok, plan} -> ResultGate.under_head(plan, invocation, run, nil, cause, ctx.actor)
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+
+    # The refusal-only repeat (Codex 3122b0d4 Q2): a CURRENT refusal at the
+    # decision instant wins over the carried or pre-head code; a current
+    # binding_mismatch first passes the TF-2 state probe. A normal attempt
+    # keeps its pre-head code.
+    defp current_code(
+           %{prototype_refusal: code} = plan,
+           reread,
+           %{mode: {:refusal_only, _}} = ctx
+         ) do
+      case plan(ctx.outcome, reread, ctx.held, Clock.utc_now()) do
+        %{prototype_refusal: ^code} ->
+          {:ok, plan}
+
+        %{prototype_refusal: :binding_mismatch} ->
+          with :ok <- PrototypeAdmission.state_probe(),
+               do: {:ok, %{plan | prototype_refusal: :binding_mismatch}}
+
+        %{prototype_refusal: current} ->
+          {:ok, %{plan | prototype_refusal: current}}
+
+        _release_or_other ->
+          {:ok, plan}
+      end
+    end
+
+    defp current_code(plan, _reread, _ctx), do: {:ok, plan}
 
     # A mismatch: the critical cause run recovery would select now.
     defp unchanged?(%{reason: :witness_mismatch}, cause, {_evidence, reread}, held),
@@ -357,5 +537,48 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp cause_id(nil), do: nil
     defp cause_id(%Failure{id: id}), do: id
+
+    ## The release (the gate's own context)
+
+    # The basis from the facts at the decision instant, decided in this
+    # gate's own Prelocked context bound to that instant; the output only
+    # through the released-output read. Any refusal or error rolls back.
+    defp release(%{facts: facts}, {invocation, _run}, actor, now) do
+      case Basis.build(facts) do
+        {:ok, basis, sha256} ->
+          %{
+            tenant_id: invocation.tenant_id,
+            model_invocation_id: invocation.id,
+            finalizer: :prototype_gate,
+            decided_at: now
+          }
+          |> Prelocked.run(&decide_release(&1, invocation, {basis, sha256}, actor))
+          |> case do
+            {:error, error} -> Repo.rollback(error)
+            released -> released
+          end
+
+        {:error, :basis_invalid} ->
+          Repo.rollback(:basis_invalid)
+      end
+    end
+
+    defp decide_release(prelocked, invocation, {basis, sha256}, actor) do
+      attrs = %{
+        model_invocation_id: invocation.id,
+        disposition: :released_unverified,
+        reason: :owner_prototype_unverified,
+        basis: basis,
+        basis_sha256: sha256
+      }
+
+      with {:ok, release} <-
+             Agents.decide_result_release(attrs, actor: actor, prelocked: prelocked),
+           {:ok, output} <- ReleasedOutput.fetch(invocation.id, actor) do
+        {:released, release, output}
+      else
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
   end
 end

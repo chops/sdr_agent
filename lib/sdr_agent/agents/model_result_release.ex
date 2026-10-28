@@ -30,8 +30,11 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       `:owner_prototype_unverified` with no link, projection, method or
       evidence (the `model_result_releases_pair` CHECK), and the withheld
       reason `:prototype_authority_refused` (`prototype_withheld_reasons/0`,
-      codes `prototype_codes/0`). `allowed_pair?/2` and the decision
-      behaviour for them are S2's and not yet in place.
+      codes `prototype_codes/0`). A `:released_unverified` decision is made
+      only by the prototype gate's own context, with its closed
+      `d237-basis/1` (`basis`, `basis_sha256`), and appends one
+      `model.result.released_unverified` event recording exactly those two
+      arguments (`SdrAgent.Agents.Changes.ReleaseDecision`).
 
   `:released` and `:withheld` need a completed generation-2 ClaudeCLI
   invocation outside a `:proof` run. The invocation is never updated for
@@ -129,6 +132,9 @@ defmodule SdrAgent.Agents.ModelResultRelease do
                    :gate_classification,
                    :prototype_refusal
                  ])
+  # D-237 (amendment item 6): a released_unverified decision's one event
+  # records exactly its closed `d237-basis/1` and that basis's SHA256.
+  @unverified_event Keyword.put(@event, :arguments, [:basis, :basis_sha256])
 
   postgres do
     table "model_result_releases"
@@ -244,11 +250,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @prototype_codes
       end
 
-      # D-237 RED-b2c deny-only declaration (Codex 3122b0d4): the caller-built
-      # d237-basis/1 and its digest, untrusted input, redacted from any
-      # inspection. ReleaseDecision refuses them on every decision; no
-      # decision records them yet (the released_unverified decision itself is
-      # still refused inside the gate's own context).
+      # D-237 (Codex 3122b0d4; b2c α): the caller-built d237-basis/1 and its
+      # digest, untrusted input, redacted from any inspection. ReleaseDecision
+      # accepts them only for a NEW released_unverified decision in the
+      # prototype gate's own context, and only when they equal the basis it
+      # rebuilds from the locked facts (`SdrAgent.Prototype.Basis`); they are
+      # refused on every other decision. The decision's one event records
+      # exactly these two arguments.
       argument :basis, :map do
         sensitive? true
       end
@@ -278,6 +286,9 @@ defmodule SdrAgent.Agents.ModelResultRelease do
 
       change {AppendEvent, [event_type: "model.result.calibration"] ++ @event},
         where: [attribute_equals(:disposition, :calibration)]
+
+      change {AppendEvent, [event_type: "model.result.released_unverified"] ++ @unverified_event},
+        where: [attribute_equals(:disposition, :released_unverified)]
     end
   end
 
