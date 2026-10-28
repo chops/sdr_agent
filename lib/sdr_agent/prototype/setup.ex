@@ -5,9 +5,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.Setup do
     @moduledoc """
     The D-237 setup orchestration (interfaces r6 IF-2 "Setup bootstrap
-    contract"; setup contract r2, Codex 85ab1090): one pure orchestrator over
-    a map of closed, injected effects (`real_effects/1` in the task, a
-    recording stub in tests).
+    contract"; setup contract r3, Codex 85ab1090 and 57fc6bb4): one pure
+    orchestrator over a map of closed, injected effects (`real_effects/1`
+    in the task, a recording stub in tests).
 
     - `run/2` runs phase 0 (preflight), phase 1 (storage before
       `with_repo`, then inside its callback the no-inherited-transaction
@@ -24,7 +24,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     with `f` the exact three-key `setup_phase` map (a reason of
     `SdrAgent.Prototype.SafeLog.reasons(:setup)`), `{:unexpected, phase}` or
     `{:sink_unavailable, 0}` (value-free; their terminal form is S1b's).
-    Effects are supplied by trusted internal task code only.
+    `args` are the task's exact strings (`agent:` "claude_code" or
+    "codex_cli", compared exactly); the context and `bootstrap/1` carry the
+    normalized agent atom. Every returned bootstrap or Seed code is
+    presented as `:refused` (no code establishes a rollback). Effects are
+    supplied by trusted internal task code only. Supported entry is the
+    top-level task process: the storage effects run before the
+    nested-transaction guard (setup contract r3 §4).
 
     Stage (D-237 S1): RED declarations only (Codex 85ab1090 bounded GO).
     Every function is non-permissive: it calls no effect and returns

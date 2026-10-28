@@ -1,6 +1,8 @@
 defmodule SdrAgent.Prototype.SetupIntegrationTest do
   @moduledoc """
-  Setup contract r2 (Codex 85ab1090) §6 B, C and T-twin, in the sandbox.
+  Setup contract r3 (Codex 85ab1090, 57fc6bb4) §6 B, C and T-twin, in the
+  sandbox. Every B and C row is a PREREQUISITE GATE until GREEN: B1-B5 are
+  not phase 2/3 proof and C is not exact-set proof (Codex 57fc6bb4).
 
   - B: `SdrAgent.Prototype.Setup.run/2` with the REAL phase 1b-3 calls
     (`in_transaction`, `target_identity`, `check_migrated`, `check_fresh`,
@@ -63,7 +65,7 @@ defmodule SdrAgent.Prototype.SetupIntegrationTest do
       assert Prototype.operator_actor(delegation_id) == {:ok, actor}
     end
 
-    test "B2: a phase-2 late failure rolls back every phase-2 row and calls no later phase" do
+    test "B2: a phase-2 late failure retains no phase-2 row and calls no later phase (the measured rollback case)" do
       Process.put({Authority, :before_delegation}, fn _created ->
         raise "injected late bootstrap failure"
       end)
@@ -71,7 +73,10 @@ defmodule SdrAgent.Prototype.SetupIntegrationTest do
       {effects, observer} = effects()
       result = Setup.run(effects, E.args())
 
-      assert result == {:error, %{phase: 2, result: :rolled_back, reason: :bootstrap_failed}}
+      # Presented as refused: the returned code does not itself establish a
+      # rollback (Codex 57fc6bb4 S2); the zero-row counts below are the
+      # measured no-retained-effects evidence, in the sandbox logical owner.
+      assert result == {:error, %{phase: 2, result: :refused, reason: :bootstrap_failed}}
       assert counts() == zero()
       log = E.names(observer.log.())
       assert List.last(log) == :bootstrap
@@ -94,18 +99,22 @@ defmodule SdrAgent.Prototype.SetupIntegrationTest do
       refute :seed_run in log
     end
 
-    test "B4: a phase-3 seed refusal is the seed's own rollback; phase-2 rows survive, zero jobs" do
+    test "B4: a seed refusal from a no-transaction stub leaves the phase-2 rows, zero jobs" do
       {effects, observer} = effects(%{seed_run: fn _seed, _actor -> {:error, :seed_failed} end})
       result = Setup.run(effects, E.args())
 
-      assert result == {:error, %{phase: 3, result: :rolled_back, reason: :seed_failed}}
+      # A stub that refuses before any transaction: no rollback is claimed
+      # (Codex 57fc6bb4 S2), and it proves nothing about seed survivors.
+      assert result == {:error, %{phase: 3, result: :refused, reason: :seed_failed}}
       assert_survivors()
       assert Enum.count(E.names(observer.log.()), &(&1 == :bootstrap)) == 1
     end
 
-    test "B5: a call inside the caller's transaction is refused before the target read" do
+    test "B5: with STUBBED storage, a nested call is refused before the target read" do
       {effects, observer} = effects()
 
+      # Storage is stubbed here: this proves neither real create avoidance
+      # nor durability (Codex 57fc6bb4 S3); supported entry is top level.
       {:ok, {result, probe}} =
         Repo.transaction(fn ->
           result = Setup.run(effects, E.args())

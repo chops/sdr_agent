@@ -1,19 +1,24 @@
 defmodule SdrAgent.PrototypeSetupEffects do
   @moduledoc """
   The recording stub of `SdrAgent.Prototype.Setup`'s effects map (setup
-  contract r2 §2, Codex 85ab1090), for tests only: CONTROL-FLOW evidence,
-  never proof of any real dependency.
+  contract r3 §2; Codex 85ab1090, 57fc6bb4), for tests only:
+  CONTROL-FLOW evidence, never proof of any real dependency.
 
   `stub/1` returns `{effects, observer}`. Each effect appends
   `{name, args}` to an Agent log and answers from the scripted `answers`
   (a value, or a function of the effect's own arguments), else from the
-  r2 §2 success schema. `observer.log.()` is the ordered log;
+  contract §2 success schema (`bootstrap`: the domain-struct fixture
+  `created/0`). `observer.log.()` is the ordered log;
   `observer.seed` is the exact synthetic seed term `read_seed` returns by
   default (a fresh reference inside, so identity can be checked). Every
   value is synthetic; nothing connects to a database or reads a file.
   """
 
+  alias SdrAgent.Accounts.User
   alias SdrAgent.Actor
+  alias SdrAgent.Audit.Tenant
+  alias SdrAgent.Operations.PrototypeDatabaseBinding
+  alias SdrAgent.Operations.PrototypeDelegation
 
   @effects [
     attach_log: 0,
@@ -79,6 +84,35 @@ defmodule SdrAgent.PrototypeSetupEffects do
       },
       overrides
     )
+  end
+
+  @doc """
+  The data-only domain-struct fixture of a successful `bootstrap/1` (setup
+  contract r3 effect 17): the tenant, the anchor, no auditor, the binding
+  and the setup delegation, with typed ids and the relationships the
+  contract checks (one tenant; the binding's and delegation's operator is
+  the anchor; the delegation's binding is the binding). Never persisted.
+  """
+  @spec created() :: map()
+  def created do
+    %{
+      tenant: struct!(Tenant, id: @ids.tenant),
+      anchor: struct!(User, id: @ids.anchor, tenant_id: @ids.tenant, role: :agent_operator),
+      auditor: nil,
+      binding:
+        struct!(PrototypeDatabaseBinding,
+          id: @ids.binding,
+          tenant_id: @ids.tenant,
+          operator_user_id: @ids.anchor
+        ),
+      delegation:
+        struct!(PrototypeDelegation,
+          id: @ids.delegation,
+          tenant_id: @ids.tenant,
+          binding_id: @ids.binding,
+          operator_user_id: @ids.anchor
+        )
+    }
   end
 
   @doc "A recording stub; see the moduledoc."
@@ -154,15 +188,7 @@ defmodule SdrAgent.PrototypeSetupEffects do
       check_migrated: :ok,
       check_resumable: :ok,
       check_fresh: :ok,
-      bootstrap:
-        {:ok,
-         %{
-           tenant: %{id: @ids.tenant},
-           anchor: %{id: @ids.anchor},
-           auditor: nil,
-           binding: %{id: @ids.binding},
-           delegation: %{id: @ids.delegation}
-         }},
+      bootstrap: {:ok, created()},
       verify: fn _created -> :ok end,
       operator_actor: fn delegation_id ->
         {:ok, %Actor{type: :prototype_operator, id: delegation_id, tenant_id: @ids.tenant}}

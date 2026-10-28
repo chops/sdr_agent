@@ -1,6 +1,6 @@
 defmodule SdrAgent.Prototype.SetupFlowTest do
   @moduledoc """
-  Setup contract r2 (Codex 85ab1090), the PURE control flow of
+  Setup contract r3 (Codex 85ab1090, 57fc6bb4), the PURE control flow of
   `SdrAgent.Prototype.Setup` over the recording stub
   (`SdrAgent.PrototypeSetupEffects`): CONTROL-FLOW evidence only, no
   database, no sandbox, no cluster, no file.
@@ -12,10 +12,15 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   `BootCheck.Refusal`); the actor-mismatch rows; each asserting the exact
   log, so no later effect ran. Also `preflight/2`, `prepare_storage/2`,
   `cluster_identity_check/2` and the non-invoking shape of
-  `real_effects/1`.
+  `real_effects/1`. r3 adds exact-validation controls (newlines, digests;
+  no normalization), malformed-success controls at the bootstrap, actor
+  and `with_repo` boundaries (the bootstrap success is the domain-struct
+  fixture), and truthful `:refused` presentation for every returned
+  bootstrap and Seed code (no rollback claimed from a code).
 
   RED at the declarations (every function `{:error, :not_implemented}`, no
-  effect called).
+  effect called): each failure exposes a missing declaration, not an
+  executed effect scenario (Codex 57fc6bb4).
   """
   use ExUnit.Case, async: true
 
@@ -80,6 +85,16 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:args_seed_dir_not_binary, :fresh, :attach_log},
     {:args_extra_key, :fresh, :attach_log},
     {:args_credential_flag, :fresh, :attach_log},
+    {:args_correlation_leading_newline, :fresh, :attach_log},
+    {:args_correlation_trailing_newline, :fresh, :attach_log},
+    {:args_agent_trailing_newline, :fresh, :attach_log},
+    {:args_agent_leading_space, :fresh, :attach_log},
+    {:args_digest_trailing_newline, :fresh, :attach_log},
+    {:args_digest_leading_newline, :fresh, :attach_log},
+    {:args_digest_short, :fresh, :attach_log},
+    {:args_digest_long, :fresh, :attach_log},
+    {:args_digest_non_hex, :fresh, :attach_log},
+    {:args_digest_not_binary, :fresh, :attach_log},
     {:attach_failed, :fresh, :attach_log},
     {:env_wrong, :fresh, :environment},
     {:env_flag_unset, :fresh, :environment},
@@ -106,6 +121,9 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:resume_database_down, :resume, :storage_status},
     {:resume_status_error, :resume, :storage_status},
     {:with_repo_error, :fresh, :with_repo},
+    {:with_repo_forged_success, :fresh, :with_repo},
+    {:with_repo_two_tuple, :fresh, :with_repo},
+    {:with_repo_apps_not_list, :fresh, :with_repo},
     {:nested_transaction, :fresh, :in_transaction},
     {:target_other_database, :fresh, :target_identity},
     {:target_other_identifier, :fresh, :target_identity},
@@ -117,12 +135,22 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:resume_not_fresh, :resume, :check_fresh},
     {:bootstrap_failed, :fresh, :bootstrap},
     {:bootstrap_unknown_error, :fresh, :bootstrap},
+    {:bootstrap_plain_maps, :fresh, :bootstrap},
+    {:bootstrap_missing_delegation, :fresh, :bootstrap},
+    {:bootstrap_extra_key, :fresh, :bootstrap},
+    {:bootstrap_with_auditor, :fresh, :bootstrap},
+    {:bootstrap_foreign_binding_tenant, :fresh, :bootstrap},
+    {:bootstrap_delegation_other_binding, :fresh, :bootstrap},
+    {:bootstrap_delegation_other_operator, :fresh, :bootstrap},
+    {:bootstrap_nil_id, :fresh, :bootstrap},
     {:boot_refused, :fresh, :verify},
     {:actor_not_found, :fresh, :operator_actor},
     {:actor_other_id, :fresh, :operator_actor},
     {:actor_other_tenant, :fresh, :operator_actor},
     {:actor_other_type, :fresh, :operator_actor},
     {:actor_unknown_error, :fresh, :operator_actor},
+    {:actor_plain_map, :fresh, :operator_actor},
+    {:actor_ok_nil, :fresh, :operator_actor},
     {:seed_failed, :fresh, :seed_run},
     {:seed_forbidden, :fresh, :seed_run},
     {:seed_binding_mismatch, :fresh, :seed_run},
@@ -359,6 +387,28 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   defp scenario(:args_credential_flag),
     do: {%{auditor_credential_out: "/synthetic/credential"}, %{}, refused(0, :invalid_arguments)}
 
+  # S4 (Codex 57fc6bb4): exact validation, no normalization: the
+  # correlation uses Authority's absolute-anchored pattern, and agents and
+  # digests are compared exactly.
+  defp scenario(:args_correlation_leading_newline),
+    do: {%{session_correlation: "\nsetup-session-0001"}, %{}, refused(0, :invalid_correlation)}
+
+  defp scenario(:args_correlation_trailing_newline),
+    do: {%{session_correlation: "setup-session-0001\n"}, %{}, refused(0, :invalid_correlation)}
+
+  defp scenario(:args_agent_trailing_newline),
+    do: {%{agent: "claude_code\n"}, %{}, refused(0, :invalid_agent)}
+
+  defp scenario(:args_agent_leading_space),
+    do: {%{agent: " claude_code"}, %{}, refused(0, :invalid_agent)}
+
+  defp scenario(:args_digest_trailing_newline), do: digest(String.duplicate("a", 64) <> "\n")
+  defp scenario(:args_digest_leading_newline), do: digest("\n" <> String.duplicate("a", 64))
+  defp scenario(:args_digest_short), do: digest(String.duplicate("a", 63))
+  defp scenario(:args_digest_long), do: digest(String.duplicate("a", 65))
+  defp scenario(:args_digest_non_hex), do: digest(String.duplicate("g", 64))
+  defp scenario(:args_digest_not_binary), do: digest(:aaaa)
+
   defp scenario(:attach_failed),
     do: {%{}, %{attach_log: {:error, :not_implemented}}, {:sink_unavailable, 0}}
 
@@ -441,6 +491,18 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   defp scenario(:with_repo_error),
     do: {%{}, %{with_repo: fn _fun -> {:error, :repo_not_started} end}, {:unexpected, 1}}
 
+  # with_repo must return exactly `{:ok, callback_result, apps}` with the
+  # callback's own result: a success that never ran the callback, or any
+  # other shape, is unexpected.
+  defp scenario(:with_repo_forged_success),
+    do: {%{}, %{with_repo: fn _fun -> {:ok, {:ok, success()}, []} end}, {:unexpected, 1}}
+
+  defp scenario(:with_repo_two_tuple),
+    do: {%{}, %{with_repo: fn fun -> {:ok, fun.()} end}, {:unexpected, 1}}
+
+  defp scenario(:with_repo_apps_not_list),
+    do: {%{}, %{with_repo: fn fun -> {:ok, fun.(), :apps} end}, {:unexpected, 1}}
+
   defp scenario(:nested_transaction),
     do: {%{}, %{in_transaction: true}, refused(1, :bootstrap_failed)}
 
@@ -477,12 +539,44 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
        refused(1, :database_not_fresh)}
 
   defp scenario(:bootstrap_failed),
-    do:
-      {%{}, %{bootstrap: {:error, :bootstrap_failed}},
-       %{phase: 2, result: :rolled_back, reason: :bootstrap_failed}}
+    do: {%{}, %{bootstrap: {:error, :bootstrap_failed}}, refused(2, :bootstrap_failed)}
 
   defp scenario(:bootstrap_unknown_error),
     do: {%{}, %{bootstrap: {:error, :other}}, {:unexpected, 2}}
+
+  # S1 (Codex 57fc6bb4): a malformed bootstrap success is unexpected, never
+  # accepted by loosening the schema.
+  defp scenario(:bootstrap_plain_maps) do
+    plain = Map.new(E.created(), fn {key, value} -> {key, value && %{id: value.id}} end)
+    {%{}, %{bootstrap: {:ok, plain}}, {:unexpected, 2}}
+  end
+
+  defp scenario(:bootstrap_missing_delegation),
+    do: {%{}, %{bootstrap: {:ok, Map.delete(E.created(), :delegation)}}, {:unexpected, 2}}
+
+  defp scenario(:bootstrap_extra_key),
+    do: {%{}, %{bootstrap: {:ok, Map.put(E.created(), :extra, nil)}}, {:unexpected, 2}}
+
+  defp scenario(:bootstrap_with_auditor),
+    do: {%{}, %{bootstrap: {:ok, %{E.created() | auditor: E.created().anchor}}}, {:unexpected, 2}}
+
+  defp scenario(:bootstrap_foreign_binding_tenant),
+    do:
+      {%{}, %{bootstrap: {:ok, put_in(E.created().binding.tenant_id, @other_uuid)}},
+       {:unexpected, 2}}
+
+  defp scenario(:bootstrap_delegation_other_binding),
+    do:
+      {%{}, %{bootstrap: {:ok, put_in(E.created().delegation.binding_id, @other_uuid)}},
+       {:unexpected, 2}}
+
+  defp scenario(:bootstrap_delegation_other_operator),
+    do:
+      {%{}, %{bootstrap: {:ok, put_in(E.created().delegation.operator_user_id, @other_uuid)}},
+       {:unexpected, 2}}
+
+  defp scenario(:bootstrap_nil_id),
+    do: {%{}, %{bootstrap: {:ok, put_in(E.created().delegation.id, nil)}}, {:unexpected, 2}}
 
   defp scenario(:boot_refused) do
     verify = fn _created ->
@@ -509,14 +603,22 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   defp scenario(:actor_unknown_error),
     do: {%{}, %{operator_actor: fn _id -> {:error, :weird} end}, {:unexpected, 3}}
 
-  defp scenario(:seed_failed), do: {%{}, seed_answer(:seed_failed), seed_rolled_back()}
-  defp scenario(:seed_forbidden), do: {%{}, seed_answer(:forbidden), seed_rolled_back()}
+  defp scenario(:actor_plain_map) do
+    actor = fn id -> {:ok, %{type: :prototype_operator, id: id, tenant_id: E.ids().tenant}} end
+    {%{}, %{operator_actor: actor}, {:unexpected, 3}}
+  end
+
+  defp scenario(:actor_ok_nil),
+    do: {%{}, %{operator_actor: fn _id -> {:ok, nil} end}, {:unexpected, 3}}
+
+  defp scenario(:seed_failed), do: {%{}, seed_answer(:seed_failed), seed_refused()}
+  defp scenario(:seed_forbidden), do: {%{}, seed_answer(:forbidden), seed_refused()}
 
   defp scenario(:seed_binding_mismatch),
-    do: {%{}, seed_answer(:binding_mismatch), seed_rolled_back()}
+    do: {%{}, seed_answer(:binding_mismatch), seed_refused()}
 
   defp scenario(:seed_not_prototype_runtime),
-    do: {%{}, seed_answer(:not_prototype_runtime), seed_rolled_back()}
+    do: {%{}, seed_answer(:not_prototype_runtime), seed_refused()}
 
   defp scenario(:seed_not_implemented), do: {%{}, seed_answer(:not_implemented), {:unexpected, 3}}
 
@@ -524,13 +626,21 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
 
   defp success, do: %{binding_id: E.ids().binding, delegation_id: E.ids().delegation}
   defp refused(phase, reason), do: %{phase: phase, result: :refused, reason: reason}
-  defp seed_rolled_back, do: %{phase: 3, result: :rolled_back, reason: :seed_failed}
+  # S2 (Codex 57fc6bb4): no Seed code positively establishes a rollback (its
+  # documented refusals return before any seed transaction), so each is
+  # presented as refused, never rolled_back.
+  defp seed_refused, do: %{phase: 3, result: :refused, reason: :seed_failed}
   defp seed_answer(code), do: %{seed_run: fn _seed, _actor -> {:error, code} end}
 
   defp upto(mode, name) do
     log = if mode == :resume, do: @resume_log, else: @fresh_log
     {before, [^name | _]} = Enum.split_while(log, &(&1 != name))
     before ++ [name]
+  end
+
+  defp digest(pin) do
+    pins = E.args().seed_sha256s
+    {%{seed_sha256s: %{pins | writing_guide: pin}}, %{}, refused(0, :invalid_arguments)}
   end
 
   defp mode_answers(:resume), do: %{storage_status: :up}
