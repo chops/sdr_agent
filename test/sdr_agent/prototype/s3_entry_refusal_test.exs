@@ -99,6 +99,93 @@ defmodule SdrAgent.Prototype.S3EntryRefusalTest do
     end
   end
 
+  # Seed design D3 (Codex 718e0c98 and the ed0a67b5 ranking, item 1):
+  # Seed.run/2 owns its one transaction, so a call inside an already-open
+  # caller transaction, Repo or Audit, is :seed_failed before ANY query (no
+  # live check, read or write), and that caller's transaction stays usable
+  # and commits. The query count is checked first: it does not depend on
+  # the write stub.
+  describe "a call inside an open transaction" do
+    test "Seed.run/2 is :seed_failed before any query; the caller's transaction stays usable",
+         ctx do
+      seed = F.seed_read()
+      before = seed_counts()
+
+      observed =
+        for {owner, open} <- [repo: &Repo.transaction/1, audit: &SdrAgent.Audit.transaction/1],
+            {label, actor} <- [
+              operator: ctx.actor,
+              forged_delegation: %{ctx.actor | id: Ecto.UUID.generate()}
+            ] do
+          {:ok, {queries, result}} =
+            open.(fn ->
+              {queries, result} = queries_during(fn -> call(@seed, :run, [seed, actor]) end)
+              assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+              {queries, result}
+            end)
+
+          {owner, label, queries, result}
+        end
+
+      for {owner, label, queries, _result} <- observed do
+        assert queries == 0,
+               "#{owner}/#{label}: Seed.run/2 ran #{queries} queries inside the caller's " <>
+                 "transaction; all: #{inspect(observed)}"
+      end
+
+      for {owner, label, _queries, result} <- observed do
+        assert result == {:error, :seed_failed},
+               "#{owner}/#{label}: Seed.run/2 returned #{inspect(result)}"
+      end
+
+      assert seed_counts() == before
+    end
+  end
+
+  # The write tables plus the provenance Payloads and every audit event.
+  defp seed_counts do
+    Map.merge(
+      counts(),
+      Map.new(~w(payloads audit_events), fn table ->
+        %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM #{table}", [])
+        {table, n}
+      end)
+    )
+  end
+
+  # The number of repo queries `fun` issues from this process (counted, never
+  # recorded), and its result.
+  defp queries_during(fun) do
+    parent = self()
+    handler = "s3-seed-queries-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:sdr_agent, :repo, :query],
+      fn _event, _measurements, _metadata, _config ->
+        if self() == parent, do: send(parent, :s3_seed_query)
+      end,
+      nil
+    )
+
+    result =
+      try do
+        fun.()
+      after
+        :telemetry.detach(handler)
+      end
+
+    {drain(0), result}
+  end
+
+  defp drain(n) do
+    receive do
+      :s3_seed_query -> drain(n + 1)
+    after
+      0 -> n
+    end
+  end
+
   describe "the dossier adapters refuse every caller" do
     test "DossierWeb and DossierSearch never return content" do
       assert SdrAgent.Integrations.DossierWeb.fetch("https://www.acme1.test/about") ==
