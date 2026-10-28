@@ -15,12 +15,16 @@ defmodule SdrAgent.Prototype.FinalizeContractTest do
     refused before the decision function runs, and an ordinary context
     carries none.
 
-  The prototype-runtime cases (`:interrupted` and `:timeout` never release)
-  follow once S1's runtime fixtures are GREEN.
+  - **Prototype runtime (RED-b1).** `{:interrupted, receipt}` never releases
+    (`gate_interrupted`, or `witness_mismatch` for a known mismatch);
+    `{:timeout, receipt}` keeps its classification (`witness_timeout`,
+    `capture_pending`). That no option other than `guard:` reaches the
+    decision is shown with S1's provisioned grant (RED-b2).
   """
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Agents.ReleaseDecision.Prelocked
+  alias SdrAgent.PrototypeGateFixtures
 
   @release SdrAgent.Prototype.Release
 
@@ -102,6 +106,57 @@ defmodule SdrAgent.Prototype.FinalizeContractTest do
         end)
 
       assert result == {nil, {:error, :prelocked_context_refused}}
+    end
+  end
+
+  describe "prototype runtime: interrupted and timed-out gates never release" do
+    setup do
+      # Before provisioning (RED-b1): an invocation completed before
+      # prototype runtime (no recorded authority); interrupted and timed-out
+      # outcomes are decided before the authority.
+      fx = PrototypeGateFixtures.pre_runtime!()
+      %{fx: fx, run: fx.run, invocation: fx.invocation}
+    end
+
+    defp classification(fx, release) do
+      [event] = PrototypeGateFixtures.release_events(fx, "model.result.withheld", release)
+      event.payload["arguments"]["gate_classification"]
+    end
+
+    test "{:interrupted, receipt} with no known evidence is withheld gate_interrupted", ctx do
+      outcome = {:interrupted, PrototypeGateFixtures.absent_receipt()}
+      result = PrototypeGateFixtures.finalize(ctx.invocation, ctx.run, outcome)
+
+      assert match?(
+               {:withheld, %{reason: :gate_interrupted}, %{status_reason: :witness_unreconciled}},
+               result
+             ),
+             inspect(result)
+
+      {:withheld, release, _run} = result
+      assert classification(ctx.fx, release) == "interrupted"
+    end
+
+    test "{:interrupted, receipt} with a known mismatch link is withheld witness_mismatch", ctx do
+      rec = system_actor(:reconciler, ctx.fx.tenant)
+      SdrAgent.AgentsFixtures.reconciled_link!(ctx.invocation, rec, link_status: :mismatch)
+      outcome = {:interrupted, PrototypeGateFixtures.absent_receipt()}
+      result = PrototypeGateFixtures.finalize(ctx.invocation, ctx.run, outcome)
+
+      assert match?(
+               {:withheld, %{reason: :witness_mismatch}, %{status_reason: :witness_mismatch}},
+               result
+             ),
+             inspect(result)
+    end
+
+    test "{:timeout, receipt} keeps its classification: witness_timeout, capture_pending", ctx do
+      outcome = {:timeout, PrototypeGateFixtures.absent_receipt()}
+      result = PrototypeGateFixtures.finalize(ctx.invocation, ctx.run, outcome)
+
+      assert match?({:withheld, %{reason: :witness_timeout}, _}, result), inspect(result)
+      {:withheld, release, _run} = result
+      assert classification(ctx.fx, release) == "capture_pending"
     end
   end
 end

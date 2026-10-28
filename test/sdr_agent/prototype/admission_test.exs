@@ -20,8 +20,15 @@ defmodule SdrAgent.Prototype.AdmissionTest do
     reservation, reservation event or budget change (Codex 339c8e8d,
     ruling 3: refused, not ignored).
 
-  The prototype-runtime cases (scope, witness mode, binding, proof run and
-  the recorded 14 keys) follow once S1's runtime fixtures are GREEN.
+  - **Prototype runtime, before provisioning (RED-b1; A1, P1).** With an
+    ordinary grant funding every bucket present, an out-of-scope purpose or
+    origin on a funded bucket, a profile outside the entry, a set store root
+    (even with a promoted tuple), a `:proof` run and a live binding drift
+    each refuse before charge with `:prototype_not_authorized` and the exact
+    check, never falling back to ordinary admission; the refusal is a
+    `provider_error` Failure and a `model.reservation.refused` event.
+    Ordinary reservations record no authority. The admitted call and its
+    recorded 14 keys need S1's provisioned grant (RED-b2).
   """
   use SdrAgent.PrototypeCase, async: false
 
@@ -29,9 +36,11 @@ defmodule SdrAgent.Prototype.AdmissionTest do
   alias SdrAgent.Agents
   alias SdrAgent.Agents.Admission
   alias SdrAgent.Agents.Admission.Gate
+  alias SdrAgent.Agents.Admission.Refused
   alias SdrAgent.Agents.Checks.AdmissionContext
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.PrototypeGateFixtures
 
   @call %{profile_id: :claude_cli_opus, purpose: :qualification}
 
@@ -203,6 +212,111 @@ defmodule SdrAgent.Prototype.AdmissionTest do
       # charged invocations.
       assert charged(grant_id: grant.id) == 0
       assert charged(allocation_id: hd(grant.allocations).id) == 0
+    end
+  end
+
+  defp refused(result, check) do
+    match?(
+      {:error, %Refused{reason: :prototype_not_authorized, check: ^check, stage: :reservation}},
+      result
+    )
+  end
+
+  describe "prototype runtime: the partitioned reservation refuses before charge (A1, P1)" do
+    # An ordinary grant funding every bucket is present (an admin's, made
+    # before prototype runtime): any fallback to ordinary admission would
+    # charge it. Refusals come from the prototype gate before any grant check.
+    setup do
+      fx = PrototypeGateFixtures.bound!()
+      grant = AgentsFixtures.grant!(fx.tenant, %{}, fx.admin)
+      PrototypeGateFixtures.enter!(fx)
+      fx = Map.put(fx, :grant, grant)
+      %{fx: fx, run: PrototypeGateFixtures.run!(fx)}
+    end
+
+    test "an out-of-scope purpose on a funded bucket refuses before charge, with no fallback",
+         ctx do
+      # A promoted tuple is configured (no store root): the ordinary gate
+      # would admit this call; the prototype path never falls back to it.
+      AdmissionFixtures.put_entries!([AdmissionFixtures.entry(:claude_cli_opus)])
+      result = PrototypeGateFixtures.reserve(ctx.fx, ctx.run, purpose: :reply_classification)
+
+      assert refused(result, :scope_mismatch), "out-of-scope purpose: #{inspect(result)}"
+      assert PrototypeGateFixtures.invocations(ctx.fx) == 0
+    end
+
+    test "an out-of-scope origin on a funded bucket refuses before charge", ctx do
+      run = PrototypeGateFixtures.run!(ctx.fx, usage_origin: :referral)
+      result = PrototypeGateFixtures.reserve(ctx.fx, run)
+
+      assert refused(result, :scope_mismatch), "out-of-scope origin: #{inspect(result)}"
+      assert PrototypeGateFixtures.invocations(ctx.fx) == 0
+    end
+
+    test "a profile outside the policy entry refuses before charge", ctx do
+      result = PrototypeGateFixtures.reserve(ctx.fx, ctx.run, profile_id: :claude_cli_sonnet)
+      assert refused(result, :scope_mismatch), "Sonnet: #{inspect(result)}"
+    end
+
+    test "a set store root refuses witness_mode_mismatch, even with a promoted tuple", ctx do
+      AdmissionFixtures.admit_tuples!()
+      result = PrototypeGateFixtures.reserve(ctx.fx, ctx.run)
+
+      assert refused(result, :witness_mode_mismatch), "store root set: #{inspect(result)}"
+      assert PrototypeGateFixtures.invocations(ctx.fx) == 0
+    end
+
+    test "a :proof run refuses proof_run", ctx do
+      run = PrototypeGateFixtures.run!(ctx.fx, usage_origin: :proof)
+      result = PrototypeGateFixtures.reserve(ctx.fx, run)
+      assert refused(result, :proof_run), "proof run: #{inspect(result)}"
+    end
+
+    test "a live binding drift refuses uncharged with binding_mismatch (check_live row)", ctx do
+      PrototypeGateFixtures.drift!()
+      result = PrototypeGateFixtures.reserve(ctx.fx, ctx.run)
+
+      assert refused(result, :binding_mismatch), "drift: #{inspect(result)}"
+      assert PrototypeGateFixtures.invocations(ctx.fx) == 0
+    end
+
+    test "a refusal is committed as a provider_error Failure and model.reservation.refused",
+         ctx do
+      {:error, %Refused{} = refused} =
+        PrototypeGateFixtures.reserve(ctx.fx, ctx.run, purpose: :reply_classification)
+
+      [event] =
+        ctx.fx.tenant
+        |> events_of_type("model.reservation.refused")
+        |> Enum.filter(&(&1.id == refused.event_id))
+
+      assert event.payload["reason"] == "prototype_not_authorized"
+      assert event.payload["check"] == "scope_mismatch"
+
+      failure = Ash.get!(SdrAgent.Operations.Failure, refused.failure_id, authorize?: false)
+      assert failure.class == :provider_error
+    end
+  end
+
+  describe "ordinary runtime keeps no prototype authority" do
+    test "an admitted ordinary ClaudeCLI reservation records none" do
+      tenant = bootstrap!()
+      AgentsFixtures.grant!(tenant)
+      %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
+
+      {:ok, invocation} =
+        AdmissionFixtures.admitting(fn ->
+          Agents.reserve_model_invocation(run, AgentsFixtures.claude_attrs("ordinary-1"),
+            actor: agent
+          )
+        end)
+
+      [event] =
+        tenant
+        |> events_of_type("model.invocation.reserved")
+        |> Enum.filter(&(&1.subject_id == invocation.id))
+
+      assert event.payload["arguments"]["prototype_authority"] == nil
     end
   end
 end
