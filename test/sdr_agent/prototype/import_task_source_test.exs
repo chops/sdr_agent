@@ -45,8 +45,8 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
       use Mix.Task
 
       alias SdrAgent.Prototype.{DossierImport, DossierParser, ImportOutcome, SafeLog, Session}
-      alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest
       alias SdrAgent.Prototype.TaskBoundary
+      alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest
 
       @impl Mix.Task
       def run(args) do
