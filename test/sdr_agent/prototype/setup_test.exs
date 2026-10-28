@@ -470,4 +470,76 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
     end
   end
+
+  # Codex 54f4263b P0-2: bootstrap/1 is top-level only. Inside a caller's
+  # open transaction it refuses with its closed code before any query or
+  # write, and the caller's transaction stays usable: its own
+  # transaction-local work survives, SELECT 1 works, and no rollback is
+  # thrown through it.
+  describe "phase 2 bootstrap inside an open transaction (P0-2)" do
+    @doc false
+    def handle_query(_event, _measurements, metadata, pid),
+      do: send(pid, {:p02_query, metadata[:source]})
+
+    defp query_sources(fun) do
+      id = {__MODULE__, make_ref()}
+      :ok = :telemetry.attach(id, [:sdr_agent, :repo, :query], &__MODULE__.handle_query/4, self())
+
+      try do
+        result = fun.()
+        {result, drain_queries([])}
+      after
+        :telemetry.detach(id)
+      end
+    end
+
+    defp drain_queries(sources) do
+      receive do
+        {:p02_query, source} -> drain_queries([source | sources])
+      after
+        0 -> Enum.reverse(sources)
+      end
+    end
+
+    defp bootstrap_opts(correlation),
+      do: [
+        agent: :claude_code,
+        session_correlation: correlation,
+        auditor_password: String.duplicate("a", 43)
+      ]
+
+    test "a nested call is refused before any query or write; the caller's transaction is usable" do
+      before =
+        Enum.map(~w(tenants users prototype_database_bindings prototype_delegations), &count/1)
+
+      outer =
+        Repo.transaction(fn ->
+          Repo.query!("SELECT set_config('sdr.p02_caller', 'kept', true)", [])
+
+          {result, sources} =
+            query_sources(fn ->
+              call(@authority, :bootstrap, [bootstrap_opts("setup-nested-0001")])
+            end)
+
+          %{rows: [[marker]]} = Repo.query!("SELECT current_setting('sdr.p02_caller', true)", [])
+          %{rows: [[one]]} = Repo.query!("SELECT 1", [])
+          %{result: result, sources: sources, marker: marker, one: one}
+        end)
+
+      assert match?({:ok, %{}}, outer), "the caller's transaction gave #{inspect(outer)}"
+      {:ok, observed} = outer
+
+      assert observed.sources == [],
+             "bootstrap issued Repo queries with sources #{inspect(observed.sources)}"
+
+      assert observed.result == {:error, :bootstrap_failed}
+      assert {observed.marker, observed.one} == {"kept", 1}
+
+      assert Enum.map(
+               ~w(tenants users prototype_database_bindings prototype_delegations),
+               &count/1
+             ) ==
+               before
+    end
+  end
 end
