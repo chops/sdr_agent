@@ -106,6 +106,9 @@ defmodule SdrAgent.Prototype.Changes.SeedNote do
     defp read_one(query) do
       case Process.get({__MODULE__, :read_fault}) do
         nil -> Ash.read_one(query)
+        # Declared, not yet instrumented (Codex d8fc857a): a real SQL abort
+        # at this read site. Until its own reviewed GREEN it is the real read.
+        {:abort, ref} when is_reference(ref) -> Ash.read_one(query)
         fault -> fault
       end
     end

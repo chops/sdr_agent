@@ -42,31 +42,50 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
          when is_binary(id) do
       tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
 
-      with :ok <- Prototype.check_live(),
-           {:ok, ^actor} <- Prototype.operator_actor(id),
-           {:ok, %{tenant_id: ^tenant_id, operator_user_id: user_id}} when is_binary(tenant_id) <-
-             Prototype.binding() do
-        case anchor_user(user_id, tenant_id) do
-          {:ok, %User{id: ^user_id}} ->
-            Ash.Changeset.force_change_attribute(changeset, :created_by_id, user_id)
-
-          # No such anchor row (missing, wrong role or tenant): the business
-          # refusal.
-          {:ok, _none} ->
-            refuse(changeset)
-
-          # A returned read error is not evidence that the anchor is absent
-          # (Codex 3ad0a105): it keeps its own identity, through Ash's own
-          # error path, and nothing is written.
-          {:error, error} ->
-            Ash.Changeset.add_error(changeset, error)
-        end
-      else
-        _not_live -> refuse(changeset)
+      case live_wrap(fn -> live_anchor(actor, id, tenant_id) end) do
+        {:ok, user_id} -> bind_anchor(changeset, user_id, tenant_id)
+        :not_live -> refuse(changeset)
       end
     end
 
     defp anchor(changeset, _actor), do: refuse(changeset)
+
+    # The live check, unchanged: the operator still resolves live to exactly
+    # this actor, and the binding's tenant is the row's; then its anchor id.
+    defp live_anchor(actor, id, tenant_id) do
+      with :ok <- Prototype.check_live(),
+           {:ok, ^actor} <- Prototype.operator_actor(id),
+           {:ok, %{tenant_id: ^tenant_id, operator_user_id: user_id}} when is_binary(tenant_id) <-
+             Prototype.binding() do
+        {:ok, user_id}
+      else
+        _not_live -> :not_live
+      end
+    end
+
+    # The in-action live-check site (Codex d8fc857a): declared, not yet
+    # instrumented. Every build runs the real check exactly once, here; a
+    # test-build `{__MODULE__, :live_wrap}` is not consulted until its own
+    # reviewed GREEN.
+    defp live_wrap(inner), do: inner.()
+
+    defp bind_anchor(changeset, user_id, tenant_id) do
+      case anchor_user(user_id, tenant_id) do
+        {:ok, %User{id: ^user_id}} ->
+          Ash.Changeset.force_change_attribute(changeset, :created_by_id, user_id)
+
+        # No such anchor row (missing, wrong role or tenant): the business
+        # refusal.
+        {:ok, _none} ->
+          refuse(changeset)
+
+        # A returned read error is not evidence that the anchor is absent
+        # (Codex 3ad0a105): it keeps its own identity, through Ash's own
+        # error path, and nothing is written.
+        {:error, error} ->
+          Ash.Changeset.add_error(changeset, error)
+      end
+    end
 
     defp anchor_user(user_id, tenant_id) do
       User
@@ -82,6 +101,9 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
       defp read_one(query) do
         case Process.get({__MODULE__, :read_fault}) do
           nil -> Ash.read_one(query)
+          # Declared, not yet instrumented (Codex d8fc857a): a real SQL abort
+          # at this read site. Until its own reviewed GREEN it is the real read.
+          {:abort, ref} when is_reference(ref) -> Ash.read_one(query)
           fault -> fault
         end
       end
