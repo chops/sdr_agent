@@ -46,6 +46,10 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
 
   @routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
   @path_grammar ~r/\A[A-Za-z0-9._\/-]{1,200}\z/
+  # The funding entry's golden sdr-canonical-json/1 digest and its compiled
+  # decision refs (amendment r6 item 4; Codex 4281bb5c R2).
+  @golden_funding_sha256 "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
+  @decision_refs ["D-238", "D-239", "D-243"]
 
   defp sha(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 
@@ -232,7 +236,9 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
             budget_worksheet_sha256: sha(valid),
             allocations: [
               %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}
-            ]
+            ],
+            funding_entry_sha256: @golden_funding_sha256,
+            decision_refs: @decision_refs
           ] do
         args = Map.put(%{worksheet: valid, evidence_root: ctx.root}, name, forged)
         result = direct(ctx.fx.actor, args)
@@ -413,6 +419,110 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
              "later-session replay: #{inspect(result)}"
 
       assert counts() == before
+    end
+  end
+
+  describe "the provisioned event's commitments (Codex 4281bb5c R2)" do
+    test "the event commits exactly the funding id, its digest, the decision refs, the worksheet digest, the delegation and the binding",
+         ctx do
+      bytes = worksheet_bytes(ctx.root)
+      _grant = first!(ctx.fx, ctx.root, bytes)
+      assert Prototype.Authority.funding_entry_sha256() == @golden_funding_sha256
+
+      [event] = events_of_type(ctx.fx.tenant, "model.grant.provisioned")
+
+      assert event.payload["arguments"] == %{
+               "funding_id" => "d237-funding/1",
+               "funding_entry_sha256" => @golden_funding_sha256,
+               "decision_refs" => @decision_refs,
+               "budget_worksheet_sha256" => sha(bytes),
+               "delegation_id" => ctx.fx.actor.id,
+               "binding_id" => ctx.fx.snapshot.id
+             },
+             "provisioned arguments: #{inspect(event.payload["arguments"])}"
+    end
+
+    # The shared lookup's trust decision for one event (structural until
+    # GREEN exposes it): `{:one, grant_id, event}` or `:untrusted`. The
+    # tampered events are in-memory copies; no audit row is mutated.
+    defp classify(snapshot, event) do
+      Function.capture(SdrAgent.Prototype.Provisioning, :classify, 2).(snapshot, event)
+    rescue
+      error -> {:raised, error.__struct__}
+    end
+
+    test "the lookup trusts the original event only with its exact commitments", ctx do
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      [event] = events_of_type(ctx.fx.tenant, "model.grant.provisioned")
+      trusted = classify(ctx.fx.snapshot, event)
+
+      assert match?({:one, id, _event} when id == grant.id, trusted),
+             "the genuine event: #{inspect(trusted)}"
+
+      arguments = event.payload["arguments"]
+
+      tampered = [
+        no_funding_digest: Map.delete(arguments, "funding_entry_sha256"),
+        wrong_funding_digest:
+          Map.put(arguments, "funding_entry_sha256", String.duplicate("0", 64)),
+        uppercase_funding_digest:
+          Map.put(arguments, "funding_entry_sha256", String.upcase(@golden_funding_sha256)),
+        no_decision_refs: Map.delete(arguments, "decision_refs"),
+        reordered_refs: Map.put(arguments, "decision_refs", Enum.reverse(@decision_refs)),
+        extra_ref: Map.put(arguments, "decision_refs", @decision_refs ++ ["D-999"]),
+        refs_as_string: Map.put(arguments, "decision_refs", Enum.join(@decision_refs, ",")),
+        extra_argument: Map.put(arguments, "unexpected", "x"),
+        no_worksheet_digest: Map.delete(arguments, "budget_worksheet_sha256"),
+        worksheet_digest_number: Map.put(arguments, "budget_worksheet_sha256", 42)
+      ]
+
+      for {name, changed} <- tampered do
+        copy = %{event | payload: Map.put(event.payload, "arguments", changed)}
+        result = classify(ctx.fx.snapshot, copy)
+        assert result == :untrusted, "#{name}: #{inspect(result)}"
+      end
+    end
+  end
+
+  describe "malformed provisioned-event arguments (Codex 4281bb5c R3)" do
+    # One operator-actor provisioned event per test (two would already be
+    # ambiguous), appended through the public kernel API: no audit row is
+    # mutated. Provisioning must refuse :grant_exists, never raise.
+    for {name, arguments} <- [
+          string: "not-a-map",
+          list: ["funding_id", "d237-funding/1"],
+          integer: 42,
+          null: nil,
+          empty_map: %{}
+        ] do
+      @malformed arguments
+
+      test "arguments as #{name}: provisioning refuses :grant_exists, never a raise", ctx do
+        {:ok, _event} =
+          SdrAgent.Audit.append(
+            %{
+              event_type: "model.grant.provisioned",
+              category: :model,
+              subject_resource: inspect(ModelCallGrant),
+              subject_id: Ecto.UUID.generate(),
+              action: "provision_prototype",
+              payload: %{arguments: @malformed}
+            },
+            actor: ctx.fx.actor
+          )
+
+        before = counts()
+
+        result =
+          try do
+            provision(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+          rescue
+            error -> {:raised, error.__struct__}
+          end
+
+        assert result == {:error, :grant_exists}, "malformed arguments: #{inspect(result)}"
+        assert counts() == before
+      end
     end
   end
 
