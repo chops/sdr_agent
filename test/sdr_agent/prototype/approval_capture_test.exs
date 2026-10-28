@@ -15,7 +15,8 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     only for an approval by the anchor; a duplicate capture gives one
     receipt; a non-anchor approval's capture and a live binding mismatch
     (`prototype_binding_mismatch`) record no captured receipt, failing
-    closed on the existing failure path.
+    closed on the existing failure path; every refused capture writes
+    nothing (`no_capture!/2`). An ordinary-runtime capture is unchanged.
   - Non-HTML carriers: receipt event, approval event and the signed export
     payload carry the block; the captured message bytes never do.
   - The window `[2026-10-28T02:38:32Z, 2026-11-07T07:00:00Z)`: the
@@ -337,8 +338,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     enter_window!(fixture)
 
     assert raised(fn -> deliver!() end) =~ "prototype_approval_not_delegated"
-    assert captured(ctx, delivery) == []
-    assert captured_events(ctx) == []
+    no_capture!(ctx, delivery)
   end
 
   test "a live binding mismatch at capture records no captured receipt (prototype_binding_mismatch)" do
@@ -351,8 +351,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     end)
 
     assert raised(fn -> deliver!() end) =~ "prototype_binding_mismatch"
-    assert captured(ctx, delivery) == []
-    assert captured_events(ctx) == []
+    no_capture!(ctx, delivery)
   end
 
   test "the capture validation names prototype_binding_mismatch" do
@@ -378,7 +377,19 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
 
     assert match?({:error, _}, result)
     assert inspect(result) =~ "prototype_binding_mismatch"
-    assert captured(ctx, delivery) == []
+    no_capture!(ctx, delivery)
+  end
+
+  test "ordinary runtime: a human approval is captured as before, one receipt, no prototype block (control)" do
+    ctx = demo!(nil)
+    %{draft: draft} = drafted!(ctx)
+    approval = approve!(ctx, draft, operator!(ctx, :reviewer))
+    delivery = delivery_of!(ctx, approval)
+    deliver!()
+
+    assert [_] = captured(ctx, delivery)
+    assert [event] = captured_events(ctx)
+    refute Map.has_key?(event.payload["arguments"] || %{}, "prototype")
   end
 
   # ------------------------------------------------------------------ signed export
@@ -487,7 +498,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     capture_hook!(:before_capture, fn _op -> Clock.freeze(window_end()) end)
 
     assert raised(fn -> deliver!() end) =~ "prototype_outside_window"
-    assert captured(ctx, delivery) == []
+    no_capture!(ctx, delivery)
   end
 
   test "capture: one microsecond before the window end the receipt is captured with the block" do

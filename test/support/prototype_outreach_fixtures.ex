@@ -145,6 +145,29 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   def events_of(tenant, type), do: SdrAgent.AuditCase.events_of_type(tenant, type)
 
   @doc """
+  Asserts that a refused capture of `delivery` wrote nothing: no captured,
+  accepted or delivered receipt, no such `outreach.delivery.receipt_recorded`
+  event, and the delivery neither accepted nor delivered.
+  """
+  def no_capture!(ctx, delivery) do
+    written = [:captured, :accepted, :delivered]
+    kinds = ctx |> OutreachFixtures.receipts!(delivery) |> Enum.map(& &1.kind)
+
+    refute Enum.any?(kinds, &(&1 in written)),
+           "a refused capture recorded a receipt: #{inspect(kinds)}"
+
+    recorded =
+      ctx.tenant
+      |> events_of("outreach.delivery.receipt_recorded")
+      |> Enum.filter(&(&1.payload["changes"]["kind"] in Enum.map(written, fn k -> "#{k}" end)))
+
+    assert recorded == [], "a refused capture recorded #{length(recorded)} receipt event(s)"
+
+    state = OutreachFixtures.outreach!(ctx, delivery).state
+    refute state in [:accepted, :delivered], "a refused capture left the delivery #{state}"
+  end
+
+  @doc """
   A private scratch root owned by the calling test: a directory created
   exclusively (`File.mkdir/1`, mode 0700) under the system temp dir, named
   `<prefix>-<128 random bits>`. An existing path is never adopted (the

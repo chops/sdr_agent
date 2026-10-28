@@ -60,9 +60,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     capture_hook!(:before_capture, fn _op -> suppress!(ctx, :email, variant) end)
 
     assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
-    assert captured(ctx, delivery) == []
-    refute outreach!(ctx, delivery).state in [:accepted, :delivered]
-    refute Enum.any?(receipts!(ctx, delivery), &(&1.kind == :accepted))
+    no_capture!(ctx, delivery)
   end
 
   test "suppressed (domain) immediately before capture: refused at the capture boundary" do
@@ -75,8 +73,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     end)
 
     assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
-    assert captured(ctx, delivery) == []
-    refute outreach!(ctx, delivery).state in [:accepted, :delivered]
+    no_capture!(ctx, delivery)
   end
 
   test "ordinary runtime: an already-claimed delivery is left to its outcome (control, unchanged)" do
