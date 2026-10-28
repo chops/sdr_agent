@@ -227,9 +227,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     the kernel with the `:task_entry` marker, with binding, tenant and
     anchor forced from the snapshot.
 
-    A concurrent creator's unique violation on that identity is re-read
-    only AFTER the failed top-level transaction has rolled back, never
-    inside the aborted transaction; any other failure is
+    A concurrent creator's unique violation on that identity, as the
+    failure's SOLE error, is re-read only AFTER the failed top-level
+    transaction has rolled back, never inside the aborted transaction; any
+    other failure, including that error together with any other, is
     `:binding_mismatch`, never a replay. A call inside an already-open
     transaction (a nested Audit or Repo transaction is not a savepoint) is
     refused with `:binding_mismatch` after the input checks and before any
@@ -311,15 +312,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp session_conflict?(%Ash.Error.Invalid{errors: errors}), do: unique_session?(errors)
     defp session_conflict?(_other), do: false
 
-    defp unique_session?(errors) do
-      Enum.any?(List.wrap(errors), fn
-        %Ash.Error.Changes.InvalidAttribute{private_vars: vars} when is_list(vars) ->
-          vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
+    # Codex 54f4263b P0-1: recoverable only when the failure carries exactly
+    # one error and it is the session unique constraint. A mixed list (that
+    # error with any other) or a repeated one is never a recoverable race.
+    defp unique_session?([%Ash.Error.Changes.InvalidAttribute{private_vars: vars}])
+         when is_list(vars),
+         do: vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
 
-        _other ->
-          false
-      end)
-    end
+    defp unique_session?(_errors), do: false
 
     defp find_session(binding_id, agent, correlation) do
       PrototypeDelegation
