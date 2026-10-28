@@ -16,7 +16,11 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   no normalization), malformed-success controls at the bootstrap, actor
   and `with_repo` boundaries (the bootstrap success is the domain-struct
   fixture), and truthful `:refused` presentation for every returned
-  bootstrap and Seed code (no rollback claimed from a code).
+  bootstrap and Seed code (no rollback claimed from a code). r4 (N1, Codex
+  7be92491) separates a wrapper that never ran the callback (the log ends
+  at `with_repo`) from one that ran it and then returned or failed
+  malformed (the callback's effects stay, exactly once, then
+  `{:unexpected, 1}`), including a wrapper that replays the callback.
 
   RED at the declarations (every function `{:error, :not_implemented}`, no
   effect called): each failure exposes a missing declaration, not an
@@ -122,8 +126,6 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:resume_status_error, :resume, :storage_status},
     {:with_repo_error, :fresh, :with_repo},
     {:with_repo_forged_success, :fresh, :with_repo},
-    {:with_repo_two_tuple, :fresh, :with_repo},
-    {:with_repo_apps_not_list, :fresh, :with_repo},
     {:nested_transaction, :fresh, :in_transaction},
     {:target_other_database, :fresh, :target_identity},
     {:target_other_identifier, :fresh, :target_identity},
@@ -244,6 +246,33 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
 
         assert result == {:error, expected}, "#{unquote(id)}: #{inspect(result)}"
         assert E.names(observer.log.()) == upto(mode, unquote(stop))
+      end
+    end
+  end
+
+  # N1 (Codex 7be92491): a wrapper that RAN the callback and then returned
+  # a malformed result, or failed afterwards. The callback's effects ran
+  # exactly once and stay in the log; the wrapper's completion is reported
+  # as {:unexpected, 1} (the failure location, not the last completed
+  # domain phase: phases 2 and 3 already committed and are not undone). No
+  # retry, re-entry, second bootstrap or second seed.
+  describe "N1: a malformed wrapper result after the callback ran" do
+    for {label, wrapper} <- [
+          two_tuple: :two_tuple,
+          apps_not_list: :apps_not_list,
+          error_after_callback: :error_after_callback,
+          replays_callback: :replays_callback
+        ] do
+      test "#{label}: the callback's effects ran once, then {:unexpected, 1}" do
+        {effects, observer} = E.stub(%{with_repo: wrapper(unquote(wrapper))})
+        result = Setup.run(effects, E.args())
+        log = E.names(observer.log.())
+
+        assert result == {:error, {:unexpected, 1}}, inspect(result)
+        assert log == @fresh_log, "the executed callback log was not kept exactly once"
+        assert Enum.count(log, &(&1 == :bootstrap)) == 1
+        assert Enum.count(log, &(&1 == :seed_run)) == 1
+        assert Enum.count(log, &(&1 == :with_repo)) == 1
       end
     end
   end
@@ -492,16 +521,11 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     do: {%{}, %{with_repo: fn _fun -> {:error, :repo_not_started} end}, {:unexpected, 1}}
 
   # with_repo must return exactly `{:ok, callback_result, apps}` with the
-  # callback's own result: a success that never ran the callback, or any
-  # other shape, is unexpected.
+  # callback's own result. These two rows never run the callback, so the
+  # log genuinely ends at with_repo (N1, Codex 7be92491: a malformed result
+  # AFTER the callback ran is its own describe block).
   defp scenario(:with_repo_forged_success),
     do: {%{}, %{with_repo: fn _fun -> {:ok, {:ok, success()}, []} end}, {:unexpected, 1}}
-
-  defp scenario(:with_repo_two_tuple),
-    do: {%{}, %{with_repo: fn fun -> {:ok, fun.()} end}, {:unexpected, 1}}
-
-  defp scenario(:with_repo_apps_not_list),
-    do: {%{}, %{with_repo: fn fun -> {:ok, fun.(), :apps} end}, {:unexpected, 1}}
 
   defp scenario(:nested_transaction),
     do: {%{}, %{in_transaction: true}, refused(1, :bootstrap_failed)}
@@ -641,6 +665,26 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   defp digest(pin) do
     pins = E.args().seed_sha256s
     {%{seed_sha256s: %{pins | writing_guide: pin}}, %{}, refused(0, :invalid_arguments)}
+  end
+
+  # Wrappers that run the callback, then return or fail malformed.
+  # `:replays_callback` calls it twice: the orchestrator's callback is
+  # single-use, so the second call must run no effect (contract r4 §N1).
+  defp wrapper(:two_tuple), do: fn fun -> {:ok, fun.()} end
+  defp wrapper(:apps_not_list), do: fn fun -> {:ok, fun.(), :apps} end
+
+  defp wrapper(:error_after_callback) do
+    fn fun ->
+      _ = fun.()
+      {:error, :cleanup_failed}
+    end
+  end
+
+  defp wrapper(:replays_callback) do
+    fn fun ->
+      _ = fun.()
+      {:ok, fun.(), []}
+    end
   end
 
   defp mode_answers(:resume), do: %{storage_status: :up}
