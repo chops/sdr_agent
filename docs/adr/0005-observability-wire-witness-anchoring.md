@@ -41,6 +41,15 @@ Codex's independent exact-text PASS (m_codex_d240_r8_review_1793158304526,
 review 7ab1cc15), not under the D-219 delegation; its own Status line still
 reads PROPOSED. The amendment, addenda 1-4 and their accepted hashes are
 unchanged.
+The D-237 local prototype amendment (2026-10-28; one real, labelled journey
+in a separate local prototype database, operated by agents), published after
+C2* addendum 5, is accepted as D-249 under the owner's prospective conditional
+acceptance D-242, after Codex's FINAL independent exact-text PASS
+(m_codex_d237_r6_verdicts_1793163169000, review c3157ad2). The owner did not
+read the final bytes. Its own heading still reads PROPOSED. It does not cover
+the separately hashed log residual clause, agent-session processing of
+personal data, the budget worksheet, provisioning or any real call; those stay
+activation gates in its text.
 
 ## Context
 
@@ -1740,6 +1749,598 @@ The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Frida
 **The text above is unchanged.** The C2* amendment and addenda 1 to 4 keep their reviewed bytes and accepted hashes (D-223, D-227, D-228, D-230). This addendum supersedes only the two instants named here.
 
 <!-- END ADR-0005 C2* ADDENDUM 5 -->
+
+<!-- BEGIN ADR-0005 D-237 PROTOTYPE AMENDMENT: text as reviewed by Codex (m_codex_d237_r6_verdicts_1793163169000) -->
+
+#### D-237 local prototype amendment (2026-10-28, PROPOSED): one real, labelled journey in a separate local prototype database, operated by agents
+
+**Status: PROPOSED.** This amendment has not been accepted or implemented.
+
+- **Acceptance (D-242, prospective and conditional).** The owner accepted in advance the exact bytes that Codex's FINAL independent exact-text PASS covers.
+  - At that PASS, the decision record names the commit, this file's SHA256, these between-marker bytes' SHA256 (including the BEGIN line's newline), the review correlation and D-242.
+  - It does not claim the owner read these bytes.
+  - A PASS on a slice, on code, on an entity table, or on a changed text accepts nothing.
+- **Build preapproval (D-241).** It begins only after Codex and Claude independently agree on this text, its entity and action model, and the implementation plan.
+- **Activation is separate.** Activation and real-call readiness are separate from acceptance and from build preapproval. They need the conditions of item 9.
+- **No authority by acceptance.** Acceptance grants no call, grant or deployment by itself. It also does not accept the separately hashed log residual clause (item 7), and it does not answer the pending agent-session question (item 7).
+
+**Why.**
+
+- **The owner's direction (D-237).** "no, a real AI model is not a paid API integration. we can keep using my subscription locally." (2026-10-28T02:08:44Z). Then: "i'm inclined to let unverified real output through just to demonstrate that the product works, and then to instrument everything around it for verification and evaluation after the fact. the most important thing we can do right now is to show a working prototype that does everything we need from a product standpoint. then once we have all of the features working, we can instrument verifications, tests, evals, etc etc etc" (02:14:53Z).
+- **Funding (D-238, D-239).**
+  - 60 attempts in total, shared across every real-call route, with no refund or reset.
+  - Usable from 2026-10-28T02:38:32Z until 2026-11-07T07:00:00Z exclusive.
+- **Operation (D-243).** "i want you and codex to do this. you can run this from the backend. you don't need me. you have my permission to do this."
+- **Seed (D-244).** "i want you and codex to seed this with sensible defaults. you can use gtm as a company (see ~/src/gtm or gtmscape.com) and come up with whatever company profile and writing guide make sense."
+- **Real prospects (D-245).**
+  - "no, i want you and codex to find some real businesses and contacts based on whatever makes sense for the company profile and writing guide above."
+  - "ack", to "Emailing real people stays off".
+- **What stands in the way today** (source at main `6779216`):
+  - **Release.** Only a `reconciled` result is released (R0 amendment item 4; `lib/sdr_agent/agents/model_result_release.ex:64-72,110-131`; `lib/sdr_agent/agents/changes/release_decision.ex:286-310`).
+  - **Admission.** It requires a trusted witness store and a promoted tuple, at reservation and at launch (`lib/sdr_agent/agents/admission/gate.ex:128-171,239`).
+  - **Business reads.** They require `:released` (`lib/sdr_agent/agents/released_output.ex:66-74`; `lib/sdr_agent/agents/model_invocation.ex:185-192`).
+  - **Synthetic names.** Every account domain, contact email, sender address and research source must be under a reserved name (ADR-0009 item 9; `lib/sdr_agent/sales/validations/reserved.ex`).
+  - **Human operators only.** Every operator is a human `User` (ADR-0009 item 8).
+
+**Decision.**
+
+1. **Scope and assurance.**
+   - **The permission.** In one separate local prototype database only, schema-valid ClaudeCLI output may drive research, qualification, evidence, a draft, a delegated approval and capture, without v4 witness matching or tuple calibration. The research uses an agent-curated dossier of real businesses and their public business contacts.
+   - **The assurance.** All output is **UNVERIFIED (PROTOTYPE)**. Permission to use it makes no claim that a record equals an externally observed exchange, or that it is true.
+   - **Witness.** The app's witness store is explicitly absent.
+   - **Delivery.** Delivery stays captured only. Nothing is sent to anyone.
+   - **Hosted.** The hosted copy stays Fake-only and synthetic (ADR-0001 Amendment 1).
+   - **Login.** The subscription login stays on the owner's machine and is never read.
+   - **One closed policy entry, `d237-prototype/1`.** It is reviewed code with these fields and no others:
+     - `database: "sdr_agent_prototype"`;
+     - `dataset_class: :real_prototype`;
+     - `identity`: `provider: :claude_cli`, `ledger_generation: 2`, `profile_ids: [:claude_cli_opus]`;
+     - `usage_origins: [:assignment]`;
+     - `purposes: [:qualification, :evidence_extraction, :outreach_proposal]`;
+     - `witness_mode: :absent`;
+     - `funding_id: "d237-funding/1"` (item 4);
+     - `max_contacts: 3` (item 7);
+     - `label: "UNVERIFIED (PROTOTYPE)"`;
+     - `acceptance_ref`: the decision row that records the acceptance;
+     - `text_sha256`: the SHA256 of these bytes.
+
+     `entry_sha256` is its `sdr-canonical-json/1` SHA256. There is no wildcard and no runtime-supplied field.
+
+2. **Structural isolation.**
+   - **Development build only.**
+     - The prototype authority module is compiled only under a flag that only `config/dev.exs` and `config/test.exs` set.
+     - The production build contains no such module and no reference to one; it holds refusal stubs only.
+     - Tests are hermetic and make no real call.
+   - **Its own PostgreSQL 18 cluster.** The prototype database lives in an agent-owned scratch cluster.
+     - **What is pinned:**
+       - the executable (the devenv PostgreSQL 18 store path, recorded at init);
+       - the data directory and an ownership marker that records the cluster's `system_identifier`;
+       - the log directory;
+       - the socket directory `/private/tmp/d237-pg`;
+       - the port number 5541, which names the socket only.
+     - **Connections.** No TCP listener (`listen_addresses = ''`). One Unix socket in that private directory.
+     - **Logging** is set before the first start (item 7).
+     - **Untouched:** the owner's clusters, databases (`sdr_agent_dev`, `sdr_agent_calibration`), roles and services.
+     - **Owned and identified, fail-closed:**
+       - **Init** refuses an existing data path or an existing ownership marker, and never overwrites a marker.
+       - **One identity proof before start, status and stop.** It holds only when all of these match:
+         - the marker;
+         - the real, owned, mode-0700 data directory;
+         - the pinned executable;
+         - the marker's `system_identifier` equals `pg_controldata`'s;
+         - a real, owned, mode-0700 socket directory, by `lstat`.
+       - **Running clusters.** For a running cluster, the connected `system_identifier` and data directory must also equal the marker's. Only then may `pg_ctl` stop it. A missing, mismatched or unresponsive identity refuses and reports.
+       - **Preparing the socket directory.** Init alone creates the socket directory, if it is absent, or verifies it, before init completes. Either way the exact socket pair (socket and lock file) must be absent. Start, status and stop never create a directory.
+       - **First start.** Before the first start, the exact socket pair must still be absent. A residual pair is refused, never removed or adopted.
+       - **A TCP listener on 5541** refuses.
+       - **Never:** process-command-line or environment inspection, inference from process ids, signals to a foreign process, or deletion.
+     - **A project fact.** The service is recorded in project-owned configuration, in the cluster script's constants, and in a prototype-runtime document. The document states that 5520 is the ordinary development service and 5541 only the isolated prototype socket endpoint. `.workflow/project-facts.md` and its receipt stay untouched; any future edit to that receipt-pinned unit uses its reviewed revision process.
+   - **The binding.** `PrototypeDatabaseBinding` is a create-only singleton row in that database.
+     - **What it records:** its id; an instance UUID; the tenant; the operator anchor user and at most one auditor user, each in the binding's tenant (database-enforced); the dataset class `real_prototype`; the policy id and `entry_sha256`; the funding id; the witness mode `absent`; the database name and oid; the cluster's `system_identifier`.
+     - **Fixed.** Its fixed values are checked by the database.
+     - **Immutable.** A trigger rejects update, delete and truncate. Foreign keys are `RESTRICT`.
+   - **Setup, once, into a fresh database.**
+     - **What it starts.** Only the configuration and the Repo. It never starts the application tree, the job system, the model provider, the live-event relay or the endpoint, and it refuses if any of them is running.
+     - **Its order:**
+       1. A preflight with no database write: the exact Repo target, the cluster identity, and the seed files parsed and validated. Before the target database exists, the identity read uses the owned cluster's own maintenance database. That is an identity read only, never a data read and never an owner service.
+       2. A database that did not exist before, created before the Repo starts. Then the existing migrations, then this amendment's migrations, in one fixed order.
+          - **The one recovery path** is a bounded resume, used after a step-4 rollback. It applies only to the exact owned cluster and database, holding exactly the pinned migration set and no tenant, user, binding, delegation, chain-head or business row.
+          - Anything else refuses. Setup never drops, recreates or adopts a database.
+       3. A refusal unless the database holds no tenant, user or business row.
+       4. **One transaction**, by setup-only actions that no operator or user can call: the tenant, the operator anchor, the optional auditor, the binding and the setup session's delegation. Any error rolls all of it back.
+       5. The boot check of the table below: the same check as a fresh serve boot, after step 4 commits. Bootstrap authority never bypasses it.
+       6. The item-7 seed. A failed seed is retried only by the separate seed command, on its own checks.
+     - **The auditor credential file** lies outside the transaction. It is created exclusively and never overwritten; a file left by a rolled-back attempt is reported as stale.
+     - **Afterwards.** Provisioning (item 4) is a separate later step, and only a fresh boot runs the queues, the provider and the endpoint.
+   - **Process kinds.**
+     - **The serve process** runs the full application with the boot check as a child after the Repo and before the provider.
+     - **Operator command processes** start the configuration and the Repo, then pass the boot check. Only commands that enqueue then start job insertion, with no queues, plugins or peer coordination, and with periodic staging disabled. Jobs never execute outside the serve process, and never inline. These processes start no provider, relay or endpoint.
+     - **Any other start with the switch set** passes the same boot check or refuses.
+   - **The switch.**
+     - It is `SDR_PROTOTYPE` (the policy id) and `SDR_PROTOTYPE_INSTANCE` (the instance UUID).
+     - It is read in `dev` only, and it selects the prototype cluster and database.
+     - In `test` or `prod`, any value refuses boot.
+     - Together with the agent-environment configuration or the C2* selector, it refuses boot.
+   - **Boot.** The check runs after the Repo, and before the provider, the queues and the endpoint.
+
+     | Switch | Binding | Witness store root | Result |
+     |---|---|---|---|
+     | off | absent | (ordinary rules) | ordinary runtime |
+     | on | present and exact | unset | prototype runtime |
+     | on | present and exact | set | refuse |
+     | on | absent | any | refuse |
+     | off | present | any | refuse |
+
+     **Exact** means all of these hold:
+     - the binding row exists exactly once (an unbound database refuses);
+     - the instance and policy digest equal the switch and the compiled entry;
+     - the live database name, oid and `system_identifier` equal the row's;
+     - the suppression check is the Store implementation;
+     - the users are exactly the operator anchor plus, if bound, the one auditor.
+
+     The runtime is fixed for the VM's life. "Prototype runtime" below means the second row.
+   - **Production.** The production build has no switch. It refuses to boot on a database that holds a binding row.
+   - **Checked again.** The binding is re-read at reservation, at launch, at release and at each prototype business-use entry.
+   - **No conversion.** No supported conversion, import or export path moves prototype rows into an ordinary database, or relabels them.
+
+3. **The machine principal (D-243).**
+   - **Representation.** The operator is a system actor of the new type `:prototype_operator`, never a human `User`.
+     - **The delegation.** Each acting agent session is one create-only `PrototypeDelegation` row. It records the fixed reference `D-243`, the agent (`claude_code` or `codex_cli`) and a session correlation.
+       - **How it is created.** Only by the operator commands' common session entry, and by setup for its own session.
+       - **What the caller supplies.** Only the agent and the correlation. The binding, the tenant and the anchor come from the boot-verified binding, and the database refuses a delegation that names any other anchor.
+       - **What the correlation is.** An audit label, not an authority.
+     - **Resolution.** Every operator action resolves its actor from the delegation id against the live binding: the delegation exists, it is in the binding's tenant, it belongs to this binding, it names the binding's anchor, and the live database still equals the binding. A failure names its cause and refuses. An actor struct is never accepted as proof by itself.
+     - **Audit identity.** Every event the operator causes records actor type `prototype_operator` and that delegation's id as the actor id. No event claims a human actor, human approval or the owner's product acceptance.
+   - **The anchor.** Where an existing schema requires a user id, the value is one credential-less operator anchor user of role `:agent_operator`. That applies to an approval's approver and to a grant's creator and updater. It is a foreign-key value only.
+     - **No credential.** The anchor has no password; the database requires that for this role, and only for it. Password sign-in, session-subject lookup and current-operator resolution all refuse it, so it never receives a session or token.
+     - **Never an actor.** The anchor is never used as an actor.
+     - **Immutable role.** No action changes a role to or from `:agent_operator`, and the role marks the user as a machine.
+     - **Scoped approver attribution.** The change that records an approval's approver records the anchor only on the three approval actions (approve, reject, revoke), and only for a resolved operator. Everywhere else the operator stays unattributed, so the row's own constraints refuse it (for example, a manual suppression).
+     - **No user administration in prototype runtime.** User creation, seeding, role, status and password changes are refused for every actor.
+   - **Content access is scoped.** The operator stores its own inputs, and reads one captured message for review, only through two dedicated content actions.
+     - **What bounds them:** each is limited to the exact digests that its domain function computed or re-read in the binding's tenant, and each records the access under the operator's own identity. Each also requires the operator's live resolution against the binding. A scope or an actor struct alone is never authority.
+     - **What the operator never gets:** generic content storage or reading.
+     - **Settings.** It writes settings only through the seed action, and never reads settings content.
+   - **Allowed actions** (closed list), each in prototype runtime only:
+     - run setup, whose setup-only actions create the tenant, the anchor, the auditor, the binding and the first delegation (item 2);
+     - provision the one funded grant (item 4);
+     - import the dossier;
+     - seed the item-7 settings;
+     - assign a lead;
+     - read runs, drafts and receipts for review;
+     - approve, reject or revoke a draft approval (item 8);
+     - revoke the grant.
+
+     Capture is performed by the existing delivery worker.
+   - **Refused for the operator:**
+     - user administration, beyond what setup creates;
+     - any grant creation or change other than the one provisioning, and any allocation edit;
+     - settings writes outside the seed;
+     - run retry;
+     - any change to the delivery path.
+   - **What no one else gets.**
+     - No human signs in as the owner, and no owner credential is read.
+     - The real model gets no tools, no principal capability and no grant authority.
+   - **The optional auditor.** One read-only owner auditor account may be bound.
+     - **Its credential** is generated by setup into a private 0600 file. It is never printed or transmitted.
+     - **What it may do.** It may read prototype views, as the existing auditor role does.
+     - **What it may not do.** It cannot assign, fund, provision, approve, capture, administer or reset any principal.
+
+4. **Funding and admission.** This reuses the contract of ADR-0004's agent-environment items 8, 9 and 9a, not their code.
+   - **One compiled funding entry, `d237-funding/1`.**
+     - `total_attempts: 50`. This is a **ceiling**, not a target. One canary, then up to two more contacts, needs far fewer.
+     - `starts_at: 2026-10-28T02:38:32.000000Z`, `expires_at: 2026-11-07T07:00:00.000000Z`;
+     - `profile_ids: [:claude_cli_opus]`;
+     - `funded_scope: [{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}]`;
+     - one allocation: key `:b1`, `applies_to: [:b1]`, profile `:claude_cli_opus`, 50 attempts;
+     - decision references D-238, D-239 and D-243.
+   - **The remaining-budget precondition (D-238's shared 60).** Provisioning first requires a private, counts-only remaining-budget worksheet. It covers the window since 2026-10-28T02:38:32Z, and every route sharing the 60:
+     - this prototype;
+     - each owner database (development and calibration);
+     - hosted;
+     - any other owner route;
+     - all previous prototype bindings.
+
+     **Its rules:**
+     - **Unknown is not zero.** A missing route, or a route without a count, stops provisioning.
+     - **Owner routes need the owner's word.** Agents cannot observe owner routes, so each needs an owner-shared aggregate or an owner attestation (for example, "unused"), consistent with the known receipts. An agent never reads an owner database for it.
+     - **The ceiling must fit.** Provisioning proceeds only if 60 minus all counted consumption is at least the entry's 50. Otherwise it stops, and a lower total needs a new reviewed entry.
+     - **No reset.** Database recreation, a replacement binding or a retry renews nothing. A later worksheet deducts all earlier consumption.
+
+     **Its records:**
+     - **Real records.** Every count cites a real record: a private receipt file named by its hash, holding either this prototype's own counts or the owner's exact words with their time and source. An invented reference fails.
+     - **Disjoint scopes.** The current binding and the earlier bindings are counted separately.
+     - **Replay.** An identical provisioning replay is not a new allocation.
+
+     The worksheet's SHA256 is recorded on the provisioning event. This precondition binds provisioning and activation, not this text.
+   - **Provisioning.** The operator's one creating grant action takes only the funding id. It materializes exactly the entry's terms and allocation, with the operator anchor as creator and updater. It appends `model.grant.provisioned` with the funding id, its digest, the decision references, the worksheet digest and the delegation.
+     - An identical replay returns the grant.
+     - A second grant is refused.
+     - No term change, allocation change, release or ordinary creation is possible for any actor in prototype runtime. Revocation is allowed.
+   - **One funded route.** This is the only route agents launch.
+     - The owner's databases, the old G-DEMO grant included, are recorded as unused by this delegation. Agents never touch them.
+     - A new database or binding renews nothing. Another route needs a reviewed partition of the shared 60.
+   - **Partitioned admission.** Admission dispatches on the runtime before any scope or eligibility check.
+     - In prototype runtime only the prototype path exists.
+     - A refused call is refused before it is charged, and never falls back to ordinary admission.
+     - The call's purpose is passed explicitly to the gate.
+     - The run's origin and the call's purpose must be in the funded scope.
+     - A `:proof` run is refused.
+     - The store root must be unset.
+   - **Recorded at reservation.** The reservation records the authority on its one original `model.invocation.reserved` event: the policy id and digest, the funding id, the binding id, the instance, the tenant, the operator anchor, the dataset class, the profile, the purpose, the grant and its revision, the allocation, and the witness mode. Only admission sets it.
+   - **Re-derived at launch.** Launch compares every recorded value with the binding, the invocation's charge, and the grant's current revision, creator and updater.
+     - Any difference refuses, as does a missing, duplicated or malformed record. A launch refusal keeps its charge.
+   - **What is waived, and nothing else:** the trusted-store requirement (store absent), and tuple promotion.
+   - **What stays:**
+     - the enforced gate;
+     - the pinned CLI and its identity;
+     - per-call init attestation (model, version, and empty tools, MCP servers and slash commands);
+     - the frozen profile;
+     - the switch fence;
+     - grant and allocation windows;
+     - per-run and per-day limits;
+     - accounting;
+     - concurrency 1;
+     - no refund or automatic retry.
+
+5. **Prospective release.**
+   - **The runtime decides first.** In prototype runtime the ordinary `:released` branch is unreachable. A new decision is `released_unverified`, paired only with `owner_prototype_unverified`, or withheld.
+   - **The new withheld reason** is `prototype_authority_refused`.
+   - **Known evidence first.** After the run (`FOR UPDATE`), its Operation (`FOR SHARE`) and the invocation (`FOR SHARE`), the finalizer plain-reads every wire-witness link of the invocation and every `reconciliation_required` Failure of it.
+     - Link writers lock the invocation `FOR UPDATE`, so the links are stable.
+     - Failure writers append under the chain head, so the Failures are re-read under the head.
+   - **What known evidence decides.**
+     - A link with status `mismatch` means withheld `witness_mismatch`, on the invocation's critical cause as run recovery selects it.
+     - Any other link, a critical Failure without such a link, or a live warning Failure means withheld `prototype_authority_refused`.
+       - The code is `witness_evidence_present`, or `known_integrity_signal` for a critical Failure.
+       - A usable live critical cause stays the bound cause, with its identity and severity unchanged.
+       - No mismatch is claimed.
+     - The absent store's empty receipt never clears known evidence.
+   - **Eligibility,** all at the decision instant under the head:
+     - the binding equals the recorded authority;
+     - a completed, valid, generation-2 ClaudeCLI invocation of a running, non-proof run, in the funded scope;
+     - its grant is active and unchanged since reservation, created and updated by the anchor;
+     - the instant is inside the window (item 9);
+     - the observation is `store_unconfigured`;
+     - no known evidence.
+   - **Outcomes.**
+     - **All hold:** `released_unverified`.
+     - **Known mismatch:** `witness_mismatch`.
+     - **Otherwise:** `prototype_authority_refused`, with one code from this closed set: `binding_mismatch`, `authority_unrecorded`, `authority_mismatch`, `scope_mismatch`, `identity_mismatch`, `operator_mismatch`, `grant_changed`, `grant_not_eligible`, `outside_window`, `witness_mode_mismatch`, `witness_evidence_present`, `known_integrity_signal`, `output_invalid`.
+     - **What the withheld event records:** the true observation classification.
+     - **The run.** It stops `witness_mismatch` for an actual mismatch, and `witness_unreconciled` otherwise, with the exact reason kept.
+     - **A reconciled receipt** cannot occur with the store absent. If one appears, it is refused (`witness_mode_mismatch`).
+   - **A bounded repeat.** If an under-head recheck fails, nothing is written, and the gate decides once more in refusal-only mode.
+     - Recovery never decides a release of either kind.
+     - Only the facade's own gate step decides `released_unverified`, under its prelocked context.
+     - It is reached only through the existing result-gate finalizer. No caller supplies the authority, the basis or a decision: the step derives them from the locked rows, the boot-verified binding and the reservation's one original event.
+     - An interrupted or timed-out gate never releases. A timeout keeps its existing withheld classification.
+     - No existing withheld or calibration row is converted.
+
+6. **Persistence, replay and recovery.**
+   - **The row.** One immutable decision per invocation, append-only.
+     - Its link, projection, method and `evidence_sha256` are NULL.
+     - It claims no witness link, projection, method or calibration evidence.
+   - **The event.** `model.result.released_unverified` in the same transaction.
+     - Its arguments are the canonical basis `d237-basis/1` and its SHA256.
+     - **What the basis holds:** the policy; the funding; the binding; the window and the decision instant; the invocation's and response's ids and digests; the runtime identity; the observation; the assurance `unverified`.
+     - It holds no content.
+   - **New decision or existing row.**
+     - The finalizer reads the existing release first, after the invocation lock.
+     - With no release, it validates a new decision (item 5).
+     - With a release, it never re-derives authority from live state.
+   - **Existing-row replay.**
+     - **Valid only when all of these hold:**
+       - exactly one original event exists;
+       - its basis's canonical digest equals the recorded digest;
+       - the basis's bindings equal the row (invocation, tenant, `decided_at`), the invocation (run, charge, identity, digests) and the recorded reservation authority.
+     - **Historical facts come from the basis only.** The historical grant, window, observation and policy facts come only from the basis. Later grant changes, revocation, window end, links and configuration do not alter a replay.
+     - **Outcomes.**
+       - An identical replay writes nothing.
+       - A missing, duplicated, unreadable or inconsistent basis refuses, with no output.
+       - A different requested basis is a `ReleaseConflict`.
+       - A caller basis is only compared.
+   - **Current use is separate.** An existing `released_unverified` output is used only in prototype runtime, with the live binding equal to the basis's binding.
+   - **Recovery.** It returns an existing output only on the same verification, and never decides one.
+   - **Lock and cause order.**
+     1. The run.
+     2. The Operation.
+     3. The invocation.
+     4. Plain reads.
+     5. By branch, before the head: the grant, then the allocation, `FOR SHARE` (release); the selected critical cause `FOR UPDATE` (mismatch); the gate cause `FOR UPDATE` (refusal).
+     6. The chain head.
+
+     No lock is taken after the head.
+   - **Migration.**
+     - Constraint changes only, for the new values, roles and actor type. No new column is added to any existing audited resource, so earlier records' hashes are unchanged.
+     - The down migration refuses while any new-value row exists. It never deletes or rewrites a row.
+
+7. **Real data, sources and logs (D-244, D-245).**
+   - **Permitted data.** Minimal professional and company data is permitted:
+     - a company's name, domain and public website;
+     - company-level facts from public pages: size, location and industry;
+     - for one person per company: a public business name and role, and a work email on the company's domain that a checked public page explicitly links to that exact person;
+     - per-field source references and retrieval times;
+     - facts quoted or summarized from public business pages.
+
+     **Excluded:**
+     - sensitive categories, personal-life data and private addresses;
+     - login-only or terms-restricted sources;
+     - guessed, enriched or directory-listed addresses, company-only addresses, and pages that merely mention a person.
+
+     These names and emails are personal data.
+   - **Size.** At most 3 distinct imported contacts for the binding, canary included. The cap holds across commands and dossiers, under a lock, and an identical replay uses no slot.
+     - The dossier holds at most 15 companies.
+     - One eligible canary is enough to start. Three is a ceiling, not a research quota.
+     - If no row qualifies, that fact is reported and the rule is not weakened.
+   - **Contacts are people.** The existing contact record is unchanged: first name, last name and email stay required (`lib/sdr_agent/sales/contact.ex:145-147`). There is no team contact, no placeholder name and no display name. A team contact would need its own reviewed amendment.
+   - **The dossier.**
+     - It is one private local file, mode 0600, outside the repository. It is never committed, attached or echoed in reports, envelopes or chat.
+     - It uses the one supported schema, `sdr-agent.prototype-dossier` version 1. Its exact key sets and closed enums are pinned in the interface freeze:
+       - stable row ids;
+       - company-only rows, which are never imported;
+       - closed skip reasons;
+       - honest source types;
+       - exactly one claim each for name, role and email, each with its basis and attribution;
+       - fact kinds `quote`, `fact` and `inference`;
+       - company-level topic facts with their statement dates;
+       - email kinds `personal_work`, `role_mailbox` and `unavailable`;
+       - every contact classified `unverified`.
+     - Import names the file by its full sha256. The reviewed file is never changed in place, and a changed file is a new dossier.
+     - Its content is untrusted data: it cannot issue commands or set authority.
+   - **The contact-source rule.**
+     - **The email claim** qualifies only from:
+       - a page on the company's own site, where the company publishes the person's address;
+       - a page the person authored; or
+       - a public, terms-permitted third-party post or article that its publisher attributes to the person.
+
+       In every case the checked page must explicitly connect the exact named person to the exact published work address.
+     - **The evidence of that link** is its exact excerpt, or a byte-verified private copy. It holds both the name and the address inside one literal UTF-8 byte window of at most 300 bytes.
+       - **That window is a mechanical bound only, never sufficient attribution.** The person-to-address relation itself is the spot-check's explicit link mark.
+       - A byline and an unrelated mailbox in the same window fail.
+       - The bound is never expanded, and disconnected text is never stitched together.
+     - **Honest labels.** The source type is kept exactly. A third-party or directory source is never relabelled as the company's own.
+     - **What never supports any contact claim:** a directory listing, an enrichment record, or a page that only mentions the person.
+     - **What is mechanical, and what is declared.** The host only establishes company host versus other host, which is a necessary syntax check and not proof. Person authorship, publisher attribution and directory status are declared, source-supported classifications that the spot-check confirms.
+     - **Directories and company facts.** A directory may support a company-level fact only when the check confirms that exact company's statement, date and meaning. It remains directory evidence, unverified, never the company's own word.
+     - **The role claim** must confirm the current person, company and role association.
+     - **Conflicts.** A conflicting address, link or person source keeps the row out. A conflict is never resolved by picking the convenient source.
+     - **What attribution is not:** proof of identity, deliverability, consent or current ownership. Every contact stays `unverified`.
+   - **Spot-check before import.**
+     - **What is re-read.** Each selected row's claims and excerpts, once, with no login and inside the site's terms.
+     - **What is recorded.** A private manifest binds each result to its exact claim or fact, source and final URL, with the actual retrieval time and its time zone.
+     - **What is never done.** The dossier is never edited, and no precise time is reconstructed from a date-only record.
+     - **Where its digest goes.** Every imported row records it.
+     - **What `verified` means.** An agent re-read found the text. It is not proof that the claim is true.
+   - **Qualification inputs.**
+     - **What an importable row needs.** A verified, dated company-level statement of total headcount or a headcount range, and one of the company's own location. A founder count, an office address or accelerator participation alone does not qualify.
+     - **The freshness floor.** The statement date must be on or after 2025-10-28, and on or before the date of its check.
+       - A future-dated statement refuses.
+       - A statement with no date is insufficient.
+       - Retrieval time is not publication time.
+       - This is a conservative eligibility ceiling, not a guarantee of currency.
+     - **These must reach qualification.** They must become accepted evidence claims that reach the qualification call. Existing only in the dossier or the notes is not enough.
+     - **What the import does not do.** It sets no company size, industry or geography field.
+     - **Nothing is forced.** Nothing is prefilled from the ICP target, and an unknown never passes.
+     - **A truthful disqualification** moves the run on to the next eligible row.
+   - **What is imported.**
+     - **Contacts.** Only rows that pass the rules above.
+     - **Rows not imported.** Company-only, role-mailbox, unavailable, unconfirmed-link, unconfirmed-role and conflict rows stay research reserve. No placeholder or invented address is imported, no person is bound to a role inbox, and no required contact field is weakened.
+     - **Targeting notes, not evidence.** Inference facts and `why_fit` are kept as labelled targeting notes. They never become evidence or a quotation.
+     - **Evidence.** A quote or fact enters the quotable evidence path only as a verbatim excerpt from one source that the spot-check re-confirmed. This is what `lib/sdr_agent/sdr/prompts.ex:30-31` requires, and an excerpt never mixes pages. Unconfirmed or conflicting claims stay research notes.
+   - **How it is imported.**
+     - The one import action reads each input once, by its digest, through a bounded parser. It refuses the whole input, with value-free errors, on any of:
+       - unknown, oversized, duplicate or malformed records;
+       - repeated JSON keys at any depth, found before any conversion;
+       - nesting beyond the minimum depth that the exact schema needs;
+       - decoded text outside its field's rule (seed settings text by the ordinary settings content rules; dossier text by a defined control-character rule, with nothing normalized away first);
+       - unsupported contact types;
+       - unsafe URLs.
+     - It makes no network fetch and never evaluates the dossier, or model text, as code.
+     - It refuses an over-cap selection before any write.
+     - It imports each row atomically through domain APIs, idempotently by dossier sha256 plus row id, and refuses conflicts.
+     - After a failure, committed rows stay, and the same command resumes.
+   - **Dataset class.** The binding's create-only dataset class `real_prototype` is truthful: these rows are real and prototype, never "synthetic".
+     - **Accounts and contacts.** In prototype runtime only, imported accounts and contacts may have non-reserved domains and emails. Each must equal its dossier entry.
+     - **Sender address and booking link.** The reserved-name guard stays on the campaign sender address and the booking link.
+     - **Other databases.** The guard is never disabled anywhere else.
+   - **Evidence type.** The confirmed excerpts become research evidence of the new provider `:public_dossier`.
+     - It carries the real final URL, the spot-check's retrieval time, trust `unverified`, and whether each excerpt is a quotation or a supported fact.
+     - It is never labelled `fixture_search` or `fixture_web`, and never presented as a live fetch.
+     - Citations point to those sources.
+   - **Suppression.** Suppression keeps its normalized matching (`lib/sdr_agent/outreach/suppression.ex:68-69`) and the send gate's execution-time check (`lib/sdr_agent/outreach/delivery.ex:139-140,615-620`). Boot requires the Store suppression check.
+   - **Sender profile and guide (D-244).**
+     - **Content: seed r4.** Its four files are pinned by SHA256, and setup refuses any other bytes:
+       - `offering_profile.json` `d4c9efd26da61929e202df2cf00a2f20f03769f5da58eb6e782a7252991e1d54`;
+       - `writing_guide.json` `ba6ae5b1c864c5633c378070f3b702f00ef17eb8d59d4a6e30456caea35ef7eb`;
+       - `campaign.json` `4cdfbb7920e713f98015e8501868a9768c0cda30027a4a795921df7fb861f969` (the ICP, the one sequence step, the sender name);
+       - `provenance.json` `4395554919aaaefe36097b3de6f28e681697e55fad5729d1c0643cd4d72dc95f`.
+     - **Provenance.**
+       - The seed is mixed-provenance and never called wholly public.
+       - `public: true` means every supporting source is a public page. `public: false` means authored, non-public or mixed, with the source kinds kept.
+       - **Must be public:** the profile name and summary, and every feature, use case, outcome and proof point. Each is no broader than supported behaviour.
+       - **May be non-public:** instructions (the writing guide, the sequence step, the `limit` items), which are never evidence or a claim to a prospect; and targeting (the audience, the ICP).
+       - Both honesty limits stay. No field is added to the seed bytes to describe a class.
+     - **The ICP.** Matching and exclusion guidance lives in the criteria strings, because only the ICP name, version and criteria reach qualification. The description is a human note. No deterministic exclusion is claimed from natural-language criteria.
+     - **Where it lives.** One private directory, mode 0700, outside the repository, holding the four plain JSON files, each mode 0600. It is never committed (C4, D-123).
+     - **How it is seeded.**
+       - Setup reads the directory through a bounded parser and never evaluates it as code.
+       - It saves the settings through prototype seed actions. They run the same validators as the ordinary settings action, with no bypass, and errors are value-free.
+       - Provenance is never stored as settings keys.
+       - Setup does not open the SettingsLive first-private-save path.
+     - **Sender.** The sender name is exactly the 17 bytes `the GTMscape team`, a truthful brand sender, and the sender address stays reserved. The writing guide names that exact sender, so the header and the model's sign-off agree. The text never claims that a person wrote or approved a draft.
+     - **Sequence.** One step, no follow-up, and no deferred work scheduled after capture.
+   - **Agent sessions: authority PENDING the owner.**
+     - **What is already authorized.** The existing authority covers the application's own Anthropic CLI processing (ADR-0014 Amendment 2). It forbids real-person data in chat transcripts shared outside the owner's machine. D-245 directs finding the contacts, but it is not informed acceptance of agent-session copies at Anthropic or OpenAI and their retention.
+     - **The focused ask names:**
+       - the minimal public business identity and work email;
+       - agent research and review;
+       - which providers (Anthropic, OpenAI, or both);
+       - provider-side retention outside local control;
+       - no screenshots, publication or secrets;
+       - this bounded prototype and window.
+     - **Disclosed.** Before the pause, the research session already processed contact identities at Anthropic, together with fetched pages and tool output. That is a recorded exposure fact, not approved retroactively. Those copies stay private, unopened, unreplicated and undeleted, with a counts-only inventory. A later yes is prospective.
+     - **Until the answer:** no further prospect data enters any agent session; no import; no activation.
+     - **If Anthropic only:** Claude sessions may handle the minimal data. Codex reviews synthetic fixtures, schema, hashes and content-free counts only.
+     - **If both providers:** both sessions may handle it, within this prototype and window.
+     - An Anthropic yes is not an OpenAI yes. Reviewers check the dossier through a local, counts-only validator. Nothing about a real person leaves the machine by any other agent channel.
+   - **Application logs and command output in prototype runtime, and during setup.**
+     - **Content-free logging.** A logging filter replaces every log event that is not a coded prototype event with a fixed content-free line, keeping only its level and validated standard metadata. That covers formatted strings, reports, and crash, termination and supervisor reports, from any library.
+       - Coded events carry closed codes, ids and counts only. A kept event is rebuilt from its code and validated ids and counts alone; its original message and arguments are discarded.
+     - **The sink.** Log output goes to one private 0600 file.
+     - **Command output.** The operator commands print only codes, counts and ids, and their errors are value-free.
+     - **Telemetry.** OpenTelemetry content capture is off and traces export nowhere.
+     - **Database queries.** The existing database-query logging stays off (`config/config.exs:100-103`).
+     - **Testing.** Synthetic canary markers only, through setup, import and parser errors, worker and provider errors, formatted strings, termination and supervisor reports, and command failures.
+   - **Server logs (D-118/5b).** Before the cluster's first start, its configuration sets:
+     - `log_min_messages = fatal`;
+     - `log_min_error_statement = panic`;
+     - `log_statement = none`;
+     - `log_min_duration_statement = -1`, `log_min_duration_sample = -1`, `log_transaction_sample_rate = 0`;
+     - `log_error_verbosity = terse`;
+     - `log_parameter_max_length = 0`, `log_parameter_max_length_on_error = 0`;
+     - `log_connections = ''`, `log_disconnections = off`;
+     - `log_autovacuum_min_duration = -1`;
+     - `log_checkpoints = off`;
+     - `log_lock_waits = off`, `log_lock_failures = off`;
+     - `log_temp_files = -1`;
+     - `shared_preload_libraries = ''`, `session_preload_libraries = ''` (so no `auto_explain`);
+     - `logging_collector = off`, with stderr written to one file in the cluster's private log directory.
+
+     **Canary proof.** Before any real-data load, a canary proves that synthetic marker values driven through the error, slow, lock and constraint paths do not appear in that file.
+     - **What it proves.** Zero hits is scoped evidence for the tested paths. It is not proof that every log path is safe.
+     - **No residual:** this satisfies the 5b requirement for this cluster only.
+     - **A residual:** the separate log residual clause is a template. It is filled from the actual canary report, rehashed and reviewed, and real data is loaded only after the owner explicitly accepts that filled clause. D-242 does not cover it.
+     - **What this is not.** It is not 5b's closure for the owner's clusters.
+   - **Where copies live, and for how long.**
+     - **Copies:**
+       - the cluster (data and server log);
+       - the application log file;
+       - the dossier, the seed directory, the spot-check manifest and any retained private source copies;
+       - the proxy's raw model captures;
+       - the database's prompts, payloads and outputs;
+       - any export or result bundle.
+     - **Agent sessions, local and at the provider:**
+       - the operator commands' output, which by contract holds codes, counts and ids only;
+       - each agent CLI's locally stored transcripts;
+       - terminal scrollback;
+       - the providers' retained copies, outside local control;
+       - the pre-pause research session and its fetched pages.
+     - **Retention.** Each class is kept until the D-239 window ends, and then until a separate owner-approved disposal step. The local transcript and provider retention periods are each CLI's and provider's own; they are recorded in the inventory, not assumed.
+     - **No backup** is made by this plan.
+     - **Dropping the database alone does not remove every copy.**
+     - **Nothing is deleted** under this amendment.
+     - ADR-0014 Amendment 2's review point (2026-12-06) applies.
+
+8. **Delegated approval, capture and assurance in data.**
+   - **The approval.** The operator's approval states delegated machine approval.
+     - **Its event** `outreach.approval.granted` carries `approval_mode: "delegated_machine"`, the delegation id and the assurance block.
+     - **Its approver** is the operator anchor.
+     - **What it still binds:** the exact revision, content hash and recipient, and the suppression, citation and campaign checks of today's approval.
+     - **Whose approval it is not:** the owner's, and not a human's.
+   - **Capture.** A NEW `captured` receipt is recorded only for an approval by the operator anchor, in prototype runtime. Its event carries the assurance block.
+   - **The assurance block** is `{label, policy_id, entry_sha256, instance_id, dataset_class}`.
+     - It travels with every capture, serialization and export from the prototype database.
+     - It is never written into the approved message bytes.
+     - Exports carry it inside the signed payload.
+     - Any future standalone download must carry it.
+   - **Serialization.** One output serializer is the only standalone representation of prototype business output.
+     - **Two channels, never mixed.** Command output and logs carry codes, counts and ids only. Content goes only into a private, exclusively created, labelled 0600 bundle file, read only within the owner's provider scope (item 7).
+     - **Before approval**, the pending-revision view shows the current revision's subject, body, revision id and canonical content digest, together with the recipient's contact id and exact email address from the draft's own recipient. Nothing in it suggests the revision is approved.
+     - **Approving the reviewed draft.** The delegated approval takes the reviewed revision, its digest and the reviewed recipient address as explicit inputs. It never refills the address from the current contact. The existing check that refuses an approval whose reviewed address no longer matches the current recipient is unchanged.
+     - **The capture view** shows the captured rendered message and its digest.
+     - **Typed digests.** The revision-content digest and the rendered-message digest are never interchangeable, and each is compared only with its own bound source. Neither byte stream is altered, and the label never enters either.
+     - Every view carries the assurance block. Every other serializer or export path refuses in prototype runtime, and so does an export without the block.
+   - **UI.** Every prototype page shows a fixed `UNVERIFIED (PROTOTYPE)` banner. The Home projection keeps withholding non-reserved contacts (`lib/sdr_agent/outreach/inbox.ex:94`).
+   - **Checks that remain.** Deterministic business checks, exact citations, suppression, idempotency and capture-only delivery.
+
+9. **Activation, order and window.**
+   - **Activation needs all of these:**
+     - this text accepted (D-242);
+     - an implementation head with Codex's exact-head APPROVE, green CI and the full gate;
+     - the production-artifact proof, which no schedule cut removes;
+     - the item-2 setup;
+     - the item-7 canary proof (and, if a residual remains, the owner's acceptance of the filled residual clause);
+     - the owner's answer on agent-session processing (item 7), which bounds who may handle the real data;
+     - the item-4 remaining-budget worksheet, and the funded grant;
+     - at least one dossier row that passes item 7's rules and its spot-check;
+     - a fresh boot on the second row of the boot table.
+   - **Order.**
+     1. One canary contact journey first.
+     2. Then the remaining eligible contacts, one at a time and never in parallel. There are at most two, under the binding-wide cap of three, bounded by the remaining attempts and the per-run limits.
+
+     Headroom is kept for disqualification and failure. No answer is retried into existence.
+   - **The window.** After 2026-11-07T07:00:00Z there is no new business-use permission: no reservation, launch, `released_unverified` decision, delegated approval or capture.
+     - **Still allowed after it:** recording a late withheld or failed outcome, charging a consumed attempt, historical replay, revocation and reading.
+     - **Prototype mode off** opens no ordinary access.
+
+10. **Unchanged, and no authority by acceptance alone.**
+    - **Unchanged:** capture-only delivery, suppression, exact approval binding, idempotency, the append-only audit trail, tenant authorization and secrets protections.
+    - **What acceptance does not do.** It gives no access to the owner's databases or services. It makes no claim of human or owner approval of any output.
+
+**Entity and action delta:**
+
+| Entity | Change |
+|---|---|
+| PrototypeDatabaseBinding | New, create-only singleton (item 2). |
+| PrototypeDelegation | New, create-only rows: D-243, agent, session. The binding, tenant and anchor are database-bound to the binding (item 3). |
+| Actor, AuditEvent, AuditAccess | New system actor type `prototype_operator`, in both actor-type constraints. |
+| Payload | Changed policy boundary: two new scoped content actions for the operator (store its inputs; read one captured message). The existing actions are unchanged (item 3). |
+| User | New non-human role `agent_operator`, with no credential; sign-in, session lookup and role change refuse it. A unique `(id, tenant_id)` key. Password required for every other role. |
+| ModelCallGrant, ModelCallAllocation | The one funded provisioning action, after the remaining-budget worksheet. Prototype-runtime refusals of every other write except revoke. No new column. |
+| ModelInvocation `:reserve`, launch | The partitioned path, explicit purpose and recorded authority (item 4). |
+| ModelResultRelease | The new pair and the new withheld reason. Constraint-only (items 5 and 6). |
+| SettingsRevision | Changed policy boundary: a prototype seed action, with the ordinary create policy narrowed to the ordinary action and still admin-only. No operator read of settings content (item 7). |
+| IcpDefinition, Sequence, Campaign | Prototype seed actions for the four pinned seed files (item 7). |
+| Account, Contact, Lead | One import path. Dataset-aware domain and email validation. A binding-wide cap of three contacts. The contact record is unchanged and person-only (item 7). |
+| DossierEntry, DossierSource, ResearchArtifact | A new per-row import record keyed by dossier sha256 plus row id, with exactly one source-bound claim each for name, role and email, and the spot-check digest; per-source rows holding verified excerpts; provider `public_dossier` (item 7). |
+| Approval, DeliveryReceipt | Delegated approval and capture checks; event arguments only; approver attribution scoped to the three approval actions (items 3 and 8). |
+
+**Later, after instrumentation (D-248), each with its own review:**
+- configured witness mode;
+- calibration, v4 and T7;
+- evaluations and dashboards;
+- other profiles and providers;
+- a real-web adapter;
+- generic import;
+- team or role-inbox contacts, and contacts without an email (a separately reviewed amendment, if ever);
+- automatic discovery;
+- replies and follow-ups;
+- run retry;
+- per-record badges;
+- a Home rendering of real contacts;
+- hosted changes;
+- emailing.
+
+**Unchanged.**
+- The C2* amendment and addenda (D-223, D-227, D-228, D-230) in `agentenv-1`.
+- ADR-0004's agent-environment items, including item 10, in `agentenv-1`.
+- The reconciled-only `:released` path in ordinary runtime.
+- G-R0, and the v4 proof path.
+- Terminal immutability.
+- The test allowlist.
+
+**Residual risks (stated, not solved).**
+- Nothing checks the output against the wire or the truth. The label is the protection.
+- Public contact data can be stale or wrong, and permission to contact is not established. Capture-only bounds the effect.
+- The shared total of 60 is not code-enforced across databases. The remaining-budget worksheet depends on the owner's word for owner routes.
+- Agent sessions already hold contact identities at Anthropic from before the pause. Any further transfer waits for the owner's answer.
+- A compile flag and create-only rows stop mistakes, not a deliberate same-account change.
+
+**Cross-references.**
+- **This ADR.** R0 amendment items 3, 4 and 5 are narrowed or extended for prototype runtime only.
+- **ADR-0001.** The invariants are unchanged. Amendment 1: hosted stays Fake-only.
+- **ADR-0004.** Agent-environment items 8, 9 and 9a are reused as a contract. R0 items 1, 2, 5 and 7 are unchanged.
+- **ADR-0009.**
+  - Item 8 gains the non-human `agent_operator` role and the `prototype_operator` actor type, for prototype runtime only.
+  - Item 9's synthetic guard is replaced, for imported accounts and contacts in prototype runtime only.
+  - Record hashes are unchanged.
+- **ADR-0014.**
+  - Constraints 1-6 are unchanged.
+  - Constraint 7 and Amendment 2 govern the real data. This text adds the agent-curated dossier flow to Amendment 2's rule 3 flow, for this prototype only. It does not itself authorize agent-session transfer, which is pending the owner (item 7).
+  - Amendment 2's rule 4 applies (no telemetry content).
+
+<!-- END ADR-0005 D-237 PROTOTYPE AMENDMENT -->
 
 ### Anchoring (S11)
 
