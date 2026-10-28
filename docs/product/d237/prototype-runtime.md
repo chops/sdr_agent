@@ -56,7 +56,9 @@ edit to it goes through the reviewed receipt-revision process.
    - requires `pg_ctl status` to report not running;
    - requires both socket-pair files to be absent (a residual pair is
      refused, never removed or adopted);
-   - requires `lsof -nP -iTCP:5541 -sTCP:LISTEN` to be empty;
+   - requires `lsof -nP -iTCP:5541 -sTCP:LISTEN` to give its documented
+     no-match result (exit 1, no output); a listener, a failed or unavailable
+     probe, or a signal refuses before anything starts;
    - starts with `pg_ctl -l <root>/log/postgres.log`, then requires the
      connected `system_identifier` and `data_directory` to equal the marker's.
 3. `bin/prototype-pg status`: the identity proof, then `pg_ctl status`; a
@@ -129,9 +131,23 @@ paths only, that synthetic marker values do not reach `postgres.log`.
 - `op approve --revision <id> --revision-sha256 <hex> --recipient-email <addr>`
   takes all three exactly as reviewed. A missing one refuses before any action,
   and the address is never refilled from the current contact.
-- With the switch set (`SDR_PROTOTYPE`, `SDR_PROTOTYPE_INSTANCE`), every task in
-  `lib/mix/tasks` other than `sdr.prototype.*` and `sdr.audit.export` refuses as
-  its first statement.
+- The task allow-list is closed and exact. Only these six tasks may start with
+  the switch set: `sdr.prototype.setup`, `sdr.prototype.provision`,
+  `sdr.prototype.import`, `sdr.prototype.op`, `sdr.prototype.serve` and
+  `sdr.audit.export`. No name prefix grants anything, so a future task is
+  refused until it is added by review. Being on the list grants no authority:
+  each task still runs its own process-kind, boot and operator checks, and an
+  export still needs the assurance block.
+- With the switch present at all (`SDR_PROTOTYPE` or `SDR_PROTOTYPE_INSTANCE`,
+  even partial, empty or malformed) or in prototype runtime, every other task
+  in `lib/mix/tasks` refuses with a fixed code as the first statement of each
+  of its `run/1` clauses, before any application start, key read, Repo, queue,
+  provider or content output.
+- `bin/prototype-pg start` treats only `lsof`'s documented no-match result
+  (exit 1, no output) as a free port. A listing refuses
+  (`tcp_listener_present`), and any other probe outcome refuses
+  (`listener_probe_failed`) before `pg_ctl start`; probe diagnostics are never
+  printed.
 - Command output carries codes, counts and ids only. Content goes only to the
   private bundle under `<root>/bundles/` (directory 0700, files 0600, never
   overwritten).

@@ -209,8 +209,23 @@ cmd_init() {
   say 'init ok'
 }
 
+# The TCP listener probe, fail closed. lsof's documented no-match result is
+# exit 1 with no output at all: the only "free" answer. Exit 0 with a
+# listing is a listener. Anything else (diagnostics, another status, an
+# unavailable command, death by a signal, an empty success, a listing on a
+# failed status) is an unknown observation, and unknown is not free.
+# Output and diagnostics are captured in memory and never printed.
+probe_listeners() {
+  local out rc
+  out=$("$CLEAN" -i "$LSOF" -nP -iTCP:"$PORT" -sTCP:LISTEN 2>&1)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [ -z "$out" ]; then return 0; fi
+  if [ "$rc" -eq 0 ] && [ -n "$out" ]; then refuse tcp_listener_present; fi
+  refuse listener_probe_failed
+}
+
 cmd_start() {
-  local listeners rc
+  local rc
   owned
   pg_status
   rc=$?
@@ -223,8 +238,7 @@ cmd_start() {
   # A residual socket pair is refused, never removed or adopted.
   if present "$SOCKET" || present "$SOCKET_LOCK"; then refuse socket_pair_present; fi
   [ -f "$LSOF" ] && [ -x "$LSOF" ] || refuse lsof_missing
-  listeners=$("$CLEAN" -i "$LSOF" -nP -iTCP:"$PORT" -sTCP:LISTEN 2> /dev/null)
-  [ -z "$listeners" ] || refuse tcp_listener_present
+  probe_listeners
   owned_dir "$LOGDIR" || refuse log_dir_not_owned
   if present "$LOG"; then owned_file "$LOG" || refuse log_not_owned; fi
 
