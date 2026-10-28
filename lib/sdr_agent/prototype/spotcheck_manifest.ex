@@ -15,9 +15,13 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
     `(row_id, item)` whatever its status, or a relation on the wrong item.
   - It returns `%{sha256:, checker:, results: %{{row_id, item} => result}}`.
   - `artifact/2` reads one retained source copy named by a claim's
-    `artifact` (`{file, sha256}`) from the artifacts directory: the
-    directory 0700, the file a regular 0600 file by `lstat`, at most 1 MiB,
-    UTF-8 text, and its sha256 equal to the recorded one.
+    `artifact` (`{file, sha256}`) from the artifacts directory: a basename
+    of the fixed grammar; the directory a real 0700 directory and the file
+    a regular 0600 file of at most 1 MiB by `lstat`; then ONE handle whose
+    opened object (fstat) must be that same file (device and inode) under
+    the same root before any byte is read; a read bounded to 1 MiB plus one
+    sentinel byte; UTF-8 text; its sha256 equal to the recorded one. The
+    handle is closed on every path.
 
   Refusals are `{:error, {path, rule}}`, value-free; every artifact refusal
   is `{:error, {"artifact", :artifact_invalid}}`.
@@ -51,15 +55,12 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
     # The basename grammar is checked here, whatever the caller parsed: no
     # separator, traversal, absolute or dot-leading name reaches the disk.
     with true <- Regex.match?(@artifact_file, file) and Regex.match?(@hex64, sha256),
-         {:ok, %File.Stat{type: :directory, mode: dir_mode}} <- File.lstat(dir),
-         true <- (dir_mode &&& 0o777) == 0o700,
-         {:ok, %File.Stat{type: :regular} = before} <- File.lstat(path),
-         true <- (before.mode &&& 0o777) == 0o600 and before.size <= @artifact_max_bytes,
+         {:ok, %File.Stat{type: :directory} = root} <- File.lstat(dir),
+         true <- (root.mode &&& 0o777) == 0o700,
+         {:ok, %File.Stat{type: :regular} = checked} <- File.lstat(path),
+         true <- allowed?(checked),
          :ok <- seam(:after_precheck, path),
-         {:ok, bytes} <- File.read(path),
-         :ok <- seam(:after_read, bytes),
-         {:ok, %File.Stat{type: :regular} = after_read} <- File.lstat(path),
-         true <- same_file?(before, after_read) and byte_size(bytes) == before.size,
+         {:ok, bytes} <- read_checked(dir, root, path, checked),
          true <- String.valid?(bytes),
          true <- Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) == sha256 do
       {:ok, bytes}
@@ -70,8 +71,57 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
 
   def artifact(_dir, _ref), do: {:error, {"artifact", :artifact_invalid}}
 
-  # The file read is the file checked: the same inode, size and mtime.
-  defp same_file?(a, b), do: a.inode == b.inode and a.size == b.size and a.mtime == b.mtime
+  # ONE handle (Codex GREEN-1 R1): before any content is read, the opened
+  # object itself (fstat on the handle) must be the regular 0600 file of at
+  # most 1 MiB that the precheck saw (same device and inode), and the root
+  # must still be the checked 0700 directory. A file or root substituted
+  # after the precheck is therefore never read. The read is bounded to the
+  # limit plus one sentinel byte, so growth after the identity check is
+  # refused without an unbounded read. The handle is closed on every path.
+  defp read_checked(dir, root, path, checked) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, handle} ->
+        try do
+          with {:ok, info} <- :file.read_file_info(handle, time: :posix),
+               opened = File.Stat.from_record(info),
+               true <-
+                 opened.type == :regular and allowed?(opened) and same_object?(opened, checked),
+               {:ok, %File.Stat{type: :directory} = root_now} <- File.lstat(dir),
+               true <- same_object?(root_now, root),
+               :ok <- seam(:after_open, handle),
+               {:ok, bytes} <- read_at_most(handle, @artifact_max_bytes + 1, []),
+               :ok <- seam(:after_read, bytes),
+               true <- byte_size(bytes) <= @artifact_max_bytes do
+            {:ok, bytes}
+          else
+            _ -> :error
+          end
+        after
+          :file.close(handle)
+        end
+
+      {:error, _reason} ->
+        :error
+    end
+  end
+
+  defp allowed?(%File.Stat{mode: mode, size: size}),
+    do: (mode &&& 0o777) == 0o600 and size <= @artifact_max_bytes
+
+  defp same_object?(a, b),
+    do:
+      a.inode == b.inode and a.major_device == b.major_device and a.minor_device == b.minor_device
+
+  # At most `left` bytes in total, however the reads are split.
+  defp read_at_most(_handle, 0, acc), do: {:ok, IO.iodata_to_binary(acc)}
+
+  defp read_at_most(handle, left, acc) do
+    case :file.read(handle, left) do
+      {:ok, data} -> read_at_most(handle, left - byte_size(data), [acc, data])
+      :eof -> {:ok, IO.iodata_to_binary(acc)}
+      {:error, _} = error -> error
+    end
+  end
 
   # Test-seam builds only (`:claude_cli_test_seams`, fixed at compile time):
   # a test may act or observe at a named boundary of `artifact/2` through a
