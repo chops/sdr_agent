@@ -11,9 +11,23 @@ defmodule SdrAgent.Sales.Validations.ImportTenant do
   action's transaction, when `tenant_id` is already set; a nil tenant or a
   nil reference is refused. Each lookup is a kernel read filtered by both
   the id AND that tenant (a kernel read alone imposes no tenant filter);
-  nothing is returned. A refusal is `{field, "is not a row of this
-  tenant"}`, with no value. Option: `:refs`, a keyword of attribute to
+  nothing is returned. Option: `:refs`, a keyword of attribute to
   resource.
+
+  The references are checked in their declared order and the first
+  failure stops the check (Codex 7c947ae1): a row of exactly this tenant
+  continues to the NEXT reference; an absent reference (a nil or
+  non-binary id or tenant, which is never read, no row, or another
+  tenant's row) is the refusal `{field, "is not a row of this tenant"}`,
+  with no value; a read that returns `{:error, error}` fails the
+  validation with that same error, unwrapped and unclassified, so a
+  kernel read's `Forbidden` or an unknown failure is not reported as an
+  absent row. A raise or throw from the read is not caught here. What
+  the propagated error then does (the action's rollback, and whether the
+  guarded wrapper's Guard records an `authz.denied`, which at top level
+  means only the refused wrapper-result class and under an
+  `Audit.transaction` owner does not happen, a named S1/Audit coverage
+  limit) is Ash's, Guard's and Audit's behaviour, unchanged here.
 
   Only the two import actions use it; the ordinary create paths and
   `SdrAgent.Sales.Changes.LeadAccount` (which still requires a lead's
@@ -53,26 +67,30 @@ defmodule SdrAgent.Sales.Validations.ImportTenant do
   def validate(changeset, opts, _context) do
     tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
 
-    Enum.find_value(opts[:refs], :ok, fn {field, resource} ->
+    Enum.reduce_while(opts[:refs], :ok, fn {field, resource}, :ok ->
       id = Ash.Changeset.get_attribute(changeset, field)
 
-      unless in_tenant?(field, resource, id, tenant_id),
-        do: {:error, field: field, message: "is not a row of this tenant"}
+      case in_tenant(field, resource, id, tenant_id) do
+        :ok -> {:cont, :ok}
+        :absent -> {:halt, {:error, field: field, message: "is not a row of this tenant"}}
+        {:error, error} -> {:halt, {:error, error}}
+      end
     end)
   end
 
-  defp in_tenant?(field, resource, id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
+  defp in_tenant(field, resource, id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
     resource
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
     |> reference_read(%{field: field, resource: resource, id: id, tenant_id: tenant_id})
     |> case do
-      {:ok, %{tenant_id: ^tenant_id}} -> true
-      _none_or_error -> false
+      {:ok, %{tenant_id: ^tenant_id}} -> :ok
+      {:ok, _none_or_foreign} -> :absent
+      {:error, error} -> {:error, error}
     end
   end
 
-  defp in_tenant?(_field, _resource, _id, _tenant_id), do: false
+  defp in_tenant(_field, _resource, _id, _tenant_id), do: :absent
 
   # The reference read (see the moduledoc for the test-seam scope).
   if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
