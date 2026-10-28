@@ -207,15 +207,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       Keys are `{SdrAgent.Prototype, atom}` in the calling process's
       dictionary; `lookup/1` reads them.
 
-      Stage (D-237 S1 B1a): `enter_runtime/1` and `lookup/1` are
-      implemented, and `lookup/1` reads the calling process ONLY (the
-      `$callers` reading is B1b). `leave_runtime/0`, `put_live_identity/1`
-      and `clear/0` still return `{:error, :not_implemented}`.
+      Stage (D-237 S1): B1a `enter_runtime/1` (Codex b743eb5d) and B1b
+      `leave_runtime/0`, the `put_live_identity/1` storage and the
+      `$callers` `lookup/1` (Codex b591e1a6) are implemented. Nothing reads
+      the stored live identity yet (its consumer is B2). `clear/0` still
+      returns `{:error, :not_implemented}`.
       """
 
       alias SdrAgent.Prototype.Binding
 
       @runtime_key {SdrAgent.Prototype, :runtime}
+      @identity_key {SdrAgent.Prototype, :live_identity}
 
       @doc "Enters prototype runtime with `snapshot` for the calling process."
       @spec enter_runtime(Binding.t()) :: :ok
@@ -224,22 +226,46 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         :ok
       end
 
-      @doc "Returns the calling process to ordinary runtime."
-      @spec leave_runtime() :: :ok | {:error, atom()}
-      def leave_runtime, do: red({:error, :not_implemented})
+      @doc """
+      Returns the calling process to ordinary runtime. It stores `:ordinary`
+      rather than deleting the key, so a caller's prototype runtime is not
+      re-inherited through `$callers`.
+      """
+      @spec leave_runtime() :: :ok
+      def leave_runtime do
+        Process.put(@runtime_key, :ordinary)
+        :ok
+      end
 
       @doc "Overrides the live identity for the calling process (`map` or `:raise`)."
-      @spec put_live_identity(map() | :raise) :: :ok | {:error, atom()}
-      def put_live_identity(_overrides), do: red({:error, :not_implemented})
+      @spec put_live_identity(map() | :raise) :: :ok
+      def put_live_identity(overrides) when overrides == :raise or is_map(overrides) do
+        Process.put(@identity_key, overrides)
+        :ok
+      end
 
       @doc "Removes every seam key of the calling process."
       @spec clear() :: :ok | {:error, atom()}
       def clear, do: red({:error, :not_implemented})
 
       @doc false
-      # The value of `key` in the calling process, or nil (B1a: no `$callers`).
+      # The value of `key` in the calling process, else in the first of its
+      # explicit `$callers` that has it, read as `SdrAgent.Clock` reads them
+      # (clock.ex:76-87); a dead caller contributes nil, and `$callers` is
+      # never changed.
       @spec lookup(term()) :: term()
-      def lookup(key), do: Process.get(key)
+      def lookup(key) do
+        Enum.find_value([self() | Process.get(:"$callers", [])], fn pid ->
+          if pid == self(), do: Process.get(key), else: remote(pid, key)
+        end)
+      end
+
+      defp remote(pid, key) do
+        case Process.info(pid, :dictionary) do
+          {:dictionary, dict} -> dict |> List.keyfind(key, 0, {key, nil}) |> elem(1)
+          nil -> nil
+        end
+      end
 
       # RED stub result, typed dynamic() (see SdrAgent.Prototype.Authority).
       defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
