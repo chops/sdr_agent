@@ -23,8 +23,10 @@ defmodule SdrAgent.Prototype.Changes.SeedNote do
   argument a caller could supply). That hook, after authorization and inside
   the action's transaction, reads the Payload through the kernel, filtered
   by its sha256 AND the new row's tenant, and only then sets the `note`
-  attribute to the original bytes; otherwise it adds a value-free error on
-  `note`. A missing note is the action's required-argument error.
+  attribute to the original bytes. No such Payload is a value-free error on
+  `note`; a returned read error is not treated as absence: it is added as
+  itself, so the action fails with that error and writes nothing. A missing
+  note is the action's required-argument error.
   """
   use Ash.Resource.Change
 
@@ -67,24 +69,35 @@ defmodule SdrAgent.Prototype.Changes.SeedNote do
   defp bind(changeset, note, sha256) do
     tenant_id = Ash.Changeset.get_attribute(changeset, :tenant_id)
 
-    if stored?(sha256, tenant_id),
-      do: Ash.Changeset.force_change_attribute(changeset, :note, note),
-      else: refuse(changeset, "does not name a provenance Payload of this tenant")
+    case stored(sha256, tenant_id) do
+      :stored ->
+        Ash.Changeset.force_change_attribute(changeset, :note, note)
+
+      :absent ->
+        refuse(changeset, "does not name a provenance Payload of this tenant")
+
+      # A returned read error is not evidence that the Payload is absent
+      # (Codex 3ad0a105): it keeps its own identity, through Ash's own error
+      # path, and nothing is written.
+      {:error, error} ->
+        Ash.Changeset.add_error(changeset, error)
+    end
   end
 
-  defp stored?(sha256, tenant_id) when is_binary(tenant_id) do
+  defp stored(sha256, tenant_id) when is_binary(tenant_id) do
     Payload
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(sha256 == ^sha256 and tenant_id == ^tenant_id)
     |> Ash.Query.select([:sha256, :tenant_id])
     |> read_one()
     |> case do
-      {:ok, %Payload{sha256: ^sha256, tenant_id: ^tenant_id}} -> true
-      _none_or_error -> false
+      {:ok, %Payload{sha256: ^sha256, tenant_id: ^tenant_id}} -> :stored
+      {:ok, _none} -> :absent
+      {:error, error} -> {:error, error}
     end
   end
 
-  defp stored?(_sha256, _tenant_id), do: false
+  defp stored(_sha256, _tenant_id), do: :absent
 
   # Test-seam builds only: a read result a test put under
   # `{__MODULE__, :read_fault}` in the calling process replaces the read, so

@@ -16,8 +16,10 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
   - the binding's `operator_user_id` is one User row, read through the
     kernel filtered by id AND that tenant AND role `:agent_operator`.
 
-  Only then is `created_by_id` set to it. Anything else adds a value-free
-  error on `created_by_id`. A creator is never taken from the caller (the
+  Only then is `created_by_id` set to it. A failed live check or no such
+  anchor row adds a value-free error on `created_by_id`; a returned error of
+  the anchor read is not treated as absence: it is added as itself, so the
+  action fails with that error and writes nothing. A creator is never taken from the caller (the
   action does not accept one). In a build without the prototype authority
   every seed revision is refused the same way.
   """
@@ -43,11 +45,24 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
       with :ok <- Prototype.check_live(),
            {:ok, ^actor} <- Prototype.operator_actor(id),
            {:ok, %{tenant_id: ^tenant_id, operator_user_id: user_id}} when is_binary(tenant_id) <-
-             Prototype.binding(),
-           {:ok, %User{id: ^user_id}} <- anchor_user(user_id, tenant_id) do
-        Ash.Changeset.force_change_attribute(changeset, :created_by_id, user_id)
+             Prototype.binding() do
+        case anchor_user(user_id, tenant_id) do
+          {:ok, %User{id: ^user_id}} ->
+            Ash.Changeset.force_change_attribute(changeset, :created_by_id, user_id)
+
+          # No such anchor row (missing, wrong role or tenant): the business
+          # refusal.
+          {:ok, _none} ->
+            refuse(changeset)
+
+          # A returned read error is not evidence that the anchor is absent
+          # (Codex 3ad0a105): it keeps its own identity, through Ash's own
+          # error path, and nothing is written.
+          {:error, error} ->
+            Ash.Changeset.add_error(changeset, error)
+        end
       else
-        _refused -> refuse(changeset)
+        _not_live -> refuse(changeset)
       end
     end
 
