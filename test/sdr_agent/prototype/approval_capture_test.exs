@@ -104,7 +104,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
         actor: ctx.admin
       )
 
-    enter!(ctx.fixture)
+    enter_window!(ctx.fixture)
 
     assert {:error, %Ash.Error.Invalid{}} =
              Outreach.approve(draft!(ctx, draft), stale, actor: ctx.operator)
@@ -185,7 +185,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     %{draft: draft} = drafted!(ctx)
     approval = approve!(ctx, draft, operator!(ctx, :reviewer))
     delivery = delivery_of!(ctx, approval)
-    enter!(fixture)
+    enter_window!(fixture)
 
     assert raised(fn -> deliver!() end) =~ "prototype_approval_not_delegated"
     assert captured(ctx, delivery) == []

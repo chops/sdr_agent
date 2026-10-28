@@ -100,7 +100,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     lead = SdrAgent.SDRCase.fixture_lead!(ctx, "06")
     email = to_string(contact!(ctx, lead).email)
     suppress!(ctx, :email, " " <> String.upcase(email))
-    enter!(fixture)
+    enter_window!(fixture)
 
     assert {:ok, :suppressed, %{"suppression_ids" => [_ | _]}} =
              SdrAgent.SDR.SuppressionCheck.Store.check(email, %{tenant_id: ctx.tenant.id})

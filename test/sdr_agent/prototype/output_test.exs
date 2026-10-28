@@ -615,7 +615,7 @@ defmodule SdrAgent.Prototype.OutputTest do
         actor: ctx.admin
       )
 
-    enter!(ctx.fixture)
+    enter_window!(ctx.fixture)
     result = call(@op, :execute, [approve_parsed(ctx.revision, reviewed), ctx.operator])
     assert result == {:error, :stale_review}, "approved a superseded revision: #{inspect(result)}"
     assert approvals!(ctx, ctx.draft) == []

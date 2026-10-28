@@ -73,7 +73,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     fixture = bound!(Keyword.merge([enter_runtime: false], opts))
     ctx = demo!(fixture)
     SdrAgent.SDRCase.ensure_offering!(ctx)
-    enter!(fixture)
+    enter_window!(fixture)
     Map.merge(ctx, %{fixture: fixture, operator: fixture.actor})
   end
 
@@ -136,7 +136,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     ordinary = SDR.retry_run(run.id, actor: ctx.admin)
     refute forbidden?(ordinary), "control: the ordinary admin retry reaches the retry checks"
 
-    enter!(fixture)
+    enter_window!(fixture)
 
     for actor <- [ctx.admin, fixture.actor] do
       assert forbidden?(SDR.retry_run(run.id, actor: actor)),

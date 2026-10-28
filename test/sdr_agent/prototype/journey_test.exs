@@ -77,7 +77,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
   # Steps 1–4: a bound prototype with the seed, a provisioned grant and one imported row.
   defp prepared!(variant) do
     fixture = bound!()
-    enter!(fixture)
+    enter_window!(fixture)
     actor = fixture.actor
 
     seed_dir = scratch!("seed")

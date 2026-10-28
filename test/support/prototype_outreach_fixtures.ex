@@ -13,6 +13,9 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     `admin`, `agent`, `aud`, `campaign_id`) plus `fixture` (the S1 bind
     result), `operator` (the resolved operator actor), `anchor`, `draft`,
     `revision`, `lead`, `run` and `contact`.
+  - `enter_window!/1,2` enters prototype runtime with the fixture's snapshot
+    and freezes the clock inside the window (named apart from S1's
+    `SdrAgent.PrototypeCase.enter!/1`, which enters runtime only).
   - `window_start/0`, `window_end/0` (exclusive) and `inside_window/0` are
     the `d237-funding/1` window instants (amendment item 4).
   - `operator_approve/2` approves the draft's current revision as reviewed
@@ -54,7 +57,7 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     ctx = demo!(fixture)
     drafted = OutreachFixtures.drafted!(ctx, key)
     contact = OutreachFixtures.contact!(ctx, drafted.lead)
-    enter!(fixture)
+    enter_window!(fixture)
 
     ctx
     |> Map.merge(drafted)
@@ -97,7 +100,7 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc "Enters prototype runtime with the fixture's snapshot and freezes the clock inside the window."
-  def enter!(fixture, at \\ @inside) do
+  def enter_window!(fixture, at \\ @inside) do
     result = PrototypeFixtures.enter_runtime(fixture.snapshot)
     assert result == :ok, "entering prototype runtime failed: #{inspect(result)}"
     Clock.freeze(at)
