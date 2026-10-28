@@ -74,7 +74,25 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
       AgentsFixtures.grant!(tenant)
       %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
       invocation = AgentsFixtures.claude_completed!(run, agent, "ordinary-proto-1")
-      %{agent: agent, invocation: invocation}
+      %{tenant: tenant, agent: agent, invocation: invocation}
+    end
+
+    test "an ordinary withheld event records exactly its gate cause and classification", ctx do
+      # Regression for the shared-file delta: the prototype refusal has its
+      # own withheld AppendEvent; the ordinary withheld event's arguments
+      # stay exactly these two, byte for byte.
+      cause = GateFixtures.cause!(ctx.invocation)
+      release = GateFixtures.withhold!(ctx.invocation, ctx.agent, cause)
+
+      [event] =
+        ctx.tenant
+        |> events_of_type("model.result.withheld")
+        |> Enum.filter(&(&1.subject_id == release.id))
+
+      assert event.payload["arguments"] == %{
+               "gate_cause_id" => cause.id,
+               "gate_classification" => "inferred"
+             }
     end
 
     test "a withheld prototype_authority_refused decision is refused outside prototype runtime",
