@@ -7,13 +7,39 @@ defmodule SdrAgent.ImportTaskSource do
   parses a source text (never runs or compiles it) and returns the closed,
   sorted list of rule violations; `[]` means the source passes every rule.
 
-  Only the body of `defmodule Mix.Tasks.Sdr.Prototype.Import` is analysed
-  (it may sit inside a compile-time gate), with that module's aliases
-  resolved (`alias A.B`, `alias A.B, as: C`, `alias A.{B, C}`).
+  Only the body of `defmodule Mix.Tasks.Sdr.Prototype.Import` is analysed,
+  and only inside a supported grammar (Codex task-harness review R1):
+
+  - the file's top level is the task module alone, or one
+    `if <gate> do <task module> end` with no `else`, and the task module is
+    defined exactly once;
+  - inside it there is no nested `defmodule`, `defprotocol`, `defimpl` or
+    `Module.create`, no `defmacro`/`defmacrop`, no `use` other than
+    `use Mix.Task`, no `@before_compile`, `@after_compile`,
+    `@after_verify`, `@on_definition` or `@on_load`, no `require` with
+    options (`require ..., as:` is an alias), and exactly one `def run/1`
+    clause, a top-level statement of the module;
+  - aliases (`alias A.B`, `alias A.B, as: C`, `alias A.{B, C}`) are
+    top-level statements of the module only, all before any statement
+    other than `use`, `require`, `import`, `alias` or a literal
+    `@moduledoc`/`@shortdoc`, so none reinterprets an earlier call; each
+    name is bound once (no rebinding), never to `Elixir` or to the root of
+    a module the rules name (`IO`, `File`, `Logger`, `System`, `Mix`,
+    `Kernel`, `Function`, `Module`, `Application`, `Supervisor`, `Oban`,
+    `Ecto`, `SdrAgent`), and each target expands through the earlier
+    aliases in order.
+
+  Outside that grammar the checker refuses: it returns exactly
+  `[:unsupported_scope]` and analyses nothing else (so a helper-local
+  alias, a nested module or a rebinding can neither hide a call nor supply
+  the task's `run/1`, `use` or `@moduledoc`). Inside it, `use Mix.Task`,
+  `@moduledoc` and `run/1` are found among the module's own top-level
+  statements only, and every call is resolved against those aliases.
 
   | Violation | Rule |
   |---|---|
   | `:no_module` | the task module is defined |
+  | `:unsupported_scope` | the source is inside the supported grammar above (returned alone) |
   | `:not_mix_task` | it has `use Mix.Task` |
   | `:no_moduledoc` | it has a non-empty `@moduledoc` |
   | `:no_run` | it defines `run/1` |
@@ -30,14 +56,15 @@ defmodule SdrAgent.ImportTaskSource do
   | `:other_channel` | no `IO`, `Logger`, `:io`, `:logger`, `Mix.shell` or `SafeLog.event` call |
   | `:raise_not_literal` | `Mix.raise/1` takes a literal string only |
   | `:exit_not_literal` | `exit/1` takes a literal `{:shutdown, integer}` only |
-  | `:indirect_dispatch` | no `import`, `apply`, `Kernel.apply`, `:erlang.apply`, `Function.capture`, remote capture `&M.f/n`, or call on a variable module: such dispatch is flagged, never analysed |
+  | `:indirect_dispatch` | no `import`, `defdelegate`, `apply`, `Kernel.apply`, `:erlang.apply`, `Function.capture`, remote capture `&M.f/n`, or call on a variable module or an unexpandable alias (`__MODULE__.f()`): such dispatch is flagged, never analysed |
 
   **Honest scope.** This is a lexical, source-order guard over explicit
   remote calls. It is not control flow or runtime dominance: it cannot show
   that `attach/0` succeeded before a read, that the session entry precedes a
   read on every path, that the environment value is the correlation it
-  passes, or that nothing is printed on a refusal. Those need runtime task
-  tests once the sink and startup holds lift.
+  passes, or that nothing is printed on a refusal. It does not follow calls
+  into other modules, and it checks only the rules in the table. Those
+  need runtime task tests once the sink and startup holds lift.
   """
 
   @task [:Mix, :Tasks, :Sdr, :Prototype, :Import]
@@ -71,25 +98,40 @@ defmodule SdrAgent.ImportTaskSource do
   @say_codes [:import_row, :import_summary]
   @channels [IO, Logger, :io, :logger]
   @dispatch [{Kernel, :apply}, {:erlang, :apply}, {Function, :capture}]
+  @injection [:before_compile, :after_compile, :after_verify, :on_definition, :on_load]
+  @nested [:defmodule, :defprotocol, :defimpl, :defmacro, :defmacrop]
+
+  # The roots of every Elixir module the rules name: an alias may not bind
+  # one of these names (it would reinterpret a ruled call).
+  @protected for module <-
+                   [@safe_log, @session, IO, Logger, File, System, Mix, Module] ++
+                     Enum.map(@readers ++ @required ++ @starts ++ @dispatch, &elem(&1, 0)),
+                 match?("Elixir." <> _, Atom.to_string(module)),
+                 uniq: true,
+                 do: Module.concat([hd(Module.split(module))])
 
   @doc "The sorted, unique violations of `source` (see the moduledoc)."
   @spec violations(String.t()) :: [atom()]
   def violations(source) when is_binary(source) do
-    case find_module(Code.string_to_quoted!(source)) do
-      nil -> [:no_module]
-      body -> body |> module_violations() |> Enum.uniq() |> Enum.sort()
+    with {:ok, body} <- task_body(Code.string_to_quoted!(source)),
+         statements = statements(body),
+         :ok <- supported(body, statements),
+         {:ok, aliases} <- top_aliases(statements) do
+      body |> module_violations(statements, aliases) |> Enum.uniq() |> Enum.sort()
+    else
+      :none -> [:no_module]
+      :unsupported -> [:unsupported_scope]
     end
   end
 
-  defp module_violations(body) do
-    aliases = aliases(body)
+  defp module_violations(body, statements, aliases) do
     calls = calls(body, aliases)
-    run = run_body(body)
+    run = run_body(statements)
     run_calls = if run, do: calls(run, aliases), else: []
 
     [
-      unless(flag?(body, &use_mix_task?/1), do: :not_mix_task),
-      unless(flag?(body, &moduledoc?/1), do: :no_moduledoc),
+      unless(Enum.any?(statements, &use_mix_task?/1), do: :not_mix_task),
+      unless(Enum.any?(statements, &moduledoc?/1), do: :no_moduledoc),
       unless(run, do: :no_run),
       run && attach_not_first(run, aliases),
       outside_run(calls -- run_calls),
@@ -109,48 +151,157 @@ defmodule SdrAgent.ImportTaskSource do
     |> Enum.reject(&(&1 in [nil, false]))
   end
 
-  ## The module, its aliases and its calls
+  ## The module, its supported grammar, its aliases and its calls
 
-  defp find_module(ast) do
-    {_ast, found} =
-      Macro.prewalk(ast, nil, fn
-        {:defmodule, _, [{:__aliases__, _, @task}, [do: body]]} = node, nil -> {node, body}
-        node, acc -> {node, acc}
-      end)
+  # The task module's body, only when the file's top level is that module
+  # alone or one `if <gate> do <module> end`, and it is defined once.
+  defp task_body(ast) do
+    case {count(ast, &task_module?/1), statements(ast)} do
+      {0, _statements} ->
+        :none
 
-    found
+      {1, [{:defmodule, _, [_name, [do: body]]} = module]} ->
+        body_of(module, body)
+
+      {1, [{:if, _, [_gate, [do: {:defmodule, _, [_name, [do: body]]} = module]]}]} ->
+        body_of(module, body)
+
+      _other ->
+        :unsupported
+    end
   end
 
-  defp aliases(body) do
-    {_ast, acc} =
-      Macro.prewalk(body, %{}, fn
-        {:alias, _, [{{:., _, [{:__aliases__, _, base}, :{}]}, _, children}]} = node, acc ->
-          {node,
-           Enum.reduce(children, acc, fn
-             {:__aliases__, _, parts}, acc ->
-               Map.put(acc, List.last(parts), Module.concat(base ++ parts))
+  defp body_of(module, body), do: if(task_module?(module), do: {:ok, body}, else: :unsupported)
 
-             _other, acc ->
-               acc
-           end)}
+  defp task_module?({:defmodule, _, [{:__aliases__, _, @task} | _]}), do: true
+  defp task_module?(_node), do: false
 
-        {:alias, _, [{:__aliases__, _, parts}, [as: {:__aliases__, _, [short]}]]} = node, acc ->
-          {node, Map.put(acc, short, Module.concat(parts))}
+  defp statements({:__block__, _, statements}), do: statements
+  defp statements(nil), do: []
+  defp statements(statement), do: [statement]
 
-        {:alias, _, [{:__aliases__, _, parts}]} = node, acc ->
-          {node, Map.put(acc, List.last(parts), Module.concat(parts))}
+  defp count(ast, fun) do
+    {_ast, n} =
+      Macro.prewalk(ast, 0, fn node, n -> {node, if(fun.(node), do: n + 1, else: n)} end)
 
-        node, acc ->
-          {node, acc}
-      end)
-
-    acc
+    n
   end
 
-  defp resolve({:__aliases__, _, [first | rest]}, aliases) do
-    case Map.fetch(aliases, first) do
-      {:ok, full} -> Module.concat([full | rest])
-      :error -> Module.concat([first | rest])
+  # No scope the checker cannot attribute: nested modules, macros, code
+  # injection, local aliases, or a run/1 that is not one top-level clause.
+  defp supported(body, statements) do
+    top_aliases = Enum.count(statements, &alias?/1)
+
+    if count(body, &unsupported?/1) == 0 and count(body, &alias?/1) == top_aliases and
+         count(body, &run_def?/1) <= 1 and
+         count(body, &run_def?/1) == Enum.count(statements, &run_def?/1),
+       do: :ok,
+       else: :unsupported
+  end
+
+  defp unsupported?({form, _, args}) when form in @nested and is_list(args), do: true
+  defp unsupported?({{:., _, [{:__aliases__, _, [:Module]}, :create]}, _, _args}), do: true
+  defp unsupported?({:use, _, [{:__aliases__, _, [:Mix, :Task]}]}), do: false
+  defp unsupported?({:use, _, args}) when is_list(args), do: true
+  defp unsupported?({:require, _, [_module, _options | _]}), do: true
+
+  defp unsupported?({:@, _, [{name, _, args}]}) when name in @injection and is_list(args),
+    do: true
+
+  defp unsupported?(_node), do: false
+
+  defp alias?({:alias, _, args}) when is_list(args), do: true
+  defp alias?(_node), do: false
+
+  defp run_def?({:def, _, [{:when, _, [{:run, _, [_arg]}, _guard]} | _]}), do: true
+  defp run_def?({:def, _, [{:run, _, [_arg]} | _]}), do: true
+  defp run_def?(_node), do: false
+
+  # The module's aliases, in order: all in the leading prefix, each name
+  # bound once and never to a protected root, each target expanded through
+  # the aliases before it.
+  defp top_aliases(statements) do
+    case Enum.reduce_while(statements, {%{}, :prefix}, &top_statement/2) do
+      {aliases, _phase} -> {:ok, aliases}
+      :unsupported -> :unsupported
+    end
+  end
+
+  defp top_statement(statement, {aliases, phase}) do
+    cond do
+      not alias?(statement) -> {:cont, {aliases, if(prefix?(statement), do: phase, else: :body)}}
+      phase == :body -> {:halt, :unsupported}
+      true -> statement |> bindings(aliases) |> bind(aliases)
+    end
+  end
+
+  defp prefix?({form, _, args}) when form in [:use, :require, :import] and is_list(args), do: true
+
+  defp prefix?({:@, _, [{doc, _, [text]}]}) when doc in [:moduledoc, :shortdoc],
+    do: is_binary(text)
+
+  defp prefix?(_statement), do: false
+
+  defp bindings({:alias, _, [{{:., _, [{:__aliases__, _, base}, :{}]}, _, children}]}, aliases) do
+    with {:ok, full} <- expand(base, aliases) do
+      Enum.reduce_while(children, {:ok, []}, &child_binding(&1, &2, full))
+    end
+  end
+
+  defp bindings(
+         {:alias, _, [{:__aliases__, _, parts}, [as: {:__aliases__, _, [short]}]]},
+         aliases
+       )
+       when is_atom(short) do
+    with {:ok, full} <- expand(parts, aliases), do: {:ok, [{short, full}]}
+  end
+
+  defp bindings({:alias, _, [{:__aliases__, _, parts}]}, aliases) do
+    with {:ok, full} <- expand(parts, aliases), do: {:ok, [{List.last(parts), full}]}
+  end
+
+  defp bindings(_unsupported_alias, _aliases), do: :unsupported
+
+  # One child of `alias A.{B, C.D}`: binds its last part to A.<child>.
+  defp child_binding({:__aliases__, _, parts}, {:ok, acc}, full) do
+    case expand(parts, %{}) do
+      {:ok, _child} -> {:cont, {:ok, [{List.last(parts), Module.concat([full | parts])} | acc]}}
+      :unsupported -> {:halt, :unsupported}
+    end
+  end
+
+  defp child_binding(_other, _acc, _full), do: {:halt, :unsupported}
+
+  defp bind({:ok, new}, aliases) do
+    new
+    |> Enum.reverse()
+    |> Enum.reduce_while(aliases, fn {short, full}, acc ->
+      if short == :"Elixir" or Module.concat([short]) in @protected or Map.has_key?(acc, short),
+        do: {:halt, :unsupported},
+        else: {:cont, Map.put(acc, short, full)}
+    end)
+    |> case do
+      :unsupported -> {:halt, :unsupported}
+      bound -> {:cont, {bound, :prefix}}
+    end
+  end
+
+  defp bind(:unsupported, _aliases), do: {:halt, :unsupported}
+
+  # `A.B.C` with `A` an earlier alias expands through it; any non-atom part
+  # (`__MODULE__.X`, `unquote(...)`) is not expandable.
+  defp expand([first | rest] = parts, aliases) do
+    if Enum.all?(parts, &is_atom/1),
+      do: {:ok, Module.concat([Map.get(aliases, first, first) | rest])},
+      else: :unsupported
+  end
+
+  defp expand(_parts, _aliases), do: :unsupported
+
+  defp resolve({:__aliases__, _, parts}, aliases) do
+    case expand(parts, aliases) do
+      {:ok, module} -> module
+      :unsupported -> :dynamic
     end
   end
 
@@ -182,25 +333,13 @@ defmodule SdrAgent.ImportTaskSource do
 
   defp call(_node, _aliases, acc), do: acc
 
-  defp run_body(body) do
-    {_ast, found} =
-      Macro.prewalk(body, nil, fn
-        {:def, _, [{:run, _, [_args]}, [do: run]]} = node, nil ->
-          {node, run}
-
-        {:def, _, [{:when, _, [{:run, _, [_args]}, _guard]}, [do: run]]} = node, nil ->
-          {node, run}
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    found
-  end
-
-  defp flag?(body, fun) do
-    {_ast, found} = Macro.prewalk(body, false, fn node, acc -> {node, acc or fun.(node)} end)
-    found
+  # The body of the module's one top-level `def run/1` clause, or nil.
+  defp run_body(statements) do
+    Enum.find_value(statements, fn
+      {:def, _, [{:run, _, [_args]}, [do: run]]} -> run
+      {:def, _, [{:when, _, [{:run, _, [_args]}, _guard]}, [do: run]]} -> run
+      _other -> nil
+    end)
   end
 
   defp use_mix_task?({:use, _, [{:__aliases__, _, [:Mix, :Task]} | _]}), do: true
@@ -313,7 +452,7 @@ defmodule SdrAgent.ImportTaskSource do
   defp indirect(body, calls) do
     {_ast, flagged} =
       Macro.prewalk(body, false, fn
-        {:import, _, args} = node, _acc when is_list(args) ->
+        {form, _, args} = node, _acc when form in [:import, :defdelegate] and is_list(args) ->
           {node, true}
 
         {:apply, _, args} = node, _acc when is_list(args) and length(args) in [2, 3] ->

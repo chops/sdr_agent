@@ -14,7 +14,11 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
 
   Honest scope (see the checker's moduledoc): a lexical, source-order guard
   over explicit remote calls inside the task module, with `attach`, the
-  session entry and every reader required lexically inside `run/1`. It is
+  session entry and every reader required lexically inside `run/1`, and
+  only inside a supported grammar; outside it the checker refuses with
+  exactly `[:unsupported_scope]` (Codex task-harness review R1: a
+  helper-local alias, a nested module or an alias rebinding must neither
+  hide a call nor supply the task's `run/1`, `use` or `@moduledoc`). It is
   not runtime dominance and proves no output, success or refusal behaviour.
   Nothing here runs a task or reads an input file.
   """
@@ -63,6 +67,11 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   @with "with {:ok, %{actor: actor}} <-"
   @enter "Session.enter(agent: opts.agent, session_correlation: correlation)"
   @row_say "SafeLog.say(:import_row, row_index: 0, result: :imported, reason: :none)"
+  @manifest_alias "alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest\n"
+  @first_helper "defp parse([_ | _])"
+  @last_helper ~S|defp parse(_args), do: Mix.raise("invalid arguments")| <> "\n"
+  @module_line "defmodule Mix.Tasks.Sdr.Prototype.Import do\n"
+  @file_end "  end\nend\n"
 
   # {label, [{text to replace (each exactly once), replacement}], expected}
   @variants [
@@ -132,7 +141,97 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
      [
        {"defmodule Mix.Tasks.Sdr.Prototype.Import do",
         "defmodule Mix.Tasks.Sdr.Prototype.Other do"}
-     ], [:no_module]}
+     ], [:no_module]},
+    # Codex task-harness review R1: unsupported scopes are refused, never
+    # analysed. Helper-local alias laundering of IO, of File and of an early
+    # reader (each would hide a real call in run/1 from a flattened alias map):
+    {:helper_local_alias_hides_io,
+     [
+       {@attach, @attach <> ~S|IO.puts("started")| <> "\n"},
+       {@first_helper, "defp alias_scope do\nalias String, as: IO\n:ok\nend\n\n" <> @first_helper}
+     ], [:unsupported_scope]},
+    {:helper_local_alias_hides_file,
+     [
+       {@attach, @attach <> ~S|_ = File.read("x")| <> "\n"},
+       {@first_helper,
+        "defp alias_scope do\nalias String, as: File\n:ok\nend\n\n" <> @first_helper}
+     ], [:unsupported_scope]},
+    {:helper_local_alias_hides_early_reader,
+     [
+       {"{:ok, dossier} <- DossierParser.read(",
+        "{:ok, dossier} <- SdrAgent.Prototype.DossierParser.read("},
+       {@with, "_early = DossierParser.read(opts.dossier, opts.dossier_sha256)\n" <> @with},
+       {@first_helper,
+        "defp alias_scope do\nalias SdrAgent.Prototype.SafeLog, as: DossierParser\n:ok\nend\n\n" <>
+          @first_helper}
+     ], [:unsupported_scope]},
+    {:alias_inside_run, [{@attach, @attach <> "alias SdrAgent.Prototype.SafeLog, as: Log\n"}],
+     [:unsupported_scope]},
+    # A nested module cannot supply the outer task's run/1, use or moduledoc,
+    # and no nested module, macro or code injection is analysed at all:
+    {:nested_module_supplies_run,
+     [
+       {@module_line, @module_line <> "defmodule Support do\n"},
+       {@last_helper, @last_helper <> "end\n"}
+     ], [:unsupported_scope]},
+    {:nested_module_beside_run,
+     [{@last_helper, @last_helper <> "defmodule Helper do\n@moduledoc false\nend\n"}],
+     [:unsupported_scope]},
+    {:module_create, [{@attach, @attach <> "Module.create(Helper, quote(do: :ok), __ENV__)\n"}],
+     [:unsupported_scope]},
+    {:local_macro, [{@last_helper, @last_helper <> "defmacrop quiet, do: :ok\n"}],
+     [:unsupported_scope]},
+    {:other_use, [{"use Mix.Task\n", "use Mix.Task\nuse GenServer\n"}], [:unsupported_scope]},
+    {:before_compile_hook,
+     [{@manifest_alias, @manifest_alias <> "@before_compile SdrAgent.Prototype.SafeLog\n"}],
+     [:unsupported_scope]},
+    {:task_inside_another_module,
+     [
+       {@module_line, "defmodule Wrapper do\n" <> @module_line},
+       {@file_end, "  end\nend\nend\n"}
+     ], [:unsupported_scope]},
+    {:second_task_definition,
+     [
+       {@file_end,
+        "  end\nelse\ndefmodule Mix.Tasks.Sdr.Prototype.Import do\n@moduledoc \"x\"\nend\nend\n"}
+     ], [:unsupported_scope]},
+    {:second_run_clause,
+     [{@first_helper, "def run(_ignored), do: exit({:shutdown, 2})\n\n" <> @first_helper}],
+     [:unsupported_scope]},
+    # Alias rebinding and order: no alias reinterprets an earlier call, none
+    # is bound twice, none binds a ruled root, and only supported forms:
+    {:alias_rebinding_after_definitions,
+     [
+       {@manifest_alias, @manifest_alias <> "alias IO, as: Out\n"},
+       {@attach, @attach <> ~S|Out.puts("started")| <> "\n"},
+       {@last_helper, @last_helper <> "alias String, as: Out\n"}
+     ], [:unsupported_scope]},
+    {:alias_after_definitions,
+     [{@last_helper, @last_helper <> "alias SdrAgent.Prototype.Unused\n"}], [:unsupported_scope]},
+    {:alias_rebinding,
+     [{@manifest_alias, @manifest_alias <> "alias SdrAgent.Prototype.BootCheck, as: Session\n"}],
+     [:unsupported_scope]},
+    {:alias_shadows_ruled_root,
+     [
+       {@manifest_alias, @manifest_alias <> "alias String, as: IO\n"},
+       {@attach, @attach <> ~S|IO.puts("started")| <> "\n"}
+     ], [:unsupported_scope]},
+    {:require_as,
+     [{"use Mix.Task\n", "use Mix.Task\nrequire SdrAgent.Prototype.SafeLog, as: Quiet\n"}],
+     [:unsupported_scope]},
+    {:unsupported_alias_form,
+     [{@manifest_alias, @manifest_alias <> ~S|alias :"Elixir.String", as: Text| <> "\n"}],
+     [:unsupported_scope]},
+    # Inside the grammar, aliases expand in order and a delegation is
+    # flagged as indirect dispatch:
+    {:alias_through_earlier_alias,
+     [
+       {@manifest_alias,
+        "alias SdrAgent.Prototype\n" <> "alias Prototype.SpotcheckManifest, as: Manifest\n"}
+     ], []},
+    {:defdelegate_to_io,
+     [{@manifest_alias, @manifest_alias <> "defdelegate puts(text), to: IO\n"}],
+     [:indirect_dispatch]}
   ]
 
   defp occurrences(text, part), do: length(String.split(text, part)) - 1
@@ -153,6 +252,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
       for {label, replacements, expected} <- @variants do
         source = variant(replacements)
         refute source == @conforming, "#{label}: no change"
+        assert {:ok, _ast} = Code.string_to_quoted(source), "#{label}: does not parse"
 
         assert ImportTaskSource.violations(source) == Enum.sort(expected),
                "#{label}: #{inspect(ImportTaskSource.violations(source))}"
@@ -165,7 +265,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
       for violation <- ~w(no_module not_mix_task no_moduledoc no_run attach_not_first outside_run
                           enter_count enter_arity read_before_enter missing_reader start_call
                           env_read file_call say_shape other_channel raise_not_literal
-                          exit_not_literal indirect_dispatch)a do
+                          exit_not_literal indirect_dispatch unsupported_scope)a do
         assert violation in exercised, "#{violation} is not exercised"
       end
     end
