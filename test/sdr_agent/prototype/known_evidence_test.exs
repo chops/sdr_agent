@@ -87,11 +87,24 @@ defmodule SdrAgent.Prototype.KnownEvidenceTest do
   test "a superseded mismatch link is still witness_mismatch", ctx do
     mismatch = AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec, link_status: :mismatch)
 
+    # A mismatch is superseded only under a different projection version
+    # (WitnessLineage); the v2 projection carries its context group.
     AgentsFixtures.reconciled_link!(ctx.invocation, ctx.rec,
       link_status: :inferred,
       supersedes_id: mismatch.id,
       proxy_record_ref: mismatch.proxy_record_ref,
-      evidence: %{"supersede_reason" => "inventory_rescanned"}
+      evidence: %{
+        "projection_version" => "claude-message-json/2+prompt-builder/1",
+        "supersede_reason" => "projection_version_changed",
+        "reminder_count" => 0,
+        "reminder_sha256s" => [],
+        "reminder_bytes" => [],
+        "trailing_system_count" => 0,
+        "trailing_system_sha256s" => [],
+        "trailing_system_bytes" => [],
+        "request_extras_sha256" => String.duplicate("c3", 32),
+        "request_fields" => []
+      }
     )
 
     result = G.finalize(ctx.invocation, ctx.run)

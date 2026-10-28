@@ -170,11 +170,11 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
     {run.status, run.status_reason}
   end
 
-  defp refuses_with?(ctx, invocation, run, code) do
+  defp assert_refuses!(ctx, invocation, run, code) do
     result = G.finalize(invocation, run)
-
-    refused_code(ctx.fx, result, code) and
-      run_status(run) == {:failed, :witness_unreconciled} and G.charged(ctx.fx) >= 1
+    assert refused_code(ctx.fx, result, code), "finalize: #{inspect(result)}"
+    assert run_status(run) == {:failed, :witness_unreconciled}
+    assert G.charged(ctx.fx) >= 1
   end
 
   describe "before provisioning: an invocation completed without prototype authority" do
@@ -209,7 +209,7 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
 
     test "after a live binding drift: binding_mismatch (check_live row)", ctx do
       G.drift!()
-      assert refuses_with?(ctx, ctx.invocation, ctx.run, :binding_mismatch)
+      assert_refuses!(ctx, ctx.invocation, ctx.run, :binding_mismatch)
     end
 
     test "the ordinary :released decision is unreachable in prototype runtime", ctx do
