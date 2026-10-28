@@ -57,7 +57,21 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
       User
       |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
       |> Ash.Query.filter(id == ^user_id and tenant_id == ^tenant_id and role == :agent_operator)
-      |> Ash.read_one()
+      |> read_one()
+    end
+
+    # Test-seam builds only: a read result a test put under
+    # `{__MODULE__, :read_fault}` in the calling process replaces the read, so
+    # no query runs (fault controls, Codex 3ad0a105). Other builds always read.
+    if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
+      defp read_one(query) do
+        case Process.get({__MODULE__, :read_fault}) do
+          nil -> Ash.read_one(query)
+          fault -> fault
+        end
+      end
+    else
+      defp read_one(query), do: Ash.read_one(query)
     end
   else
     defp anchor(changeset, _actor), do: refuse(changeset)
