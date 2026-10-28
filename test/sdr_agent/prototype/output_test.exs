@@ -372,6 +372,17 @@ defmodule SdrAgent.Prototype.OutputTest do
     end
   end
 
+  test "the runtime doc names the closed allow-list exactly, with no prefix permission" do
+    assert Output.allowed_tasks() == @allow_listed
+    doc = File.read!("docs/product/d237/prototype-runtime.md")
+
+    for name <- @allow_listed do
+      assert doc =~ "`#{name}`", "the runtime doc does not name `#{name}` on the allow-list"
+    end
+
+    refute doc =~ "sdr.prototype.*", "the runtime doc grants a prefix-based task permission"
+  end
+
   test "without the switch, in ordinary runtime, no task is refused" do
     with_env([], fn ->
       for task <- tasks() do

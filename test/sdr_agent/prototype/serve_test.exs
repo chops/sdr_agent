@@ -42,13 +42,42 @@ defmodule SdrAgent.Prototype.ServeTest do
     refute Keyword.has_key?(overrides, :model_provider)
   end
 
-  test "source check: it never stops, kills or signals another process" do
-    code = File.read!(@source)
+  # The executable code only: @moduledoc, @doc and @shortdoc strings are
+  # dropped, so prose can never satisfy or fail a code check (Codex S4
+  # bounded review: a moduledoc match is not evidence).
+  defp code_ast do
+    {:ok, ast} = @source |> File.read!() |> Code.string_to_quoted()
+
+    Macro.prewalk(ast, fn
+      {:@, _, [{doc, _, _}]} when doc in [:moduledoc, :doc, :shortdoc] -> nil
+      node -> node
+    end)
+  end
+
+  test "source check: the executable code never stops, kills or signals a process" do
+    code = Macro.to_string(code_ast())
 
     for forbidden <- ["kill", "pkill", "System.stop", ":init.stop", "Process.exit", "pg_ctl"] do
-      refute code =~ forbidden, "#{@source} contains #{forbidden}"
+      refute code =~ forbidden, "#{@source} code contains #{forbidden}"
     end
+  end
 
-    assert code =~ "-iTCP:4120" and code =~ "-sTCP:LISTEN"
+  test "the real entry probes lsof -nP -iTCP:4120 -sTCP:LISTEN with a ChildEnv environment" do
+    {_ast, found} =
+      Macro.prewalk(code_ast(), false, fn
+        {{:., _, [{:__aliases__, _, [:System]}, :cmd]}, _, [_command, args, opts]} = node, acc ->
+          probe? =
+            args == ["-nP", "-iTCP:4120", "-sTCP:LISTEN"] and
+              Macro.to_string(opts) =~ "ChildEnv"
+
+          {node, acc or probe?}
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    assert found,
+           "#{@source}: no executable System.cmd(lsof, [\"-nP\", \"-iTCP:4120\", " <>
+             "\"-sTCP:LISTEN\"], env: ChildEnv...) (the real entry is not implemented yet)"
   end
 end

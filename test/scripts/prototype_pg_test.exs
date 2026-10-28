@@ -18,7 +18,10 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
   foreign-owned or non-empty socket directory, unaltered; `owned!/1`
   (marker, data directory, binary, control file, socket directory) before
   start, status and stop; the socket pair absent before a start (a stale
-  `postmaster.pid` with no server); no TCP listener; a wrong live identity
+  `postmaster.pid` with no server); no TCP listener, where only `lsof`'s
+  documented no-match result admits a start and a failed, unavailable or
+  signalled probe refuses before `pg_ctl` (Codex S4 bounded review R1:
+  no start, no signal, no file change, no raw diagnostics); a wrong live identity
   refusing status and stop with nothing signalled; the logging GUCs written
   before the first start; a source check (no kill, rm, process listing or
   environment reads); and the doc/constant consistency check of ruling 3
@@ -167,6 +170,19 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
 
   defp put_state!(ctx, name, value), do: File.write!(Path.join(ctx.state, name), value)
 
+  # Everything under the cluster roots (the root and the socket directory):
+  # each path's type, mode, size and file bytes. A refusal leaves it identical.
+  defp snapshot(ctx) do
+    for top <- [ctx.root, ctx.socket],
+        match?({:ok, _}, File.lstat(top)),
+        path <- [top | Path.wildcard(Path.join(top, "**"), match_dot: true)],
+        into: %{} do
+      {:ok, stat} = File.lstat(path)
+      bytes = if stat.type == :regular, do: :crypto.hash(:sha256, File.read!(path))
+      {path, {stat.type, stat.mode, stat.size, bytes}}
+    end
+  end
+
   defp socket_pair(ctx),
     do: [Path.join(ctx.socket, ".s.PGSQL.5541"), Path.join(ctx.socket, ".s.PGSQL.5541.lock")]
 
@@ -252,8 +268,15 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
 
     write_fake!(ctx, "postgres", "exit 0")
 
+    # lsof: by default its documented no-match result (exit 1, no output at
+    # all). state/lsof_out, lsof_err, lsof_rc and lsof_signal play a
+    # listener, diagnostics, another status, or death by a signal.
     write_fake!(ctx, "lsof", """
-    if [ -f "$S/lsof_out" ]; then /bin/cat "$S/lsof_out"; exit 0; fi
+    [ -f "$S/lsof_out" ] && /bin/cat "$S/lsof_out"
+    [ -f "$S/lsof_err" ] && /bin/cat "$S/lsof_err" >&2
+    [ -f "$S/lsof_signal" ] && /bin/kill -KILL $$
+    [ -f "$S/lsof_rc" ] && exit "$(/bin/cat "$S/lsof_rc")"
+    [ -f "$S/lsof_out" ] && exit 0
     exit 1
     """)
 
@@ -562,8 +585,60 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
       "COMMAND PID USER FD TYPE\npostgres 1 x 7u IPv4 TCP *:5541 (LISTEN)\n"
     )
 
+    before = snapshot(ctx)
     assert_refused(run(ctx, ["start"]), "tcp_listener_present")
     refute started?(ctx)
+    refute signalled?(ctx)
+    assert snapshot(ctx) == before
+  end
+
+  test "control: lsof's documented no-match result (exit 1, no output) admits start", ctx do
+    seeded!(ctx)
+    assert_ok(run(ctx, ["start"]), "start")
+    assert started?(ctx)
+  end
+
+  # Codex S4 bounded review R1: an unavailable or failed observation is not
+  # proof of an empty listener set. Each refuses with a fixed code before
+  # pg_ctl start, prints no raw diagnostics, signals nothing and changes no
+  # file under the cluster roots.
+  @probe_failures [
+    {"an error with diagnostics and no listing (exit 1)",
+     [lsof_rc: "1", lsof_err: "lsof: WARNING: synthetic-probe-diagnostic\n"]},
+    {"another status with empty output (exit 2)", [lsof_rc: "2"]},
+    {"an unavailable probe status (exit 126)", [lsof_rc: "126"]},
+    {"a not-found probe status (exit 127)", [lsof_rc: "127"]},
+    {"death by a signal", [lsof_signal: ""]},
+    {"success with an empty listing (exit 0)", [lsof_rc: "0"]},
+    {"a listing on a failed status (exit 1)",
+     [lsof_rc: "1", lsof_out: "postgres 1 x 7u IPv4 TCP *:5541 (LISTEN)\n"]}
+  ]
+
+  for {label, state} <- @probe_failures do
+    test "a failed listener probe refuses start before pg_ctl: #{label}", ctx do
+      seeded!(ctx)
+
+      for {name, value} <- unquote(state),
+          do: put_state!(ctx, Atom.to_string(name), value)
+
+      before = snapshot(ctx)
+      result = run(ctx, ["start"])
+      assert_refused(result, "listener_probe_failed")
+      refute result.out =~ "synthetic-probe-diagnostic"
+      refute started?(ctx)
+      refute signalled?(ctx)
+      assert snapshot(ctx) == before
+    end
+  end
+
+  test "a probe that cannot be executed refuses start before pg_ctl", ctx do
+    seeded!(ctx)
+    File.chmod!(Path.join(ctx.bin, "lsof"), 0o644)
+    before = snapshot(ctx)
+    assert_refused(run(ctx, ["start"]), "lsof_missing")
+    refute started?(ctx)
+    refute signalled?(ctx)
+    assert snapshot(ctx) == before
   end
 
   test "an already running cluster refuses start", ctx do
