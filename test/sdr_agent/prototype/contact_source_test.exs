@@ -266,17 +266,16 @@ defmodule SdrAgent.Prototype.ContactSourceTest do
     defp refused_everywhere!(rows, edit, dir, expected) do
       {dossier, manifest} = inputs(rows, edit)
 
-      assert DossierParser.select(dossier, manifest, ["row-1"], dir) == expected,
-             "select/4 picked row-1 past an invalid flagged row-2"
-
-      assert DossierParser.eligible_rows(dossier, manifest, dir) == expected,
-             "eligible_rows/3 listed rows past an invalid flagged row-2"
-
-      assert DossierParser.import_plan(dossier, manifest, "row-1", dir) == expected,
-             "import_plan/4 planned row-1 past an invalid flagged row-2"
-
-      assert DossierParser.eligibility(dossier, manifest, "row-1", dir) == expected,
-             "eligibility/4 passed row-1 past an invalid flagged row-2"
+      for {name, result} <- [
+            {"select/4", DossierParser.select(dossier, manifest, ["row-1"], dir)},
+            {"eligible_rows/3", DossierParser.eligible_rows(dossier, manifest, dir)},
+            {"import_plan/4", DossierParser.import_plan(dossier, manifest, "row-1", dir)},
+            {"eligibility/4", DossierParser.eligibility(dossier, manifest, "row-1", dir)}
+          ] do
+        assert result == expected,
+               "#{name} returned #{inspect(result)} past an invalid flagged row-2, " <>
+                 "expected #{inspect(expected)}"
+      end
     end
 
     test "another flagged row without its person_address_linked mark" do
