@@ -243,17 +243,19 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
       assert String.length(guide) == 6_001 and not secret_shaped?(guide)
       assert String.length(item) == 401 and not secret_shaped?(item)
 
-      for {label, bad, expected} <- cases do
-        case expected do
-          {kind, errors} ->
-            assert ContentRules.validate(kind, file_content(bad, kind)) == {:error, errors},
-                   "#{label}: not exactly #{inspect(errors)}"
+      # Codex 9ada21de: every pure ContentRules isolation runs first, so no
+      # seed call can hide a later exact-error check.
+      for {label, bad, {kind, errors}} <- cases do
+        assert ContentRules.validate(kind, file_content(bad, kind)) == {:error, errors},
+               "#{label}: not exactly #{inspect(errors)}"
+      end
 
-          nil ->
-            :ok
-        end
+      for {label, bad, _expected} <- cases do
+        result = call(@seed, :run, [seed(bad), ctx.actor])
 
-        assert call(@seed, :run, [seed(bad), ctx.actor]) == {:error, :seed_invalid}, label
+        assert result == {:error, :seed_invalid},
+               "#{label}: Seed.run/2 returned #{inspect(result)}"
+
         assert count("settings_revisions") == 0
         assert count("icp_definitions") == 0
         assert count("campaigns") == 0
