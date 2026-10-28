@@ -159,6 +159,39 @@ defmodule SdrAgent.Prototype.ResearchImportDenialTest do
     assert all_events() == events_before, "a malformed actor envelope produced an audit append"
   end
 
+  test "a system actor id the audit store cannot hold is a plain Forbidden: no append, no raise" do
+    fx = bound!()
+    tid = fx.tenant.id
+    events_before = all_events()
+
+    # NUL is valid UTF-8 but PostgreSQL text and jsonb cannot store it
+    # (Codex 67ff29f5 R1a, RED); the empty and 129-byte ids are coverage of
+    # the stated 1..128-byte bound.
+    ids = [
+      nul_only: <<0>>,
+      embedded_nul: "agent" <> <<0>> <> "runtime",
+      empty: "",
+      over_128_bytes: String.duplicate("a", 129)
+    ]
+
+    for {name, _resource} <- @names, {id_name, id} <- ids do
+      label = "#{name} with #{id_name}"
+      actor = %Actor{type: :agent_runtime, id: id, tenant_id: tid}
+
+      result =
+        try do
+          apply(Research, name, [sensitive_attrs(), [actor: actor]])
+        rescue
+          error -> {:raised, error.__struct__}
+        end
+
+      forbidden!(label, result)
+      refute inspect(result) =~ @sentinel, "#{label}: the refusal echoes the input"
+    end
+
+    assert all_events() == events_before, "an unstorable actor id produced an audit append"
+  end
+
   test "malformed input stays Forbidden before any changeset" do
     fx = bound!()
     agent = Actor.system(:agent_runtime, fx.tenant.id)
