@@ -374,10 +374,16 @@ defmodule SdrAgent.Prototype.SafeLog do
   one first, so SafeLog's filter is added (unless already installed
   exactly) and then ExceptionFilter is re-attached. Idempotent: each is
   installed once, and SafeLog's filter is never removed on the way, so a
-  repeated attach leaves no unfiltered window. A failure returns
-  `{:error, :attach_failed}` and leaves SafeLog's filter in place if it was
-  installed (closed). Any other option list refuses
-  `{:error, :not_implemented}` without changing the logger (S-d is held).
+  repeated attach leaves no unfiltered window.
+
+  Any failure returns `{:error, :attach_failed}`, and the caller (a task,
+  startup) must stop BEFORE reading any input: the error does not
+  establish that SafeLog's filter is installed. A foreign callback under
+  SafeLog's id is refused unchanged and never assumed content-free, and a
+  failed first add installs nothing. Only when SafeLog's own filter was
+  installed before a later step failed does it stay, as a safe fallback.
+  Any other option list refuses `{:error, :not_implemented}` without
+  changing the logger (S-d is held).
   """
   @spec attach(keyword()) :: :ok | {:error, atom()}
   def attach(file: nil) do
@@ -392,21 +398,41 @@ defmodule SdrAgent.Prototype.SafeLog do
   def attach(_opts), do: {:error, :not_implemented}
 
   defp ensure_filter do
-    ours = {&__MODULE__.filter/2, []}
-
-    case List.keyfind(:logger.get_primary_config().filters, @filter_id, 0) do
-      nil -> :logger.add_primary_filter(@filter_id, ours)
-      {@filter_id, ^ours} -> :ok
-      {@filter_id, _other} -> {:error, :foreign_filter}
+    case installed() do
+      :absent -> :logger.add_primary_filter(@filter_id, own_filter())
+      :own -> :ok
+      :foreign -> {:error, :foreign_filter}
     end
   end
 
+  # What is registered under SafeLog's filter id: nothing, SafeLog's own
+  # callback, or a foreign one (Codex db38fb96 R1).
+  defp installed do
+    case List.keyfind(:logger.get_primary_config().filters, @filter_id, 0) do
+      nil -> :absent
+      {@filter_id, filter} -> if filter == own_filter(), do: :own, else: :foreign
+    end
+  end
+
+  defp own_filter, do: {&__MODULE__.filter/2, []}
+
   @doc """
-  Removes SafeLog's primary filter alone (tests): `SdrAgent.Logger.ExceptionFilter`
-  and every handler are left as they are. `:ok` also when it is not installed.
+  Removes SafeLog's own primary filter alone (tests):
+  `SdrAgent.Logger.ExceptionFilter` and every handler are left as they are.
+  `:ok` also when nothing is registered under SafeLog's id. A foreign
+  callback under that id is refused `{:error, :foreign_filter}` and left in
+  place (Codex db38fb96 R1).
   """
   @spec detach() :: :ok | {:error, term()}
   def detach do
+    case installed() do
+      :absent -> :ok
+      :own -> remove_own()
+      :foreign -> {:error, :foreign_filter}
+    end
+  end
+
+  defp remove_own do
     case :logger.remove_primary_filter(@filter_id) do
       :ok -> :ok
       {:error, {:not_found, @filter_id}} -> :ok
