@@ -250,6 +250,40 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
       assert import!(rows, ctx.actor).imported == ~w(row-1 row-2 row-3)
     end
+
+    # Codex e7a0a7f1 (Q1): a genuine policy refusal of a Research write mid-row
+    # is audited through the deferred denial path; the row's Audit.transaction
+    # rolls everything else back and the one queued denial is flushed after it.
+    test "a policy denial mid-row: exactly one authz.denied survives, nothing else", ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads audit_accesses)
+      before = Map.new(tables, &{&1, count(&1)})
+      denials = length(events_of_type(ctx.tenant, "authz.denied"))
+
+      # Test-seam build: the live database identity drifts after the Sales
+      # writes, so the operator gate refuses the Research write.
+      drift = fn -> :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1}) end
+      result = call(@import, :import_row, [row, ctx.actor, [after_sales: drift]])
+      :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
+
+      assert match?({:error, code} when is_atom(code), result),
+             "import_row/3 returned #{inspect(result)}"
+
+      assert Map.new(tables, &{&1, count(&1)}) == before
+
+      new = Enum.drop(events_of_type(ctx.tenant, "authz.denied"), denials)
+      assert [denial] = new, "expected exactly one new authz.denied, got #{length(new)}"
+
+      assert {denial.actor_type, denial.actor_id} == {:prototype_operator, ctx.actor.id}
+      assert denial.subject_resource == "SdrAgent.Research.DossierEntry"
+      assert denial.action == "import"
+
+      echoed = inspect(denial)
+
+      for value <- [row.plan.contact.email, row.plan.contact.last_name, row.plan.account.domain] do
+        refute echoed =~ value, "the denial echoed an input value"
+      end
+    end
   end
 
   describe "layering and inputs (source checks)" do
