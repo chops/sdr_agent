@@ -20,7 +20,14 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
     valid delegation) returns the original grant.
 
   Each direct-action test ends with the valid direct action (a positive
-  control), so its negatives count only when the subject is reachable.
+  control: exactly one grant, one provisioned event and the one exact `:b1`
+  allocation), so its negatives count only when the subject is reachable;
+  supplied metadata is refused even when it equals the server-derived
+  value; a second valid direct action refuses `:grant_exists` (the raw
+  action never renews, apart from the wrapper's replay). An untrusted
+  provisioned event (another actor and creator) and two provisioned events
+  (ambiguous) refuse `:grant_exists`; those events are appended through the
+  public kernel API, so no audit row is mutated (Codex 3e05314f).
   Evidence file names use a safe token of `as_of` (IF-2 path grammar
   `^[A-Za-z0-9._/-]{1,200}$`, checked at construction); the worksheet keeps
   the original RFC 3339 `as_of`.
@@ -100,6 +107,25 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
         q.("SELECT count(*) FROM audit_events WHERE event_type = 'model.grant.provisioned'")
     }
   end
+
+  # {key, applies_to, profile_id, attempts, available_from, available_until,
+  # released_at} of every allocation of the grant.
+  defp allocations_of(grant_id) do
+    %{rows: rows} =
+      Repo.query!(
+        "SELECT key, applies_to, profile_id, attempts, available_from, available_until, released_at " <>
+          "FROM model_call_allocations WHERE grant_id = $1 ORDER BY id",
+        [Ecto.UUID.dump!(grant_id)]
+      )
+
+    Enum.map(rows, &List.to_tuple/1)
+  end
+
+  # The `reason` an Invalid refusal of the raw action carries, if any.
+  defp refusal_reason({:error, %Ash.Error.Invalid{errors: errors}}),
+    do: Enum.find_value(errors, &Map.get(&1, :reason))
+
+  defp refusal_reason(_other), do: nil
 
   defp first!(fx, root, bytes) do
     result = provision(fx.actor, bytes, root)
@@ -191,11 +217,20 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
       valid = worksheet_bytes(ctx.root)
       before = counts()
 
+      # Implausible values, then plausible matching ones: any supplied value
+      # is refused before minting, even one equal to the server-derived value.
       for {name, forged} <- [
             delegation_id: Ecto.UUID.generate(),
             funding_id: "d237-funding/2",
             binding_id: Ecto.UUID.generate(),
-            budget_worksheet_sha256: String.duplicate("0", 64)
+            budget_worksheet_sha256: String.duplicate("0", 64),
+            delegation_id: ctx.fx.actor.id,
+            funding_id: "d237-funding/1",
+            binding_id: ctx.fx.snapshot.id,
+            budget_worksheet_sha256: sha(valid),
+            allocations: [
+              %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}
+            ]
           ] do
         args = Map.put(%{worksheet: valid, evidence_root: ctx.root}, name, forged)
         result = direct(ctx.fx.actor, args)
@@ -217,10 +252,98 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
       assert match?({:ok, %ModelCallGrant{}}, result),
              "positive control: the valid direct action: #{inspect(result)}"
 
+      {:ok, grant} = result
       after_counts = counts()
       assert after_counts.grants == before.grants + 1
       assert after_counts.provisioned == before.provisioned + 1
-      assert after_counts.allocations > before.allocations
+      assert after_counts.allocations == before.allocations + 1
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}]
+    end
+
+    test "a second valid direct action refuses :grant_exists (never renews), writing nothing",
+         ctx do
+      valid = worksheet_bytes(ctx.root)
+      first = direct(ctx.fx.actor, %{worksheet: valid, evidence_root: ctx.root})
+
+      assert match?({:ok, %ModelCallGrant{}}, first),
+             "prerequisite: first direct: #{inspect(first)}"
+
+      before = counts()
+
+      second = direct(ctx.fx.actor, %{worksheet: valid, evidence_root: ctx.root})
+      reason = refusal_reason(second)
+
+      assert match?({:error, %Ash.Error.Invalid{}}, second) and reason == :grant_exists,
+             "second direct action: #{inspect(second)}"
+
+      assert counts() == before
+    end
+  end
+
+  describe "ambiguous or untrusted provenance (must-fix 2 discrimination)" do
+    # A provisioned-looking event appended through the public kernel API (a
+    # kernel actor, chain intact): no audit row is mutated.
+    defp provisioned_event!(ctx, grant_id, digest) do
+      kernel = struct(SdrAgent.Actor, type: :kernel, tenant_id: ctx.fx.tenant.id)
+
+      {:ok, _event} =
+        SdrAgent.Audit.append(
+          %{
+            event_type: "model.grant.provisioned",
+            category: :model,
+            subject_resource: inspect(ModelCallGrant),
+            subject_id: grant_id,
+            action: "provision_prototype",
+            payload: %{
+              arguments: %{
+                funding_id: "d237-funding/1",
+                binding_id: ctx.fx.snapshot.id,
+                delegation_id: ctx.fx.actor.id,
+                budget_worksheet_sha256: digest
+              }
+            }
+          },
+          actor: kernel
+        )
+    end
+
+    test "an untrusted provisioned event (another actor and creator) refuses :grant_exists",
+         ctx do
+      PrototypeFixtures.leave_runtime()
+
+      {:ok, ordinary} =
+        Agents.create_grant(
+          %{
+            name: "an-ordinary-grant",
+            purpose: "ordinary grant named apart from the funding id",
+            profile_ids: [:claude_cli_opus],
+            total_attempts: 1,
+            starts_at: ~U[2026-10-28 03:00:00.000000Z],
+            expires_at: ~U[2026-10-29 03:00:00.000000Z]
+          },
+          actor: ctx.admin
+        )
+
+      bytes = worksheet_bytes(ctx.root)
+      provisioned_event!(ctx, ordinary.id, sha(bytes))
+      enter!(ctx.fx)
+      before = counts()
+
+      result = provision(ctx.fx.actor, bytes, ctx.root)
+      assert result == {:error, :grant_exists}, "untrusted provenance: #{inspect(result)}"
+      assert counts() == before
+    end
+
+    test "two provisioned events for this binding are ambiguous: a replay refuses :grant_exists",
+         ctx do
+      bytes = worksheet_bytes(ctx.root)
+      grant = first!(ctx.fx, ctx.root, bytes)
+      provisioned_event!(ctx, grant.id, sha(bytes))
+      before = counts()
+
+      result = provision(ctx.fx.actor, bytes, ctx.root)
+      assert result == {:error, :grant_exists}, "ambiguous provenance: #{inspect(result)}"
+      assert counts() == before
     end
   end
 
