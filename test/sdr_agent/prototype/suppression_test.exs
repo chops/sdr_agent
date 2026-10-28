@@ -14,7 +14,8 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     boundary in prototype runtime: no captured receipt, the operation is
     not accepted, and the refusal fails closed on the existing failure
     path. In ordinary runtime an already-claimed delivery is left to its
-    outcome (unchanged; the control).
+    outcome (unchanged; the control). An unavailable suppression source at
+    capture refuses closed (`prototype_suppression_unchecked`).
   - R10 (supplement 1 r2 section 7): a suppressed contact cannot be
     assigned by the operator (the Store check), and the NoStore check
     refuses prototype boot. Home stays fail-closed for
@@ -73,6 +74,24 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     end)
 
     assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
+    no_capture!(ctx, delivery)
+  end
+
+  # Codex 845d0959: a failed or unavailable suppression lookup at capture is a
+  # closed refusal, never "not suppressed". Negative synthetic tampering: the
+  # suppression source is made unavailable immediately before the capture by
+  # renaming its table inside the test's own sandbox transaction (rolled
+  # back with it); no NoStore fallback is involved.
+  test "an unavailable suppression source at capture refuses closed (prototype_suppression_unchecked), nothing written" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+
+    capture_hook!(:before_capture, fn _op ->
+      tamper!("ALTER TABLE suppressions RENAME TO suppressions_unavailable")
+    end)
+
+    assert raised(fn -> deliver!() end) =~ "prototype_suppression_unchecked"
     no_capture!(ctx, delivery)
   end
 
