@@ -56,6 +56,11 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
   }
   @codes [:division_by_zero, :in_failed_sql_transaction]
   @rollback {:rollback, :none, :ok, nil}
+  # Characterized at the first sealed run (c3-20261028T123632Z-96545): the
+  # action owner's outcome of a real abort is an Unknown class holding one
+  # UnknownError leaf; a raise at the read is raised again as an Ash
+  # Unknown (Ash wraps it), after the owner's rollback.
+  @action_abort {:error, Ash.Error.Unknown, [{UnknownError, nil}]}
 
   setup do
     fixture = bound!()
@@ -361,10 +366,10 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
 
   describe "a real abort and a raise at the read (characterization of the unchanged paths)" do
     for {name, owner, expected} <- [
-          {:contact_account, :action, {:error, Ash.Error.Unknown}},
+          {:contact_account, :action, @action_abort},
           {:contact_account, :audit, {:error, {Ash.Query, Account}}},
-          {:lead_contact, :action, {:error, Ash.Error.Unknown}},
-          {:lead_account, :action, {:error, Ash.Error.Unknown}},
+          {:lead_contact, :action, @action_abort},
+          {:lead_account, :action, @action_abort},
           {:lead_account, :audit, {:error, {Ash.Query, Account}}}
         ] do
       test "#{name}, abort under the #{owner} owner: the failed read, then the rollback, nothing survives",
@@ -407,7 +412,7 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
 
       {_pre, post} = after_reach(stream, ref)
       assert post == [@rollback], "after the reach: #{inspect(post)}"
-      assert result == {:raised, ArgumentError}
+      assert result == {:raised, Ash.Error.Unknown}
       assert survivors(ctx) == before
     end
   end
@@ -469,18 +474,16 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
 
       assert diagnostics == [], "the twin compile emitted #{inspect(diagnostics)}"
       assert [{@twin, binary}] = modules
-      {:ok, {@twin, [atoms: twin_atoms]}} = :beam_lib.chunks(binary, [:atoms])
-      twin_atoms = Enum.map(twin_atoms, &elem(&1, 1))
+      # The fault path is the local fault/3; the scope key is a literal, not
+      # an atom-table entry, so the comparison is of local functions.
+      {:ok, {@twin, [locals: twin_locals]}} = :beam_lib.chunks(binary, [:locals])
 
-      {:ok, {ImportTenant, [atoms: seam_atoms]}} =
-        :beam_lib.chunks(:code.which(ImportTenant), [:atoms])
+      {:ok, {ImportTenant, [locals: seam_locals]}} =
+        :beam_lib.chunks(:code.which(ImportTenant), [:locals])
 
-      seam_atoms = Enum.map(seam_atoms, &elem(&1, 1))
-
-      for atom <- [:read_fault, :d237_s3_fault, :import_tenant, :reached] do
-        assert atom in seam_atoms, "the test-seam build lacks #{inspect(atom)}"
-        refute atom in twin_atoms, "the no-seam twin names #{inspect(atom)}"
-      end
+      assert {:fault, 3} in seam_locals, "the test-seam build has no fault/3"
+      assert {:reference_read, 2} in seam_locals and {:reference_read, 2} in twin_locals
+      refute {:fault, 3} in twin_locals, "the no-seam twin has a fault path"
     end
   end
 end
