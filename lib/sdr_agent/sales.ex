@@ -104,6 +104,18 @@ defmodule SdrAgent.Sales do
   @doc "SEED: creates a new lead with a fixture `id`."
   def seed_lead(attrs, opts), do: GuardedCall.create(Lead, :seed, attrs, opts)
 
+  @doc """
+  OPR (D-237 prototype runtime): creates the account of one imported dossier
+  row. RED stage (D-237 S3): returns `{:error, :not_implemented}`.
+  """
+  def import_prototype_account(_attrs, _opts), do: red({:error, :not_implemented})
+
+  @doc "OPR (D-237): creates the person contact of one imported row. RED stage."
+  def import_prototype_contact(_attrs, _opts), do: red({:error, :not_implemented})
+
+  @doc "OPR (D-237): creates the new lead of one imported row. RED stage."
+  def import_prototype_lead(_attrs, _opts), do: red({:error, :not_implemented})
+
   @doc "AGT: enrolls a qualified lead in an active campaign (`campaign_id`, `lead_id`)."
   def enroll_lead(attrs, opts), do: GuardedCall.create(CampaignEnrollment, :enroll, attrs, opts)
 
@@ -142,4 +154,8 @@ defmodule SdrAgent.Sales do
     |> then(&GuardedCall.read_query(Lead, &1))
     |> Ash.read()
   end
+
+  # RED stub result (D-237 S3), typed dynamic() so callers compile against the
+  # stub (Elixir 1.20 infers literal returns); nothing sets the key.
+  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end
