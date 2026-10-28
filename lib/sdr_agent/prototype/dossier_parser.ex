@@ -62,7 +62,11 @@ defmodule SdrAgent.Prototype.DossierParser do
      `2025-10-28 ≤ stated_on` (`:insufficient_source`).
 
   A flagged row failing the rule refuses the input (`{:error, {"companies[i]",
-  reason}}`); an unflagged row is `{:not_importable, skip_reason}`.
+  reason}}`); an unflagged row is `{:not_importable, skip_reason}`. Rule 8's
+  ceiling holds on every row: a statement dated after the date of its own
+  check refuses the input even on an unflagged row. The ceiling is only
+  `date(checked_at)`; `parse/1` checks the date syntax of `stated_on` and
+  never compares it with `generated_at`.
 
   **Source content (R1).** A source's content is its verified excerpt strings,
   verbatim, in dossier fact order, joined by exactly two LF bytes: no kind or
@@ -180,19 +184,27 @@ defmodule SdrAgent.Prototype.DossierParser do
     end
   end
 
-  # R2: every flagged row, in file order, passes the whole importable rule.
+  # The whole input, in file order (R2): every flagged row passes the whole
+  # importable rule; every other row is still held to rule 8's ceiling, so a
+  # checked statement dated after its check refuses the file on any row
+  # (IF-6 rule 6; Codex R3: the ceiling is date(checked_at), never the
+  # dossier's generated_at).
   defp flagged_rows(dossier, manifest, dir) do
     dossier["companies"]
     |> Enum.with_index()
-    |> Enum.filter(fn {row, _index} -> row["importable"] == true end)
-    |> Enum.find_value(:ok, fn {row, index} ->
-      flagged_error(index, row, manifest.results, dir)
-    end)
+    |> Enum.find_value(:ok, fn {row, index} -> input_error(index, row, manifest.results, dir) end)
   end
 
-  defp flagged_error(index, row, results, dir) do
+  defp input_error(index, %{"importable" => true} = row, results, dir) do
     case row_eligibility(index, row, results, dir) do
       :eligible -> nil
+      {:error, _} = error -> error
+    end
+  end
+
+  defp input_error(index, row, results, _dir) do
+    case rule_future(index, row, row_results(results, row["row_id"])) do
+      :ok -> nil
       {:error, _} = error -> error
     end
   end
@@ -629,21 +641,20 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
          :ok <- time(doc["generated_at"], "generated_at"),
          :ok <- text(doc["sources_policy"], "sources_policy", 1, 2000),
          :ok <- list(doc["companies"], "companies", 1, 15) do
-      generated_on = local_date!(doc["generated_at"])
-      companies(doc["companies"], generated_on)
+      companies(doc["companies"])
     end
   end
 
   defp version(1), do: :ok
   defp version(_other), do: {:error, {"schema_version", :schema_version}}
 
-  defp companies(companies, generated_on) do
+  defp companies(companies) do
     companies
     |> Enum.with_index()
     |> Enum.reduce_while({MapSet.new(), MapSet.new()}, fn {company, i}, {ids, domains} ->
       p = "companies[#{i}]"
 
-      with :ok <- company(company, i, generated_on),
+      with :ok <- company(company, i),
            :ok <- unique(company["row_id"], ids, "#{p}.row_id"),
            :ok <- unique(company["domain"], domains, "#{p}.domain") do
         {:cont, {MapSet.put(ids, company["row_id"]), MapSet.put(domains, company["domain"])}}
@@ -657,7 +668,7 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
     end
   end
 
-  defp company(c, i, generated_on) do
+  defp company(c, i) do
     p = "companies[#{i}]"
 
     with :ok <- keys(c, @company_keys, ["companies", i]),
@@ -668,7 +679,7 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
          :ok <- boolean(c["importable"], "#{p}.importable"),
          :ok <- optional_enum(c["skip_reason"], @skip_reasons, "#{p}.skip_reason"),
          {:ok, sources} <- sources(c["sources"], p, c["domain"]),
-         :ok <- facts(c["facts"], p, sources, generated_on),
+         :ok <- facts(c["facts"], p, sources),
          :ok <- optional(c["contact"], &contact(&1, "#{p}.contact", c["domain"], sources)),
          :ok <- flag(c, p) do
       flagged(c, p)
@@ -739,11 +750,11 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
       else: {:error, {"#{sp}.source_type", :mislabelled}}
   end
 
-  defp facts(facts, p, sources, generated_on) do
+  defp facts(facts, p, sources) do
     with :ok <- list(facts, "#{p}.facts", 1, 10) do
       facts
       |> Enum.with_index()
-      |> Enum.reduce_while(MapSet.new(), &add_fact(&1, &2, p, sources, generated_on))
+      |> Enum.reduce_while(MapSet.new(), &add_fact(&1, &2, p, sources))
       |> case do
         {:error, _} = error -> error
         _ids -> :ok
@@ -751,10 +762,10 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
     end
   end
 
-  defp add_fact({f, j}, ids, p, sources, generated_on) do
+  defp add_fact({f, j}, ids, p, sources) do
     fp = "#{p}.facts[#{j}]"
 
-    with :ok <- fact(f, fp, sources, generated_on),
+    with :ok <- fact(f, fp, sources),
          :ok <- unique(f["fact_id"], ids, "#{fp}.fact_id") do
       {:cont, MapSet.put(ids, f["fact_id"])}
     else
@@ -762,12 +773,12 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
     end
   end
 
-  defp fact(f, fp, sources, generated_on) do
+  defp fact(f, fp, sources) do
     with :ok <- keys(f, @fact_keys, segments(fp)),
          :ok <- pattern(f["fact_id"], @fact_id, "#{fp}.fact_id"),
          :ok <- enum(f["kind"], @fact_kinds, "#{fp}.kind"),
          :ok <- optional_enum(f["topic"], @topics, "#{fp}.topic"),
-         :ok <- optional(f["stated_on"], &not_after(&1, generated_on, "#{fp}.stated_on")),
+         :ok <- optional(f["stated_on"], &date(&1, "#{fp}.stated_on")),
          :ok <- text(f["text"], "#{fp}.text", 1, 600, true),
          :ok <- optional(f["source_id"], &known_source(&1, sources, "#{fp}.source_id")),
          :ok <- optional(f["excerpt"], &text(&1, "#{fp}.excerpt", 1, 600, true)) do
@@ -908,14 +919,6 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
     if is_binary(id) and Map.has_key?(sources, id), do: :ok, else: {:error, {sp, :unknown_source}}
   end
 
-  defp not_after(value, generated_on, dp) do
-    with :ok <- date(value, dp) do
-      if Date.compare(Date.from_iso8601!(value), generated_on) == :gt,
-        do: {:error, {dp, :future_date}},
-        else: :ok
-    end
-  end
-
   ## Shared value helpers (also used by SpotcheckManifest and SeedDir)
 
   @doc false
@@ -1009,9 +1012,6 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
   end
 
   def date(_value, p), do: {:error, {p, :type}}
-
-  @doc false
-  def local_date!(<<date::binary-size(10), "T", _::binary>>), do: Date.from_iso8601!(date)
 
   @doc false
   # https only; no userinfo, port, query, fragment, IP literal or reserved host.
