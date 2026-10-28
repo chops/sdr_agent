@@ -13,14 +13,8 @@ defmodule SdrAgent.Prototype.ProvisionTest do
   @authority SdrAgent.Prototype.Authority
   @routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
 
-  defp scratch_dir! do
-    dir =
-      Path.join(System.tmp_dir!(), "d237-provision-test-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(dir)
-    File.chmod!(dir, 0o700)
-    dir
-  end
+  # An exclusive, unpredictable, owned 0700 root (Codex 39a6fd61 R1).
+  defp scratch_dir!, do: PrototypeFixtures.scratch_dir!()
 
   defp evidence!(root, name, body \\ "counts-only receipt\n") do
     path = Path.join(root, name)

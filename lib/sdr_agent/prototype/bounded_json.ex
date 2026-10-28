@@ -5,9 +5,16 @@ defmodule SdrAgent.Prototype.BoundedJson do
   manifest, the four seed files and the budget worksheet. Owned by S1, used
   by S1 and S3. It never evaluates code and never touches the network.
 
-  1. **Bytes.** `read_file/3` reads a regular, non-symlink file (by
-     `lstat`) once, refuses more than `max_bytes`, and refuses unless its
-     full sha256 equals the argument; `decode/2` refuses invalid UTF-8.
+  1. **Bytes.** `read_file/3` checks a regular, non-symlink file of at most
+     `max_bytes` by `lstat`, then reads it through ONE handle: before any
+     byte is read, the opened object (fstat on the handle) must be that
+     same regular file (device and inode) within the bound, else
+     `:changed` (or `:too_large`); the read stops at `max_bytes` plus one
+     sentinel byte; the handle is closed on every path; the full sha256 of
+     that one snapshot must equal the argument (the path is never reread).
+     Refusals are `{"(file)", rule}` with `:unreadable`, `:not_regular`,
+     `:too_large`, `:changed` or `:digest_mismatch`. `decode/2` refuses
+     invalid UTF-8.
   2. **Syntax vs content.** JSON whitespace between tokens is ignored; text
      rules apply only to decoded string values.
   3. **Decode.** `Jason.decode(bin, objects: :ordered_objects)`, then one
@@ -25,6 +32,19 @@ defmodule SdrAgent.Prototype.BoundedJson do
      indices (`format_path/1`, for example `companies[3].contact.email`)
      and a rule atom. An unknown key is reported as the parent path with
      `:unknown_key`, never naming the key. No value is ever echoed.
+     `decode/2` runs before any schema check, so it names only the object
+     keys in the caller's `known_keys:` (default `[]`, the file's fixed
+     schema vocabulary): a duplicate-key or depth error is reported at its
+     container's path cut at the first key outside `known_keys:`, which is
+     that key's parent (as for an unknown key). Array indices are kept up
+     to the cut. Jason's error text is never returned.
+
+  Test builds only (`:prototype_test_seams`, fixed at compile time):
+  `read_file/3` calls a one-argument hook from the calling process's
+  dictionary under `{SdrAgent.Prototype.BoundedJson, name}` at
+  `:after_precheck` (path), `:after_open` (handle), `:after_identity`
+  (handle) and `:after_read` (the bytes read, before they are checked).
+  Every other build has no hook.
 
   RED stage (D-237 S1): the API is the contract; every function returns
   `{:error, :not_implemented}`.
@@ -37,7 +57,10 @@ defmodule SdrAgent.Prototype.BoundedJson do
   @spec read_file(Path.t(), String.t(), pos_integer()) :: {:ok, binary()} | error()
   def read_file(_path, _sha256_hex, _max_bytes), do: red({:error, :not_implemented})
 
-  @doc "Decodes `bin` under rules 1-4 (`max_bytes:`, `max_depth:`); returns plain maps and lists."
+  @doc """
+  Decodes `bin` under rules 1-4 and 7 (`max_bytes:`, `max_depth:`,
+  `known_keys:`); returns plain maps and lists.
+  """
   @spec decode(binary(), keyword()) :: {:ok, term()} | error()
   def decode(_bin, _opts), do: red({:error, :not_implemented})
 

@@ -6,10 +6,27 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
   walk before any map conversion, the per-file minimum depth bounds, exact
   key sets, the dossier text rule without normalization, and value-free
   path errors. Synthetic inputs only.
+
+  Codex 39a6fd61 additions:
+
+  - error paths never name an arbitrary JSON key: a duplicate-key or depth
+    error under a key outside the caller's `known_keys:` is reported at the
+    parent of the first such key (the unknown-key rule), and Jason's error
+    text is never returned; escaped-equivalent keys are duplicates;
+  - `read_file/3` reads through ONE handle whose opened object must be the
+    checked regular file (device and inode) before any byte is read, at
+    most `max_bytes` plus one sentinel byte, closed on every path, hashing
+    that one snapshot; the races are synchronized through the test-build
+    hooks `{SdrAgent.Prototype.BoundedJson, name}` in the calling process's
+    dictionary (`:after_precheck`, `:after_open`, `:after_identity`,
+    `:after_read`), never by timing;
+  - file fixtures live in exclusive, unpredictable, owned scratch roots
+    (`SdrAgent.PrototypeFixtures.scratch_dir!/1`).
   """
   use ExUnit.Case, async: true
 
   alias SdrAgent.Prototype.BoundedJson
+  alias SdrAgent.PrototypeFixtures
 
   @canary "CANARY-d237-json-5b1c"
 
@@ -48,8 +65,72 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
       assert value_free!(BoundedJson.decode(root, max_bytes: 1_024, max_depth: 7)) ==
                {:error, {"(root)", :duplicate_key}}
 
-      assert value_free!(BoundedJson.decode(nested, max_bytes: 1_024, max_depth: 7)) ==
+      assert value_free!(
+               BoundedJson.decode(nested,
+                 max_bytes: 1_024,
+                 max_depth: 7,
+                 known_keys: ["companies", "contact"]
+               )
+             ) ==
                {:error, {"companies[1].contact", :duplicate_key}}
+    end
+
+    test "under a key outside known_keys, the error stops at that key's parent, unnamed" do
+      opts = [max_bytes: 1_024, max_depth: 7, known_keys: ["companies", "contact", "k"]]
+
+      duplicate_below = ~s({"companies":[{"#{@canary}":{"a":1,"a":2}}]})
+
+      assert value_free!(BoundedJson.decode(duplicate_below, opts)) ==
+               {:error, {"companies[0]", :duplicate_key}}
+
+      duplicated = ~s({"companies":[{"#{@canary}":1,"#{@canary}":2}]})
+
+      assert value_free!(BoundedJson.decode(duplicated, opts)) ==
+               {:error, {"companies[0]", :duplicate_key}}
+
+      too_deep_below = ~s({"#{@canary}":{"k":{"k":1}}})
+
+      assert value_free!(BoundedJson.decode(too_deep_below, Keyword.put(opts, :max_depth, 2))) ==
+               {:error, {"(root)", :too_deep}}
+
+      indexed_below = ~s([{"#{@canary}":[[1]]}])
+
+      assert value_free!(BoundedJson.decode(indexed_below, Keyword.put(opts, :max_depth, 3))) ==
+               {:error, {"[0]", :too_deep}}
+    end
+
+    test "without known_keys every key is unknown: errors carry indices only" do
+      nested = ~s({"companies":[{"contact":{"a":1,"a":2}}]})
+
+      assert BoundedJson.decode(nested, max_bytes: 1_024, max_depth: 7) ==
+               {:error, {"(root)", :duplicate_key}}
+
+      assert BoundedJson.decode(~s([{"a":[[1]]}]), max_bytes: 1_024, max_depth: 3) ==
+               {:error, {"[0]", :too_deep}}
+    end
+
+    test "escaped-equivalent keys are duplicates (compared after JSON unescaping)" do
+      assert BoundedJson.decode(~S({"a":1,"a":2}), max_bytes: 1_024, max_depth: 1) ==
+               {:error, {"(root)", :duplicate_key}}
+
+      assert BoundedJson.decode(~S({"é":1,"é":2}), max_bytes: 1_024, max_depth: 1) ==
+               {:error, {"(root)", :duplicate_key}}
+
+      nested = ~S({"companies":[{"contact":{"name":1,"name":2}}]})
+
+      assert BoundedJson.decode(nested,
+               max_bytes: 1_024,
+               max_depth: 7,
+               known_keys: ["companies", "contact"]
+             ) ==
+               {:error, {"companies[0].contact", :duplicate_key}}
+    end
+
+    test "invalid JSON never returns Jason's error text (a canary key, an unterminated string)" do
+      for bin <- [~s({"#{@canary}" 1}), ~s({"a":"#{@canary}), ~s({"#{@canary}]
+        assert value_free!(BoundedJson.decode(bin, max_bytes: 1_024, max_depth: 1)) ==
+                 {:error, {"(root)", :invalid_json}}
+      end
     end
 
     test "the root container is depth 1; each nested container adds 1; scalars do not" do
@@ -72,17 +153,15 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
             writing_guide: 1,
             budget_worksheet: 4
           ] do
-        assert match?(
-                 {:ok, _},
-                 BoundedJson.decode(nested(bound), max_bytes: 4_096, max_depth: bound)
-               ),
-               "#{file}: depth #{bound} was refused"
+        at_bound = BoundedJson.decode(nested(bound), max_bytes: 4_096, max_depth: bound)
 
-        assert match?(
-                 {:error, {_path, :too_deep}},
-                 BoundedJson.decode(nested(bound + 1), max_bytes: 4_096, max_depth: bound)
-               ),
-               "#{file}: depth #{bound + 1} was accepted"
+        assert match?({:ok, _}, at_bound),
+               "#{file}: depth #{bound} expected {:ok, _}, got #{inspect(at_bound)}"
+
+        deeper = BoundedJson.decode(nested(bound + 1), max_bytes: 4_096, max_depth: bound)
+
+        assert match?({:error, {_path, :too_deep}}, deeper),
+               "#{file}: depth #{bound + 1} expected a :too_deep refusal, got #{inspect(deeper)}"
       end
     end
 
@@ -107,12 +186,7 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
 
   describe "read_file/3" do
     setup do
-      dir =
-        Path.join(System.tmp_dir!(), "d237-bounded-json-#{System.unique_integer([:positive])}")
-
-      File.mkdir_p!(dir)
-      File.chmod!(dir, 0o700)
-      %{dir: dir}
+      %{dir: PrototypeFixtures.scratch_dir!()}
     end
 
     test "reads a regular file once when its full sha256 matches", %{dir: dir} do
@@ -137,6 +211,160 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
                {:error, {"(file)", :unreadable}}
 
       assert BoundedJson.read_file(path, sha(~s({"a":1})), 3) == {:error, {"(file)", :too_large}}
+    end
+
+    test "the byte limit is exact: max_bytes accepted, one byte more refused", %{dir: dir} do
+      bytes = ~s({"a":1})
+      path = Path.join(dir, "input.json")
+      File.write!(path, bytes)
+
+      assert BoundedJson.read_file(path, sha(bytes), byte_size(bytes)) == {:ok, bytes}
+
+      assert BoundedJson.read_file(path, sha(bytes), byte_size(bytes) - 1) ==
+               {:error, {"(file)", :too_large}}
+    end
+  end
+
+  describe "read_file/3 under substitution and growth (synchronized test-build hooks)" do
+    # Each hook runs inside read_file/3 at its named boundary (test builds
+    # only), so every race happens at an exact point, with no timing:
+    # :after_precheck (path) after the lstat checks and before the open;
+    # :after_open (handle) right after the one open; :after_identity
+    # (handle) after the opened object is checked against the precheck;
+    # :after_read (bytes) with exactly the bytes read, before any check of
+    # them. The hooks live in this test process's dictionary and die with it.
+    @max 1_024
+
+    setup do
+      dir = PrototypeFixtures.scratch_dir!()
+      bytes = ~s({"a":1})
+      path = Path.join(dir, "input.json")
+      File.write!(path, bytes)
+
+      outside = PrototypeFixtures.scratch_dir!()
+      target = Path.join(outside, "target.json")
+      File.write!(target, ~s({"a":"SENTINEL-NEVER-READ #{@canary}"}))
+
+      test_pid = self()
+
+      hook(:after_read, fn read ->
+        send(test_pid, {:read, byte_size(read), String.contains?(read, "SENTINEL-NEVER-READ")})
+      end)
+
+      %{dir: dir, path: path, bytes: bytes, target: target, test_pid: test_pid}
+    end
+
+    defp hook(name, fun), do: Process.put({BoundedJson, name}, fun)
+
+    defp move_aside!(path),
+      do: File.rename!(path, Path.join(PrototypeFixtures.scratch_dir!(), "moved.json"))
+
+    test "the file swapped for a symlink after the precheck: refused, the target never read",
+         ctx do
+      hook(:after_precheck, fn path ->
+        move_aside!(path)
+        File.ln_s!(ctx.target, path)
+      end)
+
+      assert value_free!(BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max)) ==
+               {:error, {"(file)", :changed}}
+
+      refute_received {:read, _size, true}, "the symlink target's bytes were read"
+    end
+
+    test "the file replaced by another regular file after the precheck: refused before any read",
+         ctx do
+      hook(:after_precheck, fn path ->
+        move_aside!(path)
+        File.write!(path, String.duplicate(" ", 65_536) <> "{}")
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) ==
+               {:error, {"(file)", :changed}}
+
+      refute_received {:read, _size, _sentinel}, "the replacement's bytes were read"
+    end
+
+    test "the file grown past the bound after the precheck: refused, any read bounded", ctx do
+      hook(:after_precheck, fn path ->
+        File.write!(path, String.duplicate(" ", 65_536), [:append])
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) ==
+               {:error, {"(file)", :too_large}}
+
+      receive do
+        {:read, size, _sentinel} ->
+          assert size <= @max + 1, "read #{size} bytes, past the bound and its sentinel byte"
+      after
+        0 -> :ok
+      end
+    end
+
+    test "the file grown past the bound after the identity check: the read stops at the bound plus one byte",
+         ctx do
+      hook(:after_identity, fn _handle ->
+        File.write!(ctx.path, String.duplicate(" ", 65_536), [:append])
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) ==
+               {:error, {"(file)", :too_large}}
+
+      assert_received {:read, size, false}, "the checked handle was never read"
+      assert size <= @max + 1, "read #{size} bytes, past the bound and its sentinel byte"
+    end
+
+    test "the digest is of the one read snapshot: replacing the path after the read changes nothing",
+         ctx do
+      hook(:after_read, fn read ->
+        send(ctx.test_pid, {:read, byte_size(read), false})
+        move_aside!(ctx.path)
+        File.write!(ctx.path, ~s({"b":2}))
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) == {:ok, ctx.bytes}
+      assert_received {:read, 7, false}
+    end
+
+    test "the one handle is closed on success and on every refusal after the open", ctx do
+      hook(:after_open, fn handle -> send(ctx.test_pid, {:opened, handle}) end)
+
+      assert_closed = fn label ->
+        assert_received {:opened, handle}, "#{label}: read_file/3 reported no opened handle"
+
+        assert :file.read(handle, 1) == {:error, :einval},
+               "#{label}: the handle was left open"
+      end
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) == {:ok, ctx.bytes}
+      assert_closed.("success")
+
+      assert BoundedJson.read_file(ctx.path, sha("other"), @max) ==
+               {:error, {"(file)", :digest_mismatch}}
+
+      assert_closed.("digest mismatch")
+
+      hook(:after_identity, fn _handle ->
+        File.write!(ctx.path, String.duplicate(" ", 65_536), [:append])
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) ==
+               {:error, {"(file)", :too_large}}
+
+      assert_closed.("growth after the identity check")
+
+      Process.delete({BoundedJson, :after_identity})
+      File.write!(ctx.path, ctx.bytes)
+
+      hook(:after_precheck, fn path ->
+        move_aside!(path)
+        File.ln_s!(ctx.target, path)
+      end)
+
+      assert BoundedJson.read_file(ctx.path, sha(ctx.bytes), @max) ==
+               {:error, {"(file)", :changed}}
+
+      assert_closed.("symlink swap")
     end
   end
 
@@ -175,9 +403,10 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
       controls = [0x01, 0x0D, 0x7F, 0x85, 0x202E, 0x2066, 0x2069]
 
       for bad <- Enum.map(controls, &("a" <> <<&1::utf8>> <> "b")) do
-        assert BoundedJson.check_text(bad, min: 1, max: 600, multiline: true) ==
-                 {:error, :control_character},
-               "#{inspect(bad)} was accepted"
+        result = BoundedJson.check_text(bad, min: 1, max: 600, multiline: true)
+
+        assert result == {:error, :control_character},
+               "#{inspect(bad)}: expected {:error, :control_character}, got #{inspect(result)}"
       end
     end
 
