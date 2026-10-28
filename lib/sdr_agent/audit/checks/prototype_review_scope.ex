@@ -19,8 +19,10 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
 
   `purpose/0` is the fixed AuditAccess purpose of a scoped read.
 
-  RED stage (D-237 S1 item 5): DENY-ONLY. `match?/3` refuses every request;
-  `context/1`, `fetch/1` and `purpose/0` are the contract.
+  `fetch/1` validates every member at consumption and never raises. The
+  positive branch exists only with the prototype authority
+  (`:prototype_authority_compiled`); the production build refuses every
+  request.
   """
   use Ash.Policy.SimpleCheck
 
@@ -30,8 +32,28 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
   def describe(_opts),
     do: "the resolved prototype operator reads the rendered payload of its review scope"
 
-  @impl true
-  def match?(_actor, _authorizer, _opts), do: red(false)
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    @impl true
+    def match?(
+          %SdrAgent.Actor{type: :prototype_operator, id: id, tenant_id: tenant_id} = actor,
+          %{subject: %Ash.ActionInput{context: context, arguments: arguments}},
+          _opts
+        )
+        when is_binary(id) and is_binary(tenant_id) and is_map(context) do
+      with {:ok, %{tenant_id: ^tenant_id, delegation_id: ^id, sha256s: sha256s}} <-
+             fetch(context),
+           true <- Map.get(arguments, :sha256) in sha256s do
+        SdrAgent.Prototype.Authority.operator?(actor)
+      else
+        _refused -> false
+      end
+    end
+
+    def match?(_actor, _authorizer, _opts), do: false
+  else
+    @impl true
+    def match?(_actor, _authorizer, _opts), do: false
+  end
 
   @doc "The fixed AuditAccess purpose of a scoped review read."
   @spec purpose() :: String.t()
@@ -45,7 +67,7 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
   @spec context(map()) :: map()
   def context(%{tenant_id: tenant_id, delegation_id: delegation_id, sha256s: sha256s} = scope)
       when is_binary(tenant_id) and is_binary(delegation_id) and is_list(sha256s) do
-    if sha256s != [] and Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)) do
+    if hashes?(sha256s) do
       %{@marker => %{scope | sha256s: Enum.uniq(sha256s)}}
     else
       raise ArgumentError, "a prototype review scope needs one or more 32-byte sha256s"
@@ -54,13 +76,17 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
 
   def context(_other), do: raise(ArgumentError, "not a prototype review scope")
 
-  @doc "The well-formed scope in `context`, if any."
+  @doc """
+  The well-formed scope in `context`, if any: binary tenant and delegation
+  and a non-empty proper list of 32-byte hashes only. A forged or malformed
+  scope (any other shape or member) is `:error`; it never raises.
+  """
   @spec fetch(term()) :: {:ok, map()} | :error
   def fetch(context) when is_map(context) do
     case Map.get(context, @marker) do
       %{tenant_id: tenant_id, delegation_id: delegation_id, sha256s: sha256s} = scope
-      when is_binary(tenant_id) and is_binary(delegation_id) and is_list(sha256s) ->
-        {:ok, scope}
+      when is_binary(tenant_id) and is_binary(delegation_id) ->
+        if hashes?(sha256s), do: {:ok, scope}, else: :error
 
       _other ->
         :error
@@ -69,6 +95,15 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
 
   def fetch(_context), do: :error
 
-  # RED stub result, typed dynamic(); nothing sets the key (ruling e).
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+  # A non-empty PROPER list of 32-byte binaries. Anything else, an improper
+  # tail included, is false; it never raises (Codex 6ccaa32f R1).
+  defp hashes?([_ | _] = sha256s), do: all_hashes?(sha256s)
+  defp hashes?(_other), do: false
+
+  defp all_hashes?([]), do: true
+
+  defp all_hashes?([sha256 | rest]) when is_binary(sha256) and byte_size(sha256) == 32,
+    do: all_hashes?(rest)
+
+  defp all_hashes?(_improper_or_invalid), do: false
 end

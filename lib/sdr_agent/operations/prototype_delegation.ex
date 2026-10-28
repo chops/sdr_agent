@@ -87,6 +87,21 @@ defmodule SdrAgent.Operations.PrototypeDelegation do
       change {SdrAgent.Audit.Changes.AppendEvent,
               event_type: "prototype.delegation.created", category: :domain_change}
     end
+
+    # D-237 IF-3: the task entry's session delegation, created only by
+    # `SdrAgent.Prototype.enter_session/2`. It accepts only the agent and the
+    # correlation; the binding, tenant and anchor come from the boot
+    # snapshot. Authorized only by `KernelMarker` with the `:task_entry`
+    # marker, whose positive branch is held (deny-only for now).
+    create :enter do
+      description "D-237 task entry: this agent session's delegation."
+      accept [:agent, :session_correlation]
+      change {SdrAgent.Operations.Changes.BindDelegation, from: :snapshot}
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "prototype.delegation.created", category: :domain_change}
+    end
   end
 
   policies do
@@ -96,6 +111,10 @@ defmodule SdrAgent.Operations.PrototypeDelegation do
 
     policy action(:create_setup) do
       authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :setup}
+    end
+
+    policy action(:enter) do
+      authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :task_entry}
     end
   end
 

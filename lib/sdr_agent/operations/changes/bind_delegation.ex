@@ -8,20 +8,56 @@ defmodule SdrAgent.Operations.Changes.BindDelegation do
   them: the action accepts only `agent` and `session_correlation`, and the
   composite foreign key refuses any other anchor.
 
-  No binding row, or more than one, is an error on the changeset; nothing
-  is written.
+  With `from: :snapshot` (`:enter`, called only by
+  `SdrAgent.Prototype.enter_session/2`) they come from the boot snapshot
+  (`SdrAgent.Prototype.binding/0`) instead.
+
+  No binding row, more than one, or no boot snapshot is an error on the
+  changeset; nothing is written. Both run in `before_action`, after
+  authorization.
   """
   use Ash.Resource.Change
 
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.PrototypeDatabaseBinding
 
+  @compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
+
   @impl true
   def change(changeset, opts, _context) do
     case Keyword.fetch!(opts, :from) do
       :row ->
         Ash.Changeset.before_action(changeset, &from_row/1)
+
+      :snapshot ->
+        Ash.Changeset.before_action(changeset, &from_snapshot/1)
     end
+  end
+
+  # The boot snapshot exists only in a build with the prototype authority;
+  # any other build (production) has none, so `:snapshot` always errors.
+  if @compiled do
+    defp from_snapshot(changeset) do
+      case SdrAgent.Prototype.Authority.binding() do
+        {:ok, snapshot} ->
+          force(changeset, snapshot.id, snapshot.tenant_id, snapshot.operator_user_id)
+
+        _not_prototype ->
+          no_snapshot(changeset)
+      end
+    end
+  else
+    defp from_snapshot(changeset), do: no_snapshot(changeset)
+  end
+
+  defp no_snapshot(changeset),
+    do: Ash.Changeset.add_error(changeset, field: :binding_id, message: "no boot snapshot")
+
+  defp force(changeset, binding_id, tenant_id, operator_user_id) do
+    changeset
+    |> Ash.Changeset.force_change_attribute(:binding_id, binding_id)
+    |> Ash.Changeset.force_change_attribute(:tenant_id, tenant_id)
+    |> Ash.Changeset.force_change_attribute(:operator_user_id, operator_user_id)
   end
 
   defp from_row(changeset) do
@@ -31,10 +67,7 @@ defmodule SdrAgent.Operations.Changes.BindDelegation do
     |> Ash.read()
     |> case do
       {:ok, [binding]} ->
-        changeset
-        |> Ash.Changeset.force_change_attribute(:binding_id, binding.id)
-        |> Ash.Changeset.force_change_attribute(:tenant_id, binding.tenant_id)
-        |> Ash.Changeset.force_change_attribute(:operator_user_id, binding.operator_user_id)
+        force(changeset, binding.id, binding.tenant_id, binding.operator_user_id)
 
       _none_or_many ->
         Ash.Changeset.add_error(changeset,

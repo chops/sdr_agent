@@ -154,7 +154,8 @@ defmodule SdrAgent.Prototype.PayloadScopeTest do
       empty_list: Map.put(base, :sha256s, []),
       not_a_list: Map.put(base, :sha256s, good),
       missing_key: base,
-      not_a_map: [good]
+      not_a_map: [good],
+      improper_list: Map.put(base, :sha256s, [good | :bad_tail])
     ]
 
     for {name, scope} <- forged do

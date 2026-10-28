@@ -80,7 +80,7 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
       })
       when is_binary(tenant_id) and is_binary(delegation_id) and purpose in @purposes and
              is_list(sha256s) do
-    if sha256s != [] and Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)) do
+    if hashes?(sha256s) do
       %{
         @marker => %{
           tenant_id: tenant_id,
@@ -107,11 +107,8 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
     case Map.get(context, @marker) do
       %{tenant_id: tenant_id, delegation_id: delegation_id, purpose: purpose, sha256s: sha256s} =
           scope
-      when is_binary(tenant_id) and is_binary(delegation_id) and purpose in @purposes and
-             is_list(sha256s) and sha256s != [] ->
-        if Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)),
-          do: {:ok, scope},
-          else: :error
+      when is_binary(tenant_id) and is_binary(delegation_id) and purpose in @purposes ->
+        if hashes?(sha256s), do: {:ok, scope}, else: :error
 
       _other ->
         :error
@@ -119,4 +116,16 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
   end
 
   def fetch(_context), do: :error
+
+  # A non-empty PROPER list of 32-byte binaries. Anything else, an improper
+  # tail included, is false; it never raises (Codex 6ccaa32f R1).
+  defp hashes?([_ | _] = sha256s), do: all_hashes?(sha256s)
+  defp hashes?(_other), do: false
+
+  defp all_hashes?([]), do: true
+
+  defp all_hashes?([sha256 | rest]) when is_binary(sha256) and byte_size(sha256) == 32,
+    do: all_hashes?(rest)
+
+  defp all_hashes?(_improper_or_invalid), do: false
 end

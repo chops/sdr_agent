@@ -51,6 +51,11 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
     n
   end
 
+  defp all_accesses do
+    %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM audit_accesses", [])
+    n
+  end
+
   defp forbidden!(name, result) do
     assert match?({:error, %Ash.Error.Forbidden{}}, result),
            "#{name}: expected Forbidden, got #{inspect(result)}"
@@ -100,6 +105,8 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
       agent = Actor.system(:agent_runtime, fx.tenant.id)
       scope = source_scope(fx, [sha])
 
+      accesses_before = all_accesses()
+
       forbidden!(:outside, read(:read_dossier_source_content, other, agent, scope))
       forbidden!(:no_scope, read(:read_dossier_source_content, sha, agent, %{}))
 
@@ -125,6 +132,7 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
 
       assert PrototypeFixtures.leave_runtime() == :ok
       forbidden!(:ordinary_runtime, read(:read_dossier_source_content, sha, agent, scope))
+      assert all_accesses() == accesses_before, "a refused source read recorded an access"
     end
   end
 
@@ -154,6 +162,8 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
       scope = review_scope(fx, [sha])
       marker = :sdr_prototype_review_scope
       forged = fn changes -> %{marker => Map.merge(scope[marker], changes)} end
+
+      accesses_before = all_accesses()
 
       forbidden!(:outside, read(:read_prototype_review_content, other, fx.actor, scope))
       forbidden!(:no_scope, read(:read_prototype_review_content, sha, fx.actor, %{}))
@@ -195,6 +205,55 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
 
       assert PrototypeFixtures.leave_runtime() == :ok
       forbidden!(:ordinary_runtime, read(:read_prototype_review_content, sha, fx.actor, scope))
+      assert all_accesses() == accesses_before, "a refused review read recorded an access"
+    end
+  end
+
+  describe "forged read scopes" do
+    test "a malformed, mixed or missing-shape scope never raises, never reads and records no access" do
+      fx = bound!()
+      sha = stored!(fx, "Synthetic forged-scope page.")
+      agent = Actor.system(:agent_runtime, fx.tenant.id)
+      accesses_before = all_accesses()
+
+      source = %{
+        tenant_id: fx.tenant.id,
+        agent_run_id: Ecto.UUID.generate(),
+        lead_id: Ecto.UUID.generate(),
+        entry_id: Ecto.UUID.generate()
+      }
+
+      review = %{tenant_id: fx.tenant.id, delegation_id: fx.actor.id}
+
+      shapes = fn base ->
+        [
+          mixed_members: Map.put(base, :sha256s, [sha, "not-32-bytes"]),
+          non_binary_member: Map.put(base, :sha256s, [sha, 42]),
+          empty_list: Map.put(base, :sha256s, []),
+          not_a_list: Map.put(base, :sha256s, sha),
+          missing_hashes: base,
+          not_a_map: [sha],
+          improper_list: Map.put(base, :sha256s, [sha | :bad_tail])
+        ]
+      end
+
+      missing_entry = source |> Map.delete(:entry_id) |> Map.put(:sha256s, [sha])
+
+      for {name, scope} <- shapes.(source) ++ [missing_entry: missing_entry] do
+        forbidden!(
+          name,
+          read(:read_dossier_source_content, sha, agent, %{sdr_dossier_source_scope: scope})
+        )
+      end
+
+      for {name, scope} <- shapes.(review) do
+        forbidden!(
+          name,
+          read(:read_prototype_review_content, sha, fx.actor, %{sdr_prototype_review_scope: scope})
+        )
+      end
+
+      assert all_accesses() == accesses_before
     end
   end
 end
