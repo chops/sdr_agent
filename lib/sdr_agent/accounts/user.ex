@@ -16,8 +16,9 @@ defmodule SdrAgent.Accounts.User do
   by an admin (`:create_user`), by the kernel's first-admin bootstrap
   (`:bootstrap_admin`, only while the tenant has no users; `mix
   sdr.bootstrap_admin`) or, in dev/test, the seeder (`:seed`). Only
-  active users sign in (`:sign_in_with_password`) or resolve from a session
-  (`:get_by_subject`); every sign-in attempt is audited
+  active users other than the D-237 `:agent_operator` anchor sign in
+  (`:sign_in_with_password`) or resolve from a session (`:get_by_subject`);
+  every sign-in attempt is audited
   (`auth.sign_in.succeeded` / `auth.sign_in.failed`, the latter anonymous
   with only the email's sha256).
 
@@ -39,7 +40,11 @@ defmodule SdrAgent.Accounts.User do
     * `:change_password` — ADM or REV, own user, with the current password;
     * `:set_password` — ADM, for another user (the only way an auditor's
       password changes);
-    * password changes revoke all of the user's tokens (log-out-everywhere).
+    * password changes revoke all of the user's tokens (log-out-everywhere);
+    * in D-237 prototype runtime, `:create_user`, `:seed`, `:change_role`,
+      `:change_status` and `:set_password` are refused for every actor
+      (`SdrAgent.Prototype.Checks.PrototypeRuntime`), ahead of the
+      AshAuthentication bypass.
 
   Auditors (AUR) mutate nothing, including their own password. Reads: any
   user reads itself; ADM and AUR read all users, but AUR sees only
@@ -143,7 +148,8 @@ defmodule SdrAgent.Accounts.User do
       description "Get an active user by the subject claim in a JWT (session lookup)."
       argument :subject, :string, allow_nil?: false
       get? true
-      filter expr(status == :active)
+      # D-237 IF-3: the credential-less anchor never resolves from a session.
+      filter expr(status == :active and role != :agent_operator)
       prepare AshAuthentication.Preparations.FilterBySubject
     end
 
@@ -162,7 +168,8 @@ defmodule SdrAgent.Accounts.User do
         sensitive? true
       end
 
-      filter expr(status == :active)
+      # D-237 IF-3: the credential-less anchor never signs in.
+      filter expr(status == :active and role != :agent_operator)
       prepare Password.SignInPreparation
       prepare SdrAgent.Accounts.Preparations.AuditSignIn
 
@@ -324,6 +331,15 @@ defmodule SdrAgent.Accounts.User do
   end
 
   policies do
+    # D-237 IF-3 (Codex f3036a14 queue 1): prototype runtime refuses user
+    # administration for every actor. Declared before the AshAuthentication
+    # bypass, which would otherwise skip it; outside prototype runtime it
+    # passes and every policy below still applies.
+    policy action([:create_user, :seed, :change_role, :change_status, :set_password]) do
+      forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
+      authorize_if always()
+    end
+
     bypass AshAuthentication.Checks.AshAuthenticationInteraction do
       authorize_if always()
     end
