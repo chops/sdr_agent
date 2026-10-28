@@ -29,7 +29,9 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   D-237 (interfaces r6 IF-2; D3): `:provision_prototype` mints the one
   prototype grant for the resolved operator only, with the exact
   `d237-funding/1` terms, the anchor as creator and updater and the
-  server-derived arguments on `model.grant.provisioned`
+  server-derived arguments on `model.grant.provisioned` (funding id, the
+  funding entry's digest and decision refs, worksheet digest, delegation,
+  binding)
   (`SdrAgent.Agents.Changes.ProvisionPrototype`). In prototype runtime
   `:create`, `:update_terms` and `:release_allocation` are refused for
   every actor (`SdrAgent.Prototype.Checks.PrototypeRuntime`), and `:revoke`
@@ -157,6 +159,8 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :evidence_root, :string, allow_nil?: false, constraints: [trim?: false]
       argument :budget_worksheet_sha256, :string
       argument :funding_id, :string
+      argument :funding_entry_sha256, :string
+      argument :decision_refs, {:array, :string}
       argument :delegation_id, :string
       argument :binding_id, :string
       argument :allocations, {:array, :map}
@@ -168,7 +172,14 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       change {AppendEvent,
               [
                 event_type: "model.grant.provisioned",
-                arguments: [:funding_id, :budget_worksheet_sha256, :delegation_id, :binding_id]
+                arguments: [
+                  :funding_id,
+                  :funding_entry_sha256,
+                  :decision_refs,
+                  :budget_worksheet_sha256,
+                  :delegation_id,
+                  :binding_id
+                ]
               ] ++ @event}
     end
 

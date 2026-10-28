@@ -15,9 +15,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     - `lookup/1` finds "this binding's grant" from the ORIGINAL
       `model.grant.provisioned` event, never from the mutable name:
       `:none` (no such event in the tenant), `{:one, grant_id, event}` (one
-      trusted event) or `:untrusted` (several events, or one whose type,
-      action, subject, funding, binding, actor, delegation, digest, grant
-      tenant or creator is not exactly this binding's). The original
+      trusted event, `classify/2`) or `:untrusted` (several events, or one
+      whose type, action, subject, argument shape and exact keys, funding
+      id, funding entry digest, decision refs, binding, actor, delegation,
+      worksheet digest, grant tenant or creator is not exactly this
+      binding's). The original
       delegation may be any valid delegation of this binding, not the
       current caller's.
     - `lock_grant/2` then locks that grant row and its allocations (the
@@ -48,6 +50,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @funding_id "d237-funding/1"
     @purpose "D-237 prototype funding d237-funding/1 (D-238, D-239, D-243)"
     @event_type "model.grant.provisioned"
+    @argument_keys Enum.sort(
+                     ~w(funding_id funding_entry_sha256 decision_refs budget_worksheet_sha256 delegation_id binding_id)
+                   )
     @action "provision_prototype"
 
     @doc "The grant's fixed name: the funding id."
@@ -114,13 +119,28 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       |> Ash.read()
       |> case do
         {:ok, []} -> :none
-        {:ok, [event]} -> trusted(snapshot, event)
+        {:ok, [event]} -> classify(snapshot, event)
         _ambiguous_or_error -> :untrusted
       end
     end
 
-    defp trusted(snapshot, event) do
-      with %{"arguments" => arguments} <- event.payload,
+    @doc """
+    The trust decision for one provisioned event: `{:one, grant_id, event}`
+    only when its arguments are a map with EXACTLY the recorded keys
+    (`funding_id`, `funding_entry_sha256`, `decision_refs`,
+    `budget_worksheet_sha256`, `delegation_id`, `binding_id`), each strictly
+    typed and equal to this binding's commitments (the compiled funding
+    entry's digest and decision refs; Codex 4281bb5c R2), and the event's
+    type, action, subject, actor, delegation and grant check out; anything
+    else, including a malformed payload or arguments of any other shape, is
+    `:untrusted` (R3). It never raises on the event's shape.
+    """
+    @spec classify(Binding.t(), struct()) :: {:one, Ecto.UUID.t(), struct()} | :untrusted
+    def classify(
+          %Binding{} = snapshot,
+          %AuditEvent{payload: %{"arguments" => %{} = arguments}} = event
+        ) do
+      with true <- Enum.sort(Map.keys(arguments)) == @argument_keys,
            true <- original?(snapshot, event, arguments),
            {:ok, grant_id} <- Ecto.UUID.cast(event.subject_id),
            true <- delegation_of_binding?(snapshot, event.actor_id),
@@ -131,13 +151,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    def classify(_snapshot, _event), do: :untrusted
+
     defp original?(snapshot, event, arguments) do
       event.subject_resource == inspect(ModelCallGrant) and event.action == @action and
-        event.actor_type == :prototype_operator and
-        arguments["funding_id"] == @funding_id and arguments["binding_id"] == snapshot.id and
+        event.actor_type == :prototype_operator and is_binary(event.actor_id) and
+        arguments["funding_id"] == @funding_id and
+        arguments["funding_entry_sha256"] == Authority.funding_entry_sha256() and
+        arguments["decision_refs"] == decision_refs() and
+        arguments["binding_id"] == snapshot.id and
         arguments["delegation_id"] == event.actor_id and
         hex64?(arguments["budget_worksheet_sha256"])
     end
+
+    @doc "The compiled funding entry's decision refs, as recorded on the event."
+    @spec decision_refs() :: [String.t()]
+    def decision_refs, do: Authority.funding_entry().decision_refs
 
     defp hex64?(value) when is_binary(value), do: value =~ ~r/\A[0-9a-f]{64}\z/
     defp hex64?(_value), do: false

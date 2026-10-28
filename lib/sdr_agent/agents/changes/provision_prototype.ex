@@ -7,8 +7,8 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
   the domain wrapper:
 
   - at build, any caller-supplied server-derived argument
-    (`budget_worksheet_sha256`, `funding_id`, `delegation_id`,
-    `binding_id`, `allocations`), even one equal to the server's value, is
+    (`budget_worksheet_sha256`, `funding_id`, `funding_entry_sha256`,
+    `decision_refs`, `delegation_id`, `binding_id`, `allocations`), even one equal to the server's value, is
     refused (`ProvisionRefused` `:forged_metadata`, class `:invalid`);
     the exact funding-entry terms are set;
   - in a `before_action` (the action's transaction), in this order: the
@@ -18,7 +18,9 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
     never renews); the separately detected ordinary name conflict
     (`:grant_exists`); the full `check_worksheet/3` with its evidence;
     only then the anchor as creator and updater, and the server-derived
-    arguments recorded on `model.grant.provisioned` and the entry's
+    arguments recorded on `model.grant.provisioned` (the funding id, the
+    funding entry's digest and decision refs, the worksheet digest, the
+    delegation and the binding: amendment r6 item 4) and the entry's
     allocation set for `SdrAgent.Agents.Changes.GrantBundle`.
 
   It must be listed before `GrantBundle`, whose `before_action` reads the
@@ -32,6 +34,8 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
   @server_derived [
     :budget_worksheet_sha256,
     :funding_id,
+    :funding_entry_sha256,
+    :decision_refs,
     :delegation_id,
     :binding_id,
     :allocations
@@ -72,6 +76,11 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
           updated_by_id: snapshot.operator_user_id
         })
         |> Ash.Changeset.force_set_argument(:funding_id, Provisioning.name())
+        |> Ash.Changeset.force_set_argument(
+          :funding_entry_sha256,
+          Authority.funding_entry_sha256()
+        )
+        |> Ash.Changeset.force_set_argument(:decision_refs, Provisioning.decision_refs())
         |> Ash.Changeset.force_set_argument(:budget_worksheet_sha256, digest)
         |> Ash.Changeset.force_set_argument(:delegation_id, actor.id)
         |> Ash.Changeset.force_set_argument(:binding_id, snapshot.id)
