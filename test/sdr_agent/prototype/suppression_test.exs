@@ -62,7 +62,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
     no_capture!(ctx, delivery)
@@ -79,7 +79,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
     no_capture!(ctx, delivery)
@@ -101,7 +101,7 @@ defmodule SdrAgent.Prototype.SuppressionTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     refusal = capture_refusal(ctx, delivery)
     assert refusal =~ "prototype_suppression_unchecked"

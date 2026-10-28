@@ -339,7 +339,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     assert capture_refusal(ctx, delivery) =~ "prototype_approval_not_delegated"
     no_capture!(ctx, delivery)
@@ -356,7 +356,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     assert capture_refusal(ctx, delivery) =~ "prototype_binding_mismatch"
     no_capture!(ctx, delivery)
@@ -621,7 +621,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
 
     # The worker fails closed (its error boundary sanitizes the Ash error);
     # the capture boundary names the code on a direct record.
-    failed_closed!(fn -> deliver!() end)
+    failed_closed!(delivery, fn -> deliver!() end)
     no_capture!(ctx, delivery)
     assert capture_refusal(ctx, delivery) =~ "prototype_outside_window"
     no_capture!(ctx, delivery)

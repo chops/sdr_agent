@@ -168,30 +168,44 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
-  Runs `drain` (an inline delivery drain) that must fail closed. The worker
-  error boundary (`SdrAgent.Workers.ErrorBoundary`) turns an Ash error into
-  a sanitized job error, so a refused capture either raises a non-Ash
-  failure or drains with no success and at least one failure.
+  Runs `drain` (the inline delivery drain) for `delivery`, which must fail
+  closed at the capture (Codex f9a45a0c R3): the delivering process reached
+  `:before_capture` (`CaptureHook`), the drain reports no success and at
+  least one failure, and the delivery's own job (`DeliveryWorker`, this
+  operation) holds only the worker error boundary's sanitized Ash error
+  summary (`SdrAgent.Workers.ErrorBoundary`): no refusal code, recipient or
+  SQL. Nothing is rescued: any exception, an ExUnit failure included,
+  propagates.
   """
-  def failed_closed!(drain) do
-    outcome =
-      try do
-        {:returned, drain.()}
-      rescue
-        _error -> :raised
-      end
+  def failed_closed!(delivery, drain) do
+    OutreachFixtures.put_env!(:capture_faults, SdrAgent.PrototypeOutreachFixtures.CaptureHook)
+    counts = drain.()
 
-    case outcome do
-      :raised ->
-        :ok
+    assert match?(%{success: 0}, counts) and
+             Map.get(counts, :failure, 0) + Map.get(counts, :discard, 0) > 0,
+           "the delivery did not fail: #{inspect(counts)}"
 
-      {:returned, %{success: 0} = counts} ->
-        assert Map.get(counts, :failure, 0) + Map.get(counts, :discard, 0) > 0,
-               "the delivery did not fail: #{inspect(counts)}"
+    assert_received {SdrAgent.PrototypeOutreachFixtures.CaptureHook, :reached, :before_capture},
+                    "the worker never reached the capture"
 
-      other ->
-        flunk("the delivery did not fail closed: #{inspect(other)}")
+    %{rows: rows} =
+      SdrAgent.Repo.query!(
+        "SELECT state, errors::text FROM oban_jobs WHERE worker = $1 AND " <>
+          "args->>'delivery_operation_id' = $2",
+        ["SdrAgent.Outreach.DeliveryWorker", delivery.id]
+      )
+
+    assert [[state, errors]] = rows
+    assert state in ["retryable", "discarded"], "the delivery job is #{state}"
+
+    assert errors =~ ~r/Ash\.Error\.(Unknown|Invalid)/,
+           "no sanitized Ash error summary in the job: #{errors}"
+
+    for raw <- ["prototype_", "SELECT", "42P01", to_string(delivery.recipient_email)] do
+      refute errors =~ raw, "the job error carries raw detail"
     end
+
+    :ok
   end
 
   @doc """
