@@ -13,12 +13,13 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
   without the prototype authority (`:prototype_authority_compiled` unset,
   the production build) it never matches and has no `context/1`.
 
-  RED stage (D-237 S1 B2a, Codex 2416ce0b): DENY-ONLY. `match?/3` is false
-  for every request, so every action it guards is refused; the positive
-  `:setup` branch is held for its direct reached RED. `context/1` already
-  builds the marked context.
+  Stage (D-237 S1 B2a): the `:setup` positive branch is implemented. The
+  `:task_entry` marker still never matches (its positive branch comes with
+  `PrototypeDelegation :enter`), and neither does any other marker option.
   """
   use Ash.Policy.SimpleCheck
+
+  alias SdrAgent.Audit.Checks.KernelContext
 
   @compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
@@ -29,16 +30,23 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
     @markers %{setup: :sdr_prototype_setup, task_entry: :sdr_prototype_task_entry}
 
     @impl true
-    def match?(_actor, _authorizer, _opts), do: red(false)
+    def match?(actor, %{subject: %{context: context}} = authorizer, opts) when is_map(context) do
+      case opts[:marker] do
+        :setup ->
+          KernelContext.match?(actor, authorizer, []) and
+            Map.get(context, @markers.setup) == true
+
+        _not_yet_or_unknown ->
+          false
+      end
+    end
+
+    def match?(_actor, _authorizer, _opts), do: false
 
     @doc "The context a kernel request carries for `marker` (`:setup` or `:task_entry`)."
     @spec context(:setup | :task_entry) :: map()
     def context(marker) when is_map_key(@markers, marker),
-      do:
-        Map.put(SdrAgent.Audit.Checks.KernelContext.context(), Map.fetch!(@markers, marker), true)
-
-    # RED stub result, typed dynamic(); nothing sets the key (ruling e).
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+      do: Map.put(KernelContext.context(), Map.fetch!(@markers, marker), true)
   else
     @impl true
     def match?(_actor, _authorizer, _opts), do: false
