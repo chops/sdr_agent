@@ -24,8 +24,8 @@ defmodule SdrAgent.Sales do
     * D-237 prototype import (OPR, prototype runtime only) —
       `import_prototype_account/2`, `import_prototype_contact/2`,
       `import_prototype_lead/2` (guarded: every denial is audited). Sales
-      never calls Research: the import is coordinated above both domains by
-      `SdrAgent.Prototype.DossierImport`; in prototype runtime imported
+      never calls Research: the import is coordinated above both domains by the
+      prototype dossier import; in prototype runtime imported
       domains and addresses are real (`SdrAgent.Sales.Validations.DatasetDomain`),
       everywhere else the synthetic guard holds;
     * `advance_enrollment/3` (DLV, REC, SCH) — the S8 step advancement;
@@ -113,8 +113,8 @@ defmodule SdrAgent.Sales do
 
   @doc """
   OPR (D-237 prototype runtime): creates the account of one imported dossier
-  row (`name`, `domain`, `website_url`; `source: :dossier`). Called only by
-  `SdrAgent.Prototype.DossierImport`, inside its row transaction; a denial
+  row (`name`, `domain`, `website_url`; `source: :dossier`). Called only by the
+  above-domain prototype dossier import, inside its row transaction; a denial
   is audited.
   """
   def import_prototype_account(attrs, opts),

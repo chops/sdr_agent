@@ -74,7 +74,7 @@ defmodule SdrAgent.Sales.Account do
 
     create :import_prototype do
       description """
-      OPR (D-237 prototype runtime, via SdrAgent.Prototype.DossierImport):
+      OPR (D-237 prototype runtime, from the above-domain dossier import):
       create the account of one imported dossier row, `source: :dossier`.
       Size, industry and geography are not accepted: they stay nil.
       """

@@ -66,7 +66,7 @@ defmodule SdrAgent.Sales.Contact do
 
     create :import_prototype do
       description """
-      OPR (D-237 prototype runtime, via SdrAgent.Prototype.DossierImport):
+      OPR (D-237 prototype runtime, from the above-domain dossier import):
       create the person contact of one imported dossier row; the work
       address's host equals its account's domain.
       """

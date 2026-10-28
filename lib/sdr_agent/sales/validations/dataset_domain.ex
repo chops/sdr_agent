@@ -34,27 +34,27 @@ defmodule SdrAgent.Sales.Validations.DatasetDomain do
   @impl true
   def validate(changeset, opts, context) do
     if Prototype.runtime() == :prototype,
-      do: prototype(changeset, opts),
+      do: prototype(changeset, opts, context),
       else: Reserved.validate(changeset, opts, context)
   end
 
   @impl true
   def atomic(changeset, opts, context), do: validate(changeset, opts, context)
 
-  defp prototype(changeset, opts) do
+  defp prototype(changeset, opts, context) do
     case Ash.Changeset.get_attribute(changeset, opts[:attribute]) do
       nil -> :ok
-      value -> check(opts[:kind], to_string(value), changeset, opts[:attribute])
+      value -> check(opts[:kind], to_string(value), {changeset, context}, opts[:attribute])
     end
   end
 
-  defp check(:domain, value, _changeset, field),
+  defp check(:domain, value, _subject, field),
     do: if(host?(value), do: :ok, else: refuse(field))
 
-  defp check(:email, value, changeset, field) do
+  defp check(:email, value, subject, field) do
     with [local, host] <- String.split(value, "@"),
          true <- Regex.match?(@local, local) and host?(host),
-         true <- host == account_domain(changeset) do
+         true <- host == account_domain(subject) do
       :ok
     else
       _ -> refuse(field)
@@ -63,9 +63,11 @@ defmodule SdrAgent.Sales.Validations.DatasetDomain do
 
   defp host?(value), do: value == String.downcase(value) and Regex.match?(@host, value)
 
-  defp account_domain(changeset) do
+  # The account in the acting operator's tenant (the validation runs before
+  # SetTenant, so the tenant comes from the actor, as SetTenant derives it).
+  defp account_domain({changeset, context}) do
     with id when is_binary(id) <- Ash.Changeset.get_attribute(changeset, :account_id),
-         tenant_id when is_binary(tenant_id) <- Ash.Changeset.get_attribute(changeset, :tenant_id),
+         %{tenant_id: tenant_id} when is_binary(tenant_id) <- Map.get(context, :actor),
          {:ok, account} <- Ash.get(SdrAgent.Sales.Account, id, Kernel.opts(tenant_id)) do
       to_string(account.domain)
     else
