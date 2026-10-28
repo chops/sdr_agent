@@ -125,6 +125,40 @@ defmodule SdrAgent.Prototype.ResearchImportDenialTest do
     assert all_events() == events_before, "a missing or untrusted actor produced an audit append"
   end
 
+  test "a malformed actor envelope of a real tenant is a plain Forbidden: no append, no raise" do
+    fx = bound!()
+    tid = fx.tenant.id
+    user = &struct(SdrAgent.Accounts.User, Map.put(&1, :tenant_id, tid))
+    events_before = all_events()
+
+    envelopes = [
+      unknown_actor_type: %Actor{type: :not_a_type, id: "x", tenant_id: tid},
+      map_actor_id: %Actor{type: :agent_runtime, id: %{bad: :id}, tenant_id: tid},
+      invalid_utf8_actor_id: %Actor{type: :agent_runtime, id: <<0xFF, 0xFE>>, tenant_id: tid},
+      user_id_not_uuid: user.(%{id: "not-a-uuid", role: :admin}),
+      user_nil_id: user.(%{id: nil, role: :admin}),
+      user_map_id: user.(%{id: %{bad: :id}, role: :admin}),
+      user_unknown_role: user.(%{id: Ecto.UUID.generate(), role: :not_a_role}),
+      user_role_not_auditable: user.(%{id: Ecto.UUID.generate(), role: :agent_operator})
+    ]
+
+    for {name, _resource} <- @names, {envelope_name, actor} <- envelopes do
+      label = "#{name} with #{envelope_name}"
+
+      result =
+        try do
+          apply(Research, name, [sensitive_attrs(), [actor: actor]])
+        rescue
+          error -> {:raised, error.__struct__}
+        end
+
+      forbidden!(label, result)
+      refute inspect(result) =~ @sentinel, "#{label}: the refusal echoes the input"
+    end
+
+    assert all_events() == events_before, "a malformed actor envelope produced an audit append"
+  end
+
   test "malformed input stays Forbidden before any changeset" do
     fx = bound!()
     agent = Actor.system(:agent_runtime, fx.tenant.id)
