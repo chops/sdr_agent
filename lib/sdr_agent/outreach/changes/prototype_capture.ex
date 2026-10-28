@@ -20,9 +20,11 @@ defmodule SdrAgent.Outreach.Changes.PrototypeCapture do
 
     * the live binding (`SdrAgent.Prototype.check_live/0`) and the receipt
       in the binding's tenant (`prototype_binding_mismatch`);
-    * the receipt's operation and its approval, each read by id AND the
-      binding tenant, exist, and the approval's approver is the binding's
-      anchor (`prototype_approval_not_delegated`);
+    * the receipt's operation and its approval, each read through the
+      recording actor's policy-authorized path by id AND the binding tenant,
+      exist, and the approval's approver is the binding's anchor
+      (`prototype_approval_not_delegated`; a read that returns an error is
+      `prototype_capture_unchecked`);
     * the decision instant is inside the funding entry's
       `[starts_at, expires_at)` (`prototype_outside_window`);
     * the operation's immutable recipient is not suppressed by email or
@@ -81,7 +83,7 @@ defmodule SdrAgent.Outreach.Changes.PrototypeCapture do
 
     defp refusal(changeset, record, actor) do
       with {:ok, binding} <- live_binding(record),
-           {:ok, operation} <- delegated(record, binding),
+           {:ok, operation} <- delegated(record, binding, actor),
            :ok <- inside_window(),
            :ok <- unsuppressed(operation, actor) do
         if is_map(Ash.Changeset.get_argument(changeset, :prototype)),
@@ -102,24 +104,35 @@ defmodule SdrAgent.Outreach.Changes.PrototypeCapture do
       end
     end
 
-    defp delegated(record, binding) do
-      operation =
-        tenant_row(SdrAgent.Outreach.DeliveryOperation, record.delivery_operation_id, binding)
-
-      approval =
-        operation && tenant_row(SdrAgent.Outreach.Approval, operation.approval_id, binding)
-
-      if approval && approval.approver_id == binding.operator_user_id,
-        do: {:ok, operation},
-        else: {:refuse, :prototype_approval_not_delegated}
+    # Codex f9a45a0c R2: the receipt's operation and its approval are read
+    # through the policy-authorized path of the recording actor (DLV), by id
+    # AND the binding tenant; a missing or foreign row is not delegated, and a
+    # read that returns an error refuses as unchecked, never as a decision.
+    defp delegated(record, binding, actor) do
+      with {:ok, %{} = operation} <-
+             tenant_row(
+               SdrAgent.Outreach.DeliveryOperation,
+               record.delivery_operation_id,
+               binding,
+               actor
+             ),
+           {:ok, %{} = approval} <-
+             tenant_row(SdrAgent.Outreach.Approval, operation.approval_id, binding, actor),
+           true <- approval.approver_id == binding.operator_user_id do
+        {:ok, operation}
+      else
+        {:error, _unchecked} -> {:refuse, :prototype_capture_unchecked}
+        _not_delegated -> {:refuse, :prototype_approval_not_delegated}
+      end
     end
 
-    defp tenant_row(_resource, nil, _binding), do: nil
+    defp tenant_row(_resource, nil, _binding, _actor), do: {:ok, nil}
 
-    defp tenant_row(resource, id, binding) do
+    defp tenant_row(resource, id, binding, actor) do
       resource
+      |> Ash.Query.for_read(:read, %{}, actor: actor)
       |> Ash.Query.filter(id == ^id and tenant_id == ^binding.tenant_id)
-      |> Ash.read_one!(authorize?: false)
+      |> Ash.read_one()
     end
 
     defp inside_window do
