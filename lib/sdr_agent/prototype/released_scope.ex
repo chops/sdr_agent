@@ -49,16 +49,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     transaction, no savepoint); otherwise it opens one
     `SdrAgent.Audit.transaction/1`.
 
-    **β stage P (before B1's correction; staging proposal r1, Codex
-    c00a5524).** `original_basis/2` returns the original event's arguments
-    checked for the event's identity only (step 4). `run/3` itself verifies
-    them historically (steps 5-6) before any OUTPUT use. The raw
-    existing-release decision (`SdrAgent.Agents.Changes.ReleaseDecision`)
-    uses `original_basis/2` directly and so does NOT yet verify the
-    original historically: a self-consistent rewritten original can be
-    replayed there (no write, no event, no output read). This stage is not
-    landable; the correction moves steps 5-6 into `original_basis/2`, the
-    single trust owner.
+    **The single historical trust owner (B1; β delta r2 section 1; Codex
+    be36b5df).** Steps 4-6 are `original_basis/2`: it returns only a FULLY
+    historically verified original, and both consumers use it, `run/3`
+    (then current use and registration) and the raw existing-release
+    decision (`SdrAgent.Agents.Changes.ReleaseDecision`, which then only
+    compares the requested basis with it). An invalid original is never a
+    replay or a `ReleaseConflict` there.
 
     `verify/1` accepts a scope only in its own process, while registered,
     when it equals the registered one, inside a transaction whose id and
@@ -134,18 +131,24 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     @doc """
-    β stage P: the ORIGINAL arguments of `release`'s one
-    `model.result.released_unverified` event, checked for the event's
-    identity only (moduledoc step 4): `{:ok, %{basis:, basis_sha256:}}`,
-    `{:error, :basis_invalid}`, or a read error with its identity. NOT
-    historically verified here: `run/3` verifies them before any output
-    use; the raw existing-release decision does not yet (B1).
+    The ORIGINAL arguments of `release`'s one
+    `model.result.released_unverified` event, FULLY historically verified
+    (moduledoc steps 4-6): the event's identity, then the stored run, the
+    one original reservation authority and
+    `SdrAgent.Prototype.Basis.verify_historical/2`; never the current grant,
+    revision, status, funding, window or `verify_new/2`.
+    `{:ok, %{basis:, basis_sha256:}}`, `{:error, :basis_invalid}`, or a read
+    error with its identity.
     """
     @spec original_basis(struct(), struct()) ::
             {:ok, original()} | {:error, :basis_invalid} | {:error, term()}
     def original_basis(release, invocation) do
-      with {:ok, events} <- candidates(release, invocation) do
-        original(events, release, invocation)
+      with {:ok, events} <- candidates(release, invocation),
+           {:ok, original} <- original(events, release, invocation),
+           {:ok, run} <- stored_run(invocation),
+           {:ok, recorded} <- recorded(invocation),
+           :ok <- historical(original, release, invocation, run, recorded) do
+        {:ok, original}
       end
     end
 
@@ -196,9 +199,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            {:ok, invocation} <- caller_invocation(invocation_or_id, actor),
            {:ok, release} <- released_row(invocation),
            {:ok, original} <- original_basis(release, invocation),
-           {:ok, run} <- stored_run(invocation),
-           {:ok, recorded} <- recorded(invocation),
-           :ok <- historical(original, release, invocation, run, recorded),
            :ok <- current_use(original) do
         {:ok, invocation, release, original}
       end
