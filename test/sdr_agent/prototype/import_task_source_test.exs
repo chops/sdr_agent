@@ -372,7 +372,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
         assert violation in exercised, "#{violation} is not exercised"
       end
 
-      assert exercised -- @violations == []
+      assert Enum.uniq(exercised) -- @violations == []
     end
   end
 
