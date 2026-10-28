@@ -164,6 +164,16 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :delegation_id, :string
       argument :binding_id, :string
       argument :allocations, {:array, :map}
+      # Action-local, diagnostic only (Codex 9ce41abc). The wrapper,
+      # Agents.provision_prototype_grant/2, runs this action inside its own
+      # Audit.transaction by design, and the one reviewed transaction hook,
+      # ProvisionPrototype's around_transaction, only releases the
+      # process-owned provisioning scope and opens no transaction. This
+      # setting disables Ash's transaction-hook diagnostic for ALL
+      # before/around/after_transaction hooks on this action, not only that
+      # one: any future transaction hook here needs its own safety review
+      # and is not exempted by this line.
+      change set_context(%{warn_on_transaction_hooks?: false})
       change SdrAgent.Agents.Changes.ProvisionPrototype
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
