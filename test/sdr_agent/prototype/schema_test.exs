@@ -72,7 +72,7 @@ defmodule SdrAgent.Prototype.SchemaTest do
       _name ->
         %{rows: rows} =
           Repo.query!(
-            "SELECT tgname FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal",
+            "SELECT tgname FROM pg_trigger WHERE tgrelid = to_regclass($1::text) AND NOT tgisinternal",
             [table]
           )
 
