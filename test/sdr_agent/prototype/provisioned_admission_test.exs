@@ -474,11 +474,20 @@ defmodule SdrAgent.Prototype.ProvisionedAdmissionTest do
     test "a missing, malformed, extra-key or missing-key record refuses; charges kept", ctx do
       full = G.expected_authority(ctx.fx, ctx.invocation)
 
+      # unknown_key and wrong_type: GREEN-time controls (Codex review of
+      # d16e460: unknown keys fail through real validation; the revision
+      # must not be coerced, which would give grant_changed instead).
       cases = [
         missing: {:remove, :authority_unrecorded},
         malformed: {"not-a-map", :authority_unrecorded},
         extra_key: {Map.put(full, "extra", "x"), :authority_mismatch},
-        missing_key: {Map.delete(full, "purpose"), :authority_mismatch}
+        missing_key: {Map.delete(full, "purpose"), :authority_mismatch},
+        unknown_key:
+          {full |> Map.delete("purpose") |> Map.put("purpose_v2", full["purpose"]),
+           :authority_mismatch},
+        wrong_type:
+          {Map.put(full, "grant_revision", to_string(full["grant_revision"])),
+           :authority_mismatch}
       ]
 
       outcomes =
