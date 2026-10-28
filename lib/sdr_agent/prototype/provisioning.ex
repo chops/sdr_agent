@@ -126,7 +126,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc """
     The trust decision for one provisioned event: `{:one, grant_id, event}`
-    only when its arguments are a map with EXACTLY the recorded keys
+    only when it is a `model.grant.provisioned` event of this binding's
+    tenant (checked first, before any DB access) whose arguments are a map
+    with EXACTLY the recorded keys
     (`funding_id`, `funding_entry_sha256`, `decision_refs`,
     `budget_worksheet_sha256`, `delegation_id`, `binding_id`), each strictly
     typed and equal to this binding's commitments (the compiled funding
@@ -136,10 +138,18 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     `:untrusted` (R3). It never raises on the event's shape.
     """
     @spec classify(Binding.t(), struct()) :: {:one, Ecto.UUID.t(), struct()} | :untrusted
+    # Header guards first (Codex 4ebbce03): the event type and this
+    # binding's tenant are part of the head, so a copy of a genuine event
+    # with another type or tenant is untrusted before any DB access.
     def classify(
-          %Binding{} = snapshot,
-          %AuditEvent{payload: %{"arguments" => %{} = arguments}} = event
-        ) do
+          %Binding{tenant_id: tenant_id} = snapshot,
+          %AuditEvent{
+            event_type: @event_type,
+            tenant_id: tenant_id,
+            payload: %{"arguments" => %{} = arguments}
+          } = event
+        )
+        when is_binary(tenant_id) do
       with true <- Enum.sort(Map.keys(arguments)) == @argument_keys,
            true <- original?(snapshot, event, arguments),
            {:ok, grant_id} <- Ecto.UUID.cast(event.subject_id),
