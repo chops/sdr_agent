@@ -14,7 +14,11 @@ defmodule SdrAgent.Prototype.AdmissionTest do
   - **The authority travels only in the admission context.**
     `AdmissionContext` carries `prototype_authority` from `Admission.admit/5`
     to `:reserve`'s `AdmissionCharge`, nil when none was admitted, and a
-    caller-supplied `prototype_authority` on `:reserve` is Forbidden.
+    caller-supplied `prototype_authority` on `:reserve` is Forbidden, and on
+    the domain entry path (`Agents.reserve_model_invocation/3`; ClaudeCLI
+    with atom or string keys, and the Fake) it is refused before any
+    reservation, reservation event or budget change (Codex 339c8e8d,
+    ruling 3: refused, not ignored).
 
   The prototype-runtime cases (scope, witness mode, binding, proof run and
   the recorded 14 keys) follow once S1's runtime fixtures are GREEN.
@@ -50,6 +54,12 @@ defmodule SdrAgent.Prototype.AdmissionTest do
   rescue
     error -> {:raised, error.__struct__}
   end
+
+  # The shape of a reservation result, without its content.
+  defp outcome({:error, %Ash.Error.Forbidden{}}), do: :forbidden
+  defp outcome({:error, %{__struct__: error}}), do: {:error, error}
+  defp outcome({:ok, %ModelInvocation{provider: provider}}), do: {:reserved, provider}
+  defp outcome(other), do: {:other, other}
 
   defp charge(extra) do
     %{
@@ -140,6 +150,47 @@ defmodule SdrAgent.Prototype.AdmissionTest do
 
       assert match?({:error, %Ash.Error.Forbidden{}}, result),
              "a caller-supplied prototype_authority was not Forbidden: #{inspect(result)}"
+    end
+
+    test "a caller-supplied prototype_authority is refused on the domain path before any effect" do
+      # Codex 339c8e8d ruling 3: refused (not ignored) before any
+      # reservation, reservation event or charge, for ClaudeCLI and the
+      # Fake, atom- or string-keyed.
+      tenant = bootstrap!()
+      AgentsFixtures.grant!(tenant)
+      %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
+      n = System.unique_integer([:positive])
+
+      cases = [
+        claude_atom:
+          Map.put(AgentsFixtures.claude_attrs("forged-#{n}-1"), :prototype_authority, authority()),
+        claude_string:
+          "forged-#{n}-2"
+          |> AgentsFixtures.claude_attrs()
+          |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+          |> Map.put("prototype_authority", authority()),
+        fake_atom:
+          Map.put(AgentsFixtures.model_attrs("forged-#{n}-3"), :prototype_authority, authority())
+      ]
+
+      # Every case runs before any assertion, so each one's outcome is evidence.
+      outcomes =
+        for {label, attrs} <- cases do
+          result =
+            AdmissionFixtures.admitting(fn ->
+              Agents.reserve_model_invocation(run, attrs, actor: agent)
+            end)
+
+          {label, outcome(result)}
+        end
+
+      assert Enum.all?(outcomes, fn {_label, outcome} -> outcome == :forbidden end),
+             "not every caller-supplied prototype_authority was refused: #{inspect(outcomes)}"
+
+      assert {:ok, []} = Agents.list_model_invocations(run.id, actor: agent)
+      assert events_of_type(tenant, "model.invocation.reserved") == []
+      {:ok, reread} = Agents.get_run(run.id, actor: agent)
+      assert reread.budget.model_calls_reserved == run.budget.model_calls_reserved
     end
   end
 end
