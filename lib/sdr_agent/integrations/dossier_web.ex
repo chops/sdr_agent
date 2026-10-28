@@ -8,15 +8,9 @@ defmodule SdrAgent.Integrations.DossierWeb do
   `SdrAgent.Research.read_dossier_sources/4`. Every call returns
   `{:error, :prototype_scoped_read_required}`; it never returns content and
   never touches the network.
-
-  RED stage (D-237 S3): `fetch/1` returns `{:error, :not_implemented}`.
   """
   @behaviour SdrAgent.Integrations.WebFetch
 
   @impl true
-  def fetch(_url), do: red({:error, :not_implemented})
-
-  # RED stub result, typed dynamic() so success clauses of callers compile
-  # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+  def fetch(_url), do: {:error, :prototype_scoped_read_required}
 end
