@@ -356,8 +356,8 @@ defmodule SdrAgent.Prototype.DossierImport do
 
   ## Payloads: canonical bytes, the scoped store
 
-  defp claims_bytes(row), do: Canonical.encode(%{"claims" => row.plan.claims})
-  defp notes_bytes(row), do: Canonical.encode(row.plan.notes)
+  defp claims_bytes(row), do: Canonical.encode!(%{"claims" => row.plan.claims})
+  defp notes_bytes(row), do: Canonical.encode!(row.plan.notes)
   defp digest(bytes), do: :crypto.hash(:sha256, bytes)
 
   defp store(bytes, purpose, actor) do
