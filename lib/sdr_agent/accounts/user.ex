@@ -44,7 +44,12 @@ defmodule SdrAgent.Accounts.User do
     * in D-237 prototype runtime, `:create_user`, `:seed`, `:change_role`,
       `:change_status` and `:set_password` are refused for every actor
       (`SdrAgent.Prototype.Checks.PrototypeRuntime`), ahead of the
-      AshAuthentication bypass.
+      AshAuthentication bypass;
+    * the `:agent_operator` role never moves:
+      `SdrAgent.Accounts.Validations.AnchorRoleImmutable`, after
+      authorization, refuses `:create_user` and `:seed` with that role,
+      `:change_role` from or to it, and `:set_password` on the anchor
+      (the SQL CHECK stays as defence in depth).
 
   Auditors (AUR) mutate nothing, including their own password. Reads: any
   user reads itself; ADM and AUR read all users, but AUR sees only
@@ -182,6 +187,8 @@ defmodule SdrAgent.Accounts.User do
     create :create_user do
       description "ADM: create an operator with a role and an initial password."
       accept [:email, :display_name, :role]
+      # D-237 IF-3 (Codex 20d0d5fb): agent_operator never moves; after authorization.
+      validate SdrAgent.Accounts.Validations.AnchorRoleImmutable, before_action?: true
 
       argument :password, :string,
         allow_nil?: false,
@@ -198,6 +205,8 @@ defmodule SdrAgent.Accounts.User do
     create :seed do
       description "SEED (dev/test only): create an operator with a fixture id."
       accept [:id, :email, :display_name, :role]
+      # D-237 IF-3 (Codex 20d0d5fb): agent_operator never moves; after authorization.
+      validate SdrAgent.Accounts.Validations.AnchorRoleImmutable, before_action?: true
 
       argument :password, :string,
         allow_nil?: false,
@@ -265,6 +274,8 @@ defmodule SdrAgent.Accounts.User do
       description "ADM: change a user's role; the last active admin keeps the admin role."
       require_atomic? false
       accept [:role]
+      # D-237 IF-3 (Codex 20d0d5fb): agent_operator never moves; after authorization.
+      validate SdrAgent.Accounts.Validations.AnchorRoleImmutable, before_action?: true
       change SdrAgent.Accounts.Changes.KeepAnActiveAdmin
 
       change {AppendEvent,
@@ -313,6 +324,8 @@ defmodule SdrAgent.Accounts.User do
       description "ADM: set another user's password (the only way an auditor's changes)."
       require_atomic? false
       accept []
+      # D-237 IF-3 (Codex 20d0d5fb): agent_operator never moves; after authorization.
+      validate SdrAgent.Accounts.Validations.AnchorRoleImmutable, before_action?: true
 
       argument :password, :string,
         sensitive?: true,
