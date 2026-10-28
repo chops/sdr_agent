@@ -18,12 +18,14 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
     an otherwise-valid sibling, and accepted when same-tenant. Under the
     common error rule (Codex 6d1ead6d) a returned read error of that check
     keeps its own identity and is never relabelled "is not a row of this
-    tenant".
+    tenant": one case per edge and error, each selecting exactly that edge's
+    read through the test-build ImportTenant seam (Codex 683a74e6).
   - **D6, the provenance digest:** a required `seed_provenance_sha256` of
     exactly 64 lowercase hex characters at EACH action (never trimmed or
-    coerced), recorded on that action's one authoritative creation event,
-    with the delegation as the actor.
-  - **Policy:** forged, stale, foreign and non-operator callers, and
+    coerced; pinned per action), recorded on that action's one
+    authoritative creation event, with the delegation as the actor.
+  - **Policy:** forged, foreign and non-operator callers, a previously
+    resolved operator that no longer resolves (live binding drift), and
     ordinary runtime, are refused; the seeder's and an admin's ordinary
     actions are unchanged; the operator gains no other Sales permission.
 
@@ -36,8 +38,8 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
   and the D6 events fail first on that stub's `Forbidden`, and their later
   assertions are unexecuted; the reserved-sender guard is reached
   behavioural RED (the declaration has no sender guard); the D5
-  returned-error cases also need an injection seam for the reference read
-  that is NOT yet scoped (a prerequisite, requested separately). A missing
+  returned-error cases fail first on the stub too: their selected read is
+  never reached while the action is refused. A missing
   step sequence and a missing campaign ICP are already refused at the input
   (required attributes), as are the missing, nil and non-string digests and
   the server-owned fields (controls); the deny cases and the ordinary
@@ -185,6 +187,99 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
 
   defp leaves(%{errors: errors}) when is_list(errors), do: Enum.flat_map(errors, &leaves/1)
   defp leaves(error), do: [error]
+
+  # The injected leaf and its returned class, per kind.
+  defp injection(:forbidden, referenced) do
+    leaf = ForbiddenField.exception(resource: referenced, field: :s3_probe)
+    {leaf, Ash.Error.Forbidden.exception(errors: [leaf])}
+  end
+
+  defp injection(:unknown, _referenced) do
+    leaf = UnknownError.exception(error: "s3 probe: reference read")
+    {leaf, Ash.Error.Unknown.exception(errors: [leaf])}
+  end
+
+  # One edge's call with valid same-tenant prerequisites:
+  # {resource, field, referenced resource, referenced id, attrs}.
+  defp reference_edge(ctx, :step_sequence) do
+    sequence = seeder_sequence!(ctx)
+    {SequenceStep, :sequence_id, Sequence, sequence.id, step_attrs(sequence.id)}
+  end
+
+  defp reference_edge(ctx, :campaign_icp) do
+    {icp, sequence} = {seeder_icp!(ctx), seeder_sequence!(ctx)}
+    {Campaign, :icp_definition_id, IcpDefinition, icp.id, campaign_attrs(icp.id, sequence.id)}
+  end
+
+  defp reference_edge(ctx, :campaign_sequence) do
+    {icp, sequence} = {seeder_icp!(ctx), seeder_sequence!(ctx)}
+    {Campaign, :sequence_id, Sequence, sequence.id, campaign_attrs(icp.id, sequence.id)}
+  end
+
+  # The campaign's sequence read follows its ICP read, which succeeded.
+  defp sibling_succeeded?(:campaign_sequence, reads, ref) do
+    {before, _rest} = Enum.split_while(reads, &(&1 != {:reached, ref}))
+    {:select, "icp_definitions", :ok} in before
+  end
+
+  defp sibling_succeeded?(_edge, _reads, _ref), do: true
+
+  # Puts the ImportTenant scope for `fun`, then restores the prior one (or
+  # its absence) on every exit.
+  defp with_fault(scope, fun) do
+    key = {ImportTenant, :read_fault}
+    previous = Process.get(key, :__absent__)
+    Process.put(key, scope)
+
+    try do
+      fun.()
+    after
+      if previous == :__absent__, do: Process.delete(key), else: Process.put(key, previous)
+    end
+  end
+
+  # This process's reads while `fun` runs, as {verb, table, result} with the
+  # table from the reviewed Sales set only, interleaved with the seam's reach
+  # messages; and `fun`'s value. Nothing else of an event is kept.
+  defp reads_during(fun) do
+    parent = self()
+    handler = "s3-b-reads-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:sdr_agent, :repo, :query],
+      fn _event, _measurements, metadata, _config ->
+        if self() == parent, do: send(parent, {:s3_b_read, read_label(metadata)})
+      end,
+      nil
+    )
+
+    value =
+      try do
+        fun.()
+      after
+        :telemetry.detach(handler)
+      end
+
+    {drain_reads([]), value}
+  end
+
+  defp drain_reads(acc) do
+    receive do
+      {:s3_b_read, label} -> drain_reads([label | acc])
+      {ImportTenant, :reached, ref} -> drain_reads([{:reached, ref} | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  @sales_tables ~w(icp_definitions sequences sequence_steps campaigns)
+
+  defp read_label(%{query: "SELECT" <> _rest, source: source, result: {:ok, _result}})
+       when source in @sales_tables,
+       do: {:select, source, :ok}
+
+  defp read_label(_metadata), do: :other
 
   # Every action with valid same-tenant prerequisites.
   defp valid_calls(ctx) do
@@ -365,49 +460,50 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
       assert survivors(ctx) == before
     end
 
-    # Codex 6d1ead6d and 66449b01: a returned read error of the reference
-    # check is not evidence of absence. Its injection needs a test-build
-    # seam on ImportTenant's read, `{ImportTenant, :read_fault}`, which is
-    # NOT yet scoped: until it is, the key below is ignored (a prerequisite).
-    test "a returned read error of a reference check keeps its identity, never 'not a row of this tenant'",
-         ctx do
-      icp = seeder_icp!(ctx)
-      sequence = seeder_sequence!(ctx)
-
-      edges = [
-        {SequenceStep, :sequence_id, Sequence, step_attrs(sequence.id)},
-        {Campaign, :icp_definition_id, IcpDefinition, campaign_attrs(icp.id, sequence.id)},
-        {Campaign, :sequence_id, Sequence, campaign_attrs(icp.id, sequence.id)}
-      ]
-
-      for {resource, field, referenced, attrs} <- edges,
-          injected <- [
-            ForbiddenField.exception(resource: referenced, field: :s3_probe),
-            UnknownError.exception(error: "s3 probe: reference read")
-          ] do
-        class =
-          if match?(%ForbiddenField{}, injected),
-            do: Ash.Error.Forbidden.exception(errors: [injected]),
-            else: Ash.Error.Unknown.exception(errors: [injected])
-
+    # Codex 6d1ead6d, 66449b01 and 683a74e6: a returned read error of a
+    # reference check is not evidence of absence. Each case selects exactly
+    # one edge (the test-build ImportTenant seam's `%{field:, resource:,
+    # id:, tenant_id:}` selector, with a fresh ref; the prior scope is saved
+    # and restored), asserts that read is reached once (the campaign's
+    # sequence read after its ICP read succeeded), that nothing survives,
+    # and that the injected leaf keeps its identity. While the B actions stay
+    # deny-only, the stub refuses before ImportTenant runs.
+    for {edge, kind} <- [
+          step_sequence: :forbidden,
+          step_sequence: :unknown,
+          campaign_icp: :forbidden,
+          campaign_icp: :unknown,
+          campaign_sequence: :forbidden,
+          campaign_sequence: :unknown
+        ] do
+      test "#{edge}, returned #{kind}: reached once at that read, never relabelled as absence",
+           ctx do
+        {resource, field, referenced, id, attrs} = reference_edge(ctx, unquote(edge))
+        {injected, class} = injection(unquote(kind), referenced)
+        ref = make_ref()
         before = survivors(ctx)
-        Process.put({ImportTenant, :read_fault}, {:error, class})
+        selector = %{field: field, resource: referenced, id: id, tenant_id: ctx.tenant.id}
 
-        result =
-          try do
-            seed_prototype(resource, attrs, ctx.actor)
-          after
-            Process.delete({ImportTenant, :read_fault})
-          end
+        {reads, result} =
+          with_fault({selector, ref, {:error, class}}, fn ->
+            reads_during(fn -> seed_prototype(resource, attrs, ctx.actor) end)
+          end)
 
-        assert match?({:error, _}, result) and injected in leaves(elem(result, 1)),
-               "#{inspect(resource)}.#{field}: the injected #{inspect(injected.__struct__)} " <>
-                 "is not in #{inspect(outcome(result))}"
+        assert {:reached, ref} in reads,
+               "#{inspect(resource)}.#{field}: the read was not reached; #{inspect(outcome(result))}"
+
+        assert Enum.count(reads, &(&1 == {:reached, ref})) == 1
+
+        assert sibling_succeeded?(unquote(edge), reads, ref),
+               "the earlier sibling read did not succeed"
+
+        assert survivors(ctx) == before
 
         refute refused_on?(result, field),
                "#{inspect(resource)}.#{field}: a read error was relabelled as absence"
 
-        assert survivors(ctx) == before
+        assert match?({:error, _}, result) and injected in leaves(elem(result, 1)),
+               "#{inspect(resource)}.#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
   end
@@ -434,32 +530,41 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
       assert survivors(ctx) == before
     end
 
-    test "a wrong-shape digest is refused at each action, never trimmed or coerced, writing nothing",
-         ctx do
-      calls = valid_calls(ctx)
-      before = survivors(ctx)
+    # Pinned at EACH action (Codex 683a74e6): the non-string values first
+    # (refused at the input today), then every wrong-shape string, never
+    # trimmed or coerced (GREEN: trim? false and \A[0-9a-f]{64}\z).
+    for resource <- [IcpDefinition, Sequence, SequenceStep, Campaign] do
+      test "#{inspect(resource)}: a non-string or wrong-shape digest is refused, never trimmed or coerced, writing nothing",
+           ctx do
+        resource = unquote(resource)
+        {^resource, attrs} = List.keyfind(valid_calls(ctx), resource, 0)
+        before = survivors(ctx)
 
-      shapes = [
-        short_63: String.slice(@digest, 0, 63),
-        long_65: @digest <> "0",
-        uppercase: String.upcase(@digest),
-        non_hex: String.duplicate("g", 64),
-        leading_space: " " <> @digest,
-        trailing_space: @digest <> " ",
-        trailing_newline: @digest <> "\n",
-        prefixed: "0x" <> String.slice(@digest, 0, 62),
-        half: String.slice(@digest, 0, 32)
-      ]
+        shapes = [
+          integer: 123,
+          list: [@digest],
+          short_63: String.slice(@digest, 0, 63),
+          long_65: @digest <> "0",
+          uppercase: String.upcase(@digest),
+          non_hex: String.duplicate("g", 64),
+          leading_space: " " <> @digest,
+          trailing_space: @digest <> " ",
+          trailing_newline: @digest <> "\n",
+          leading_newline: "\n" <> @digest,
+          prefixed: "0x" <> String.slice(@digest, 0, 62),
+          half: String.slice(@digest, 0, 32)
+        ]
 
-      for {resource, attrs} <- calls, {label, digest} <- shapes do
-        result =
-          seed_prototype(resource, Map.put(attrs, :seed_provenance_sha256, digest), ctx.actor)
+        for {label, digest} <- shapes do
+          result =
+            seed_prototype(resource, Map.put(attrs, :seed_provenance_sha256, digest), ctx.actor)
 
-        assert refused_on?(result, :seed_provenance_sha256),
-               "#{inspect(resource)} #{label}: #{inspect(outcome(result))}"
+          assert refused_on?(result, :seed_provenance_sha256),
+                 "#{inspect(resource)} #{label}: #{inspect(outcome(result))}"
+        end
+
+        assert survivors(ctx) == before
       end
-
-      assert survivors(ctx) == before
     end
 
     test "each action records exactly one creation event with the validated digest, as the delegation",
@@ -490,7 +595,28 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
   end
 
   describe "policy" do
-    test "forged, stale, foreign and non-operator callers are Forbidden on all four, writing nothing",
+    test "a previously resolved operator that no longer resolves (live binding drift) is Forbidden on all four, writing nothing",
+         ctx do
+      calls = valid_calls(ctx)
+      before = survivors(ctx)
+      assert SdrAgent.Prototype.operator_actor(ctx.actor.id) == {:ok, ctx.actor}
+      :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1})
+
+      try do
+        refute SdrAgent.Prototype.operator_actor(ctx.actor.id) == {:ok, ctx.actor}
+
+        for {resource, attrs} <- calls do
+          result = seed_prototype(resource, attrs, ctx.actor)
+          assert forbidden?(result), "stale on #{inspect(resource)}: #{inspect(outcome(result))}"
+        end
+      after
+        :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
+      end
+
+      assert survivors(ctx) == before
+    end
+
+    test "forged, foreign and non-operator callers are Forbidden on all four, writing nothing",
          ctx do
       calls = valid_calls(ctx)
       before = survivors(ctx)
