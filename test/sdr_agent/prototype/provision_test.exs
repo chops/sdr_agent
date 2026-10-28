@@ -101,7 +101,10 @@ defmodule SdrAgent.Prototype.ProvisionTest do
       ]
 
       for {name, map} <- cases do
-        assert check(root, map) == {:error, :budget_unbounded}, "#{name} was not budget_unbounded"
+        result = check(root, map)
+
+        assert result == {:error, :budget_unbounded},
+               "#{name}: expected {:error, :budget_unbounded}, got #{inspect(result)}"
       end
     end
 
@@ -123,7 +126,10 @@ defmodule SdrAgent.Prototype.ProvisionTest do
 
       for {name, evidence} <- bad_evidence do
         map = %{base | "routes" => [%{first | "evidence" => evidence} | rest]}
-        assert check(root, map) == {:error, :budget_unbounded}, "#{name} evidence was accepted"
+        result = check(root, map)
+
+        assert result == {:error, :budget_unbounded},
+               "#{name} evidence: expected {:error, :budget_unbounded}, got #{inspect(result)}"
       end
     end
 
