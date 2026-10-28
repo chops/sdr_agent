@@ -14,10 +14,29 @@ defmodule SdrAgent.Prototype.Session do
   plugins, peer or stager, so jobs are only inserted inside the action's
   transaction and execute only in serve.
 
+  A call made inside an already-open transaction
+  (`SdrAgent.Repo.in_transaction?/0`) is refused first, in both builds,
+  with `:binding_mismatch` (the code of `enter_session/2`'s own nesting
+  refusal). This happens before the agent and correlation checks, before
+  the boot check and before any query, so the caller's transaction, the
+  fixed runtime and the delegations are untouched (Codex f3036a14 G-R6).
+  Nothing here catches a rollback throw. The public
+  `SdrAgent.Prototype.BootCheck.check/1` and `verify!/0` remain unsupported
+  inside a foreign transaction, and every task must enter through
+  `enter/1`.
+
   It returns `{:ok, %{actor: SdrAgent.Actor.t(), delegation_id: uuid,
-  binding: SdrAgent.Prototype.Binding.t()}}` or `{:error, code}` with a
-  code of `SdrAgent.Prototype.SafeLog.reasons(:setup)`; `refuse/1` prints
-  that code through `SafeLog.say/2` and exits with status 2.
+  binding: SdrAgent.Prototype.Binding.t()}}` or `{:error, code}`.
+  - With the prototype authority, `code` is one of: `:binding_mismatch`, a
+    boot refusal code (`SdrAgent.Prototype.BootCheck.reasons/0`),
+    `:invalid_agent`, `:session_unset`, `:invalid_correlation`,
+    `:not_prototype_runtime` or `:delegation_not_found`.
+  - In a production build it is `:binding_mismatch`, a boot refusal code or
+    `:not_prototype_runtime`.
+
+  These codes are not all in every task's `SdrAgent.Prototype.SafeLog`
+  reason set. Printing them is the calling task's job; no such mapping
+  exists here.
 
   Stage (D-237 S1 G): `enter/1` runs the boot check, then the session
   entry, in that order; the insert-only Oban of `enqueue?: true` is not yet
@@ -32,8 +51,18 @@ defmodule SdrAgent.Prototype.Session do
 
   @doc "Enters a task process; see the moduledoc."
   @spec enter(keyword()) :: {:ok, map()} | {:error, atom()}
+  def enter(opts) when is_list(opts) do
+    with :ok <- not_nested(), do: entered(opts)
+  end
+
+  # Codex f3036a14 G-R6: an open caller transaction is refused before the
+  # build branch, the boot check or any query, with enter_session/2's own
+  # nesting code. Repo.in_transaction?/0 issues no query.
+  defp not_nested,
+    do: if(SdrAgent.Repo.in_transaction?(), do: {:error, :binding_mismatch}, else: :ok)
+
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
-    def enter(opts) when is_list(opts) do
+    defp entered(opts) do
       with :ok <- boot(),
            {:ok, agent} <- agent(Keyword.get(opts, :agent)),
            {:ok, correlation} <- correlation(Keyword.get(opts, :session_correlation)),
@@ -53,7 +82,7 @@ defmodule SdrAgent.Prototype.Session do
   else
     # No prototype authority in this build: the boot check runs, and the
     # entry then refuses.
-    def enter(opts) when is_list(opts) do
+    defp entered(_opts) do
       with :ok <- boot(), do: {:error, :not_prototype_runtime}
     end
   end
