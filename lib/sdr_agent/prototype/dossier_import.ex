@@ -79,6 +79,8 @@ defmodule SdrAgent.Prototype.DossierImport do
   alias SdrAgent.Sales.Account
   alias SdrAgent.Sales.Contact
 
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+
   @source_types %{
     "company_site" => :company_site,
     "person_authored" => :person_authored,
@@ -152,9 +154,18 @@ defmodule SdrAgent.Prototype.DossierImport do
 
   @doc "Imports one row in one transaction; see the moduledoc."
   @spec import_row(map(), SdrAgent.Actor.t()) :: {:ok, atom(), map()} | {:error, atom()}
-  def import_row(row, actor) do
+  def import_row(row, actor), do: run_row(row, actor, [])
+
+  if @test_seams do
+    @doc false
+    # Test-seam builds only: `after_sales:`, a 0-arity function, runs inside
+    # the row's transaction between the Sales and the Research writes.
+    def import_row(row, actor, seams) when is_list(seams), do: run_row(row, actor, seams)
+  end
+
+  defp run_row(row, actor, seams) do
     with :ok <- live(actor) do
-      fn -> write_row(row, actor) end
+      fn -> write_row(row, actor, seams) end
       |> Audit.transaction()
       |> case do
         {:ok, {status, ids}} -> {:ok, status, ids}
@@ -271,18 +282,18 @@ defmodule SdrAgent.Prototype.DossierImport do
 
   ## One row (inside its transaction)
 
-  defp write_row(row, actor) do
+  defp write_row(row, actor, seams) do
     lock_binding!(actor)
     entry = existing(row, actor)
 
     cond do
-      entry == nil -> new_row(row, actor)
+      entry == nil -> new_row(row, actor, seams)
       identical?(entry, row) -> {:replay, %{entry_id: entry.id, lead_id: entry.lead_id}}
       true -> Repo.rollback(:dossier_conflict)
     end
   end
 
-  defp new_row(%{plan: plan} = row, actor) do
+  defp new_row(%{plan: plan} = row, actor, seams) do
     with :ok <- no_conflict(plan, actor),
          :ok <- cap_recheck(actor),
          {:ok, claims} <- store(claims_bytes(row), :dossier_claims, actor),
@@ -297,6 +308,7 @@ defmodule SdrAgent.Prototype.DossierImport do
                actor: actor
              )
            ),
+         :ok <- seam(seams, :after_sales),
          {:ok, entry} <-
            coded(
              Research.record_dossier_entry(
@@ -352,6 +364,16 @@ defmodule SdrAgent.Prototype.DossierImport do
         error -> {:halt, error}
       end
     end)
+  end
+
+  # A test seam of `import_row/3` (test builds only); none in production.
+  defp seam(seams, name) do
+    case Keyword.get(seams, name) do
+      fun when is_function(fun, 0) -> fun.()
+      nil -> :ok
+    end
+
+    :ok
   end
 
   ## Payloads: canonical bytes, the scoped store
