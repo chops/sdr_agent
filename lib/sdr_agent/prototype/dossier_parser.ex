@@ -921,8 +921,8 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
   @doc false
   def keys(map, keys, segs) when is_map(map), do: BoundedJson.exact_keys(map, keys, segs)
 
-  def keys(nil, _keys, segs), do: {:error, {path(segs), :null}}
-  def keys(_other, _keys, segs), do: {:error, {path(segs), :type}}
+  def keys(nil, _keys, segs), do: {:error, {BoundedJson.format_path(segs), :null}}
+  def keys(_other, _keys, segs), do: {:error, {BoundedJson.format_path(segs), :type}}
 
   @doc false
   def text(value, p, min, max, multiline \\ false)
@@ -1076,16 +1076,6 @@ defmodule SdrAgent.Prototype.DossierParser.Rules do
 
   @doc false
   def company_host?(host, domain), do: host == domain or String.ends_with?(host, "." <> domain)
-
-  @doc false
-  # A schema path string from its segments, in the BoundedJson format.
-  def path(segments) do
-    Enum.reduce(segments, "", fn
-      i, acc when is_integer(i) -> "#{acc}[#{i}]"
-      key, "" -> key
-      key, acc -> "#{acc}.#{key}"
-    end)
-  end
 
   # The segments of a path string built by this module.
   defp segments(p) do
