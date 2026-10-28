@@ -187,6 +187,14 @@ defmodule SdrAgent.Agents.ModelInvocation do
       authorize_if {Checks.ActorType, types: [:reconciler, :auditor_cli]}
       authorize_if SdrAgent.Audit.Checks.IntegrityRead
       authorize_if SdrAgent.Agents.Checks.CalibrationRead
+
+      # D-237 b2c beta (mechanism note r3 A; Codex 3122b0d4): a verified
+      # released_unverified read scope authorizes exactly its own row; compiled
+      # only with the prototype authority (no production reference).
+      if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+        authorize_if SdrAgent.Prototype.Checks.VerifiedReleasedRead
+      end
+
       forbid_unless SdrAgent.Agents.Checks.ReleasedOutputRead
       authorize_if expr(exists(result_release, disposition == :released))
     end

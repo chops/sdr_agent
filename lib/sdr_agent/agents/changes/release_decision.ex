@@ -26,9 +26,16 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        included, matches) they are read with no lock clause; a refused
        context writes nothing.
        When the invocation already has a release, nothing else is checked:
-       the upsert returns that row and step 4 compares it. D-237 b2c α: a
-       `:released_unverified` request on an existing release is refused on
-       `:basis` (deny-only until the comparison with the ORIGINAL event).
+       the upsert returns that row and step 4 compares it. D-237 b2c β: a
+       `:released_unverified` request on an existing `released_unverified`
+       release is first compared with the ORIGINAL event's arguments
+       (`SdrAgent.Prototype.ReleasedScope.original_basis/2`,
+       `SdrAgent.Prototype.Basis.compare_existing/2`): identical is a
+       replay, a valid different basis a `ReleaseConflict`, anything
+       invalid is refused on `:basis` ("must be a valid d237-basis/1 with
+       its digest"); never the current grant or window. β stage P (not
+       landable): that original is checked for its event identity only, not
+       yet historically (B1).
     3. Per disposition (any validated link's projection and method are
        copied onto the release, whatever the disposition):
        * D-237 b2c α, a NEW `:released_unverified` in the prototype gate's
@@ -144,11 +151,12 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
       case existing(invocation) do
         # The upsert returns the existing row; `check_replay/2` compares it.
-        # D-237 α: a released_unverified request on an existing release is
-        # refused (deny-only until the historical comparison, b2c β).
+        # D-237 b2c β: a released_unverified request on an existing
+        # released_unverified release is first compared with its ORIGINAL
+        # event (`unverified_existing/2`).
         :exists ->
           changeset
-          |> unverified_existing()
+          |> unverified_existing(invocation)
           |> provenance(link)
 
         # Every disposition with a validated link records the link's
@@ -256,12 +264,80 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
     defp unverified_new(changeset, _invocation, _mode), do: changeset
 
-    # Deny-only until b2c β's comparison with the ORIGINAL event: an existing
-    # release is never re-derived from the current grant or window.
-    defp unverified_existing(changeset) do
+    # D-237 b2c β (packet r1 section 3.5, delta r2 section 1): a
+    # released_unverified request on an EXISTING release (reached only in
+    # the gate's own context, `unverified/2`). An existing release that is
+    # not released_unverified keeps `check_replay/2`'s ReleaseConflict. For
+    # a released_unverified one the request is compared with the ORIGINAL
+    # event's arguments (`ReleasedScope.original_basis/2`), never re-derived
+    # from the current grant or window and never time-forced: identical is
+    # a replay (the upsert returns the row, no event), a valid different
+    # basis is a ReleaseConflict, anything invalid is refused on :basis; a
+    # read error keeps its identity. β stage P: the original is checked for
+    # its event identity only, not yet historically (B1).
+    defp unverified_existing(changeset, invocation) do
       if Ash.Changeset.get_attribute(changeset, :disposition) == :released_unverified,
-        do: invalid(changeset, :basis, @basis_refused),
+        do: compare_original(changeset, invocation),
         else: changeset
+    end
+
+    defp compare_original(changeset, invocation) do
+      requested = %{
+        basis: Ash.Changeset.get_argument(changeset, :basis),
+        basis_sha256: Ash.Changeset.get_argument(changeset, :basis_sha256)
+      }
+
+      case existing_release(invocation) do
+        {:ok, %ModelResultRelease{disposition: :released_unverified} = release} ->
+          release
+          |> SdrAgent.Prototype.ReleasedScope.original_basis(invocation)
+          |> compared(requested, release, changeset)
+
+        {:ok, %ModelResultRelease{}} ->
+          changeset
+
+        {:ok, nil} ->
+          invalid(changeset, :basis, @basis_refused)
+
+        {:error, error} ->
+          Ash.Changeset.add_error(changeset, error)
+      end
+    end
+
+    defp compared({:ok, original}, requested, release, changeset) do
+      case SdrAgent.Prototype.Basis.compare_existing(requested, original) do
+        :replay ->
+          changeset
+
+        :conflict ->
+          Ash.Changeset.add_error(
+            changeset,
+            ReleaseConflict.exception(
+              model_invocation_id: release.model_invocation_id,
+              existing_id: release.id,
+              existing_cause_id: nil
+            )
+          )
+
+        {:error, :basis_invalid} ->
+          invalid(changeset, :basis, @basis_refused)
+      end
+    end
+
+    defp compared({:error, :basis_invalid}, _requested, _release, changeset),
+      do: invalid(changeset, :basis, @basis_refused)
+
+    defp compared({:error, error}, _requested, _release, changeset),
+      do: Ash.Changeset.add_error(changeset, error)
+
+    # A plain read (no lock clause) of the invocation's existing release.
+    defp existing_release(invocation) do
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+      )
+      |> Ash.read_one()
     end
 
     defp check_basis(changeset, invocation, context) do
@@ -333,7 +409,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   else
     # The production build has no prototype runtime: nothing to check here.
     defp unverified_new(changeset, _invocation, _mode), do: changeset
-    defp unverified_existing(changeset), do: changeset
+    defp unverified_existing(changeset, _invocation), do: changeset
   end
 
   if @prototype_compiled do

@@ -28,6 +28,21 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         complete shape FIRST, then its encoding and digest, then byte
         equality with `build/1` of the facts (rebuild and compare; a
         supplied basis is only compared, never trusted).
+      * `verify_historical/2` checks the ORIGINAL basis of an EXISTING
+        `released_unverified` decision (b2c β; amendment item 6): its
+        complete shape first, its encoding and recorded digest, then
+        equality with the STORED facts only: the release row (its tenant,
+        invocation and `decided_at`), the stored invocation and its run, and
+        the one original reservation event's recorded authority. Never the
+        current grant, revision, status, funding, window or policy
+        configuration: `funding.sha256` and the window bounds are bound by
+        the digest and the shape's fixed constants only.
+      * `compare_existing/2` compares a requested basis with an existing
+        release's original (both shape-checked and self-consistent first):
+        `:replay` when body and digest are equal, `:conflict` for a valid,
+        self-consistent, different request, otherwise
+        `{:error, :basis_invalid}` (either side invalid or not
+        self-consistent, e.g. a changed body carrying a copied digest).
 
     The shape check is total by construction (pattern and guard checks
     only): exactly the closed key set at every level, no null, the fixed
@@ -38,9 +53,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     is rejected without being traversed, so a decision path never hands a
     compound value to the encoder.
 
-    Producers and consumers (pinned by `ReleaseGuardTest`): `build/1` is
-    called only by `SdrAgent.Prototype.Release`, `verify_new/2` only by
-    `SdrAgent.Agents.Changes.ReleaseDecision`.
+    Producers and consumers (pinned by `ReleaseGuardTest` and the β
+    partition probe): `build/1` is called only by
+    `SdrAgent.Prototype.Release`, `verify_new/2` and `compare_existing/2`
+    only by `SdrAgent.Agents.Changes.ReleaseDecision`, `verify_historical/2`
+    only by `SdrAgent.Prototype.ReleasedScope`.
     """
 
     alias SdrAgent.Audit.Canonical
@@ -124,6 +141,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
             decided_at: DateTime.t()
           }
 
+    @typedoc "The stored facts of an existing decision (historical verification)."
+    @type historical_facts :: %{
+            release: struct(),
+            invocation: struct(),
+            run: struct(),
+            recorded: map()
+          }
+
+    @typedoc "A supplied or recorded basis with its digest."
+    @type supplied :: %{basis: term(), basis_sha256: term()}
+
     @doc """
     The generic bounded canonical encoder (see the moduledoc for its
     accepted domain and error boundary).
@@ -170,6 +198,96 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def verify_new(_supplied, _facts), do: {:error, :basis_invalid}
 
+    @doc """
+    `:ok` when the ORIGINAL `basis` of an existing `released_unverified`
+    release has the complete shape, encodes within the bound with exactly
+    the recorded `basis_sha256`, and equals the stored `facts` (the release
+    row, the stored invocation and run, and the recorded reservation
+    authority); otherwise `{:error, :basis_invalid}`. Pure: the caller
+    reads the facts; nothing current is consulted.
+    """
+    @spec verify_historical(supplied(), historical_facts()) :: :ok | {:error, :basis_invalid}
+    def verify_historical(%{basis: basis, basis_sha256: sha256}, facts) when is_binary(sha256) do
+      with :ok <- shape(basis),
+           {:ok, _bytes, ^sha256} <- encode(basis),
+           true <- historical?(basis, facts) do
+        :ok
+      else
+        _invalid -> {:error, :basis_invalid}
+      end
+    end
+
+    def verify_historical(_original, _facts), do: {:error, :basis_invalid}
+
+    @doc """
+    Compares a `requested` basis with an existing release's `original`:
+    `:replay` (identical body and digest), `:conflict` (a valid,
+    self-consistent, different request) or `{:error, :basis_invalid}`
+    (either side without the complete shape or not self-consistent).
+    """
+    @spec compare_existing(supplied(), supplied()) ::
+            :replay | :conflict | {:error, :basis_invalid}
+    def compare_existing(requested, original) do
+      with {:ok, original_bytes} <- self_consistent(original),
+           {:ok, requested_bytes} <- self_consistent(requested) do
+        if requested_bytes == original_bytes, do: :replay, else: :conflict
+      end
+    end
+
+    defp self_consistent(%{basis: basis, basis_sha256: sha256}) when is_binary(sha256) do
+      with :ok <- shape(basis),
+           {:ok, bytes, ^sha256} <- encode(basis) do
+        {:ok, bytes}
+      else
+        _invalid -> {:error, :basis_invalid}
+      end
+    end
+
+    defp self_consistent(_supplied), do: {:error, :basis_invalid}
+
+    # Every stored-fact equality of amendment item 6 (beta packet r1 3.1).
+    # The basis already has the complete shape, so every section is present.
+    defp historical?(
+           %{
+             "funding" => funding,
+             "policy" => policy,
+             "prototype" => prototype,
+             "observation" => observation,
+             "window" => window
+           } = basis,
+           %{release: release, invocation: inv, run: run, recorded: %{} = recorded}
+         ) do
+      Enum.all?([
+        release.disposition == :released_unverified,
+        release.model_invocation_id == inv.id,
+        release.tenant_id == inv.tenant_id,
+        run.id == inv.agent_run_id,
+        run.tenant_id == inv.tenant_id,
+        basis["invocation"] == invocation_section(inv, run),
+        basis["identity"] == identity_section(inv),
+        funding["grant_id"] == inv.grant_id,
+        funding["grant_id"] == recorded["grant_id"],
+        funding["allocation_id"] == inv.allocation_id,
+        funding["allocation_id"] == recorded["allocation_id"],
+        funding["grant_revision"] == recorded["grant_revision"],
+        funding["operator_user_id"] == recorded["operator_user_id"],
+        funding["id"] == recorded["funding_id"],
+        policy["id"] == recorded["policy_id"],
+        policy["entry_sha256"] == recorded["entry_sha256"],
+        prototype["binding_id"] == recorded["binding_id"],
+        prototype["instance_id"] == recorded["instance_id"],
+        prototype["dataset_class"] == recorded["dataset_class"],
+        prototype["tenant_id"] == recorded["tenant_id"],
+        prototype["tenant_id"] == release.tenant_id,
+        observation["witness_mode"] == recorded["witness_mode"],
+        basis["identity"]["profile_id"] == recorded["profile_id"],
+        basis["invocation"]["purpose"] == recorded["purpose"],
+        window["decided_at"] == stamp(release.decided_at)
+      ])
+    end
+
+    defp historical?(_basis, _facts), do: false
+
     ## The dictionary (server facts only)
 
     defp dictionary(facts) do
@@ -212,27 +330,37 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           "expires_at" => stamp(funding.expires_at),
           "decided_at" => stamp(decided_at)
         },
-        "invocation" => %{
-          "id" => inv.id,
-          "run_id" => inv.agent_run_id,
-          "lead_id" => run.lead_id,
-          "usage_origin" => name(run.usage_origin),
-          "purpose" => name(inv.purpose),
-          "request_sha256" => hex(inv.request_sha256),
-          "response_sha256" => hex(inv.response_sha256),
-          "output_schema_sha256" => hex(inv.output_schema_sha256)
-        },
-        "identity" => %{
-          "provider" => name(inv.provider),
-          "cli_version" => inv.provider_version,
-          "profile_id" => name(inv.profile_id),
-          "model_id" => inv.model_id,
-          "prompt_builder" => prompt_builder(inv.model_catalog_entry),
-          "ledger_generation" => inv.ledger_generation
-        },
+        "invocation" => invocation_section(inv, run),
+        "identity" => identity_section(inv),
         "observation" => %{"witness_mode" => "absent", "classification" => "store_unconfigured"},
         "assurance" => @constants["assurance"],
         "label" => @constants["label"]
+      }
+    end
+
+    # The stored invocation and its run (new decisions and historical
+    # verification alike).
+    defp invocation_section(inv, run) do
+      %{
+        "id" => inv.id,
+        "run_id" => inv.agent_run_id,
+        "lead_id" => run.lead_id,
+        "usage_origin" => name(run.usage_origin),
+        "purpose" => name(inv.purpose),
+        "request_sha256" => hex(inv.request_sha256),
+        "response_sha256" => hex(inv.response_sha256),
+        "output_schema_sha256" => hex(inv.output_schema_sha256)
+      }
+    end
+
+    defp identity_section(inv) do
+      %{
+        "provider" => name(inv.provider),
+        "cli_version" => inv.provider_version,
+        "profile_id" => name(inv.profile_id),
+        "model_id" => inv.model_id,
+        "prompt_builder" => prompt_builder(inv.model_catalog_entry),
+        "ledger_generation" => inv.ledger_generation
       }
     end
 

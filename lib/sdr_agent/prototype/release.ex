@@ -78,10 +78,20 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     (`gate_interrupted`; `witness_timeout` / `capture_pending`) and never
     release.
 
-    **Increment α (partial, not landable):** `ReleasedOutput.fetch/2` does
-    not yet verify a `released_unverified` row (b2c β), so a release attempt
-    rolls back at the fetch and `finalize/4` returns
-    `{:error, :result_not_released}` with nothing written.
+    **Existing-first (b2c β; packet r1 section 3.4):** right after the
+    invocation's `FOR SHARE` lock, a plain read of its release. An existing
+    `released_unverified` release is returned only through
+    `SdrAgent.Agents.ReleasedOutput.fetch/2`, which verifies its ORIGINAL
+    basis historically and the live binding for current use
+    (`SdrAgent.Prototype.ReleasedScope`): `{:released, release, output}`,
+    nothing written, no eligibility, no new decision and no head lock; a
+    refusal or error rolls back and is returned. With no release, or a
+    withheld or calibration one, the flow above applies unchanged. The
+    output of a new release is read the same way.
+
+    **β stage P (not landable):** the verified read is complete; the raw
+    existing-release decision does not yet verify the original
+    historically (B1; see `SdrAgent.Prototype.ReleasedScope`).
     """
 
     require Ash.Query
@@ -91,6 +101,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Agents.Admission, as: AgentAdmission
     alias SdrAgent.Agents.AgentRun
     alias SdrAgent.Agents.ModelInvocation
+    alias SdrAgent.Agents.ModelResultRelease
     alias SdrAgent.Agents.ReleaseDecision.Prelocked
     alias SdrAgent.Agents.ReleasedOutput
     alias SdrAgent.Agents.ResultGate
@@ -153,6 +164,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            :ok <- guard.(run),
            {:ok, invocation} <-
              ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
+           :none <- existing_first(invocation, actor),
            held = {invocation, run},
            evidence = known_evidence(invocation),
            {:ok, plan} <- moded(plan(outcome, evidence, held, Clock.utc_now()), mode),
@@ -168,8 +180,41 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           actor: actor
         })
       else
+        {:replayed, released} -> released
         {:error, error} -> Repo.rollback(error)
       end
+    end
+
+    # D-237 b2c β EXISTING-FIRST (packet r1 section 3.4): an existing
+    # released_unverified release is returned only through the verified
+    # released-output read (its ORIGINAL basis, never re-derived): nothing is
+    # written, no eligibility or new decision, no head lock; a refusal or
+    # error rolls back. No release, or a withheld or calibration one, keeps
+    # the α/b1 flow below.
+    defp existing_first(invocation, actor) do
+      case existing_release(invocation) do
+        {:ok, %ModelResultRelease{disposition: :released_unverified} = release} ->
+          case ReleasedOutput.fetch(invocation.id, actor) do
+            {:ok, output} -> {:replayed, {:released, release, output}}
+            {:error, error} -> {:error, error}
+          end
+
+        {:ok, _none_or_other} ->
+          :none
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+
+    # A plain read (no lock clause): the release row is immutable.
+    defp existing_release(invocation) do
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+      )
+      |> Ash.read_one()
     end
 
     # Test-seam builds only (`:claude_cli_test_seams`, config/test.exs; Codex

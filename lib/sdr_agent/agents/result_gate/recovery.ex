@@ -196,6 +196,27 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
     end
   end
 
+  if @prototype_compiled do
+    # D-237 b2c beta (amendment item 6): an existing released_unverified is
+    # returned only through the verified released-output read, in prototype
+    # runtime; Recovery never decides one. Any refusal or error rolls back
+    # Recovery's own transaction (as for :released); ordinary runtime keeps
+    # :not_gated.
+    defp decide(
+           %ModelResultRelease{disposition: :released_unverified} = release,
+           {invocation, _run},
+           actor
+         ) do
+      with :prototype <- SdrAgent.Prototype.runtime(),
+           {:ok, output} <- ReleasedOutput.fetch(invocation.id, actor) do
+        {:released, release, output}
+      else
+        {:error, error} -> Repo.rollback(error)
+        _ordinary -> Repo.rollback(:not_gated)
+      end
+    end
+  end
+
   defp decide(_calibration, _held, _actor), do: Repo.rollback(:not_gated)
 
   defp lock_release_link(%{wire_witness_link_id: nil}, _tenant_id), do: {:ok, nil}
