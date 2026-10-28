@@ -17,8 +17,10 @@ defmodule SdrAgent.Operations.PrototypeDelegation do
   session_correlation)`.
 
   CREATE-ONLY: a trigger rejects update, delete and truncate. Rows are
-  written only by setup phase 2 and by `SdrAgent.Prototype.enter_session/2`
-  (event `prototype.delegation.created`). Reads: the audit kernel (the
+  written only by setup phase 2 (`:create_setup`, the kernel with the
+  prototype `:setup` marker, `SdrAgent.Prototype.Checks.KernelMarker`) and
+  by `SdrAgent.Prototype.enter_session/2` (event
+  `prototype.delegation.created`). Reads: the audit kernel (the
   operator resolver's plain kernel read).
   """
   use Ash.Resource,
@@ -71,11 +73,29 @@ defmodule SdrAgent.Operations.PrototypeDelegation do
 
   actions do
     defaults [:read]
+
+    # D-237 setup phase 2 only: authorized solely by
+    # `SdrAgent.Prototype.Checks.KernelMarker` with the `:setup` marker. It
+    # accepts only the agent and the correlation; the binding, tenant and
+    # anchor come from the singleton binding row.
+    create :create_setup do
+      description "D-237 setup: the setup session's delegation."
+      accept [:agent, :session_correlation]
+      change {SdrAgent.Operations.Changes.BindDelegation, from: :row}
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "prototype.delegation.created", category: :domain_change}
+    end
   end
 
   policies do
     policy action_type(:read) do
       authorize_if Checks.KernelContext
+    end
+
+    policy action(:create_setup) do
+      authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :setup}
     end
   end
 

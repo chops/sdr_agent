@@ -21,6 +21,8 @@ defmodule SdrAgent.PrototypeFixtures do
   - `enter_runtime/1`, `leave_runtime/0`, `put_live_identity/1` delegate to
     `SdrAgent.Prototype.Authority.TestSeam` (test builds only).
   - `switch/1` is the switch value of a bound fixture's snapshot.
+  - `scratch_dir!/1` is a fresh, exclusive, owned scratch root for file
+    fixtures (Codex 39a6fd61 R1).
   """
 
   alias SdrAgent.Prototype
@@ -65,4 +67,27 @@ defmodule SdrAgent.PrototypeFixtures do
   @spec switch(map()) :: %{policy_id: String.t(), instance_id: String.t()}
   def switch(%{snapshot: %{policy_id: policy_id, instance_id: instance_id}}),
     do: %{policy_id: policy_id, instance_id: instance_id}
+
+  @doc """
+  A fresh scratch directory with `mode`, owned by the calling test. Its name
+  carries 128 random bits (unpredictable, unique across VMs); it is created
+  exclusively (`File.mkdir/1` refuses an existing path, so nothing residual
+  is ever adopted, chmod-ed or written); only that created root is removed
+  when the test exits. Call it from the test process (a test or its
+  `setup`). The pattern of S3's `SdrAgent.DossierFixtures.scratch_dir!/1`.
+  """
+  @spec scratch_dir!(non_neg_integer()) :: Path.t()
+  def scratch_dir!(mode \\ 0o700) do
+    name = "d237-s1-test-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    dir = Path.join(System.tmp_dir!(), name)
+
+    case File.mkdir(dir) do
+      :ok -> :ok
+      {:error, reason} -> raise "scratch root not created exclusively: #{inspect(reason)}"
+    end
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(dir) end)
+    File.chmod!(dir, mode)
+    dir
+  end
 end

@@ -15,7 +15,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       auditor (`auditor_password:`), the binding and the setup session's
       delegation (`agent:`, `session_correlation:`); `{:ok, %{tenant:,
       anchor:, auditor:, binding:, delegation:}}`, or
-      `{:error, :bootstrap_failed}` with everything rolled back;
+      `{:error, :bootstrap_failed}` with everything rolled back. In a
+      test-seam build only (`:prototype_test_seams`), inside that
+      transaction after the binding write and before the delegation's, it
+      calls the one-argument hook `{SdrAgent.Prototype.Authority,
+      :before_delegation}` from the calling process's dictionary with the
+      rows created so far (the rollback proof's late-failure point);
     - `snapshot/1`: the `SdrAgent.Prototype.Binding` of a binding row;
     - `resolve_delegation/2`: resolver steps 3-7 of IF-1 for a boot snapshot
       and a delegation row (or nil);
@@ -23,24 +28,382 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       `write_credential/1`, `check_fresh/0`, `check_resumable/0`,
       `pinned_migrations/0`;
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
-      evidence under a root.
+      evidence under a root;
+    - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
+      F3): `policy_entry/0` (`d237-prototype/1`) and `funding_entry/0`
+      (`d237-funding/1`, a 50-attempt ceiling, the window's end
+      exclusive), with `policy_entry_sha256/0` and `funding_entry_sha256/0`,
+      the lowercase hex of their `sdr-canonical-json/1` digests
+      (`SdrAgent.Audit.Canonical.sha256/1` returns the raw 32 bytes).
+      These are constants of this dev/test module: they confer no runtime
+      authority and no provisioning eligibility, take no caller or
+      environment input, and the facade's `policy_entry/0` and
+      `funding_entry/0` stay runtime-gated.
 
-    RED stage (D-237 S1, non-permissive declarations): every function
-    returns `{:error, :not_implemented}`; none fabricates success.
+    - `runtime/0` and `binding/0`: `:prototype` and the boot snapshot while
+      one is in effect, else `:ordinary` and
+      `{:error, :not_prototype_runtime}`. In a test-seam build
+      (`:prototype_test_seams`, config/test.exs alone) the snapshot is the
+      calling process's only (`SdrAgent.Prototype.Authority.TestSeam`); any
+      other build stays ordinary until `SdrAgent.Prototype.BootCheck.verify!/0`
+      fixes the VM runtime (increment G, not implemented).
+
+    Stage (D-237 S1): the four entry accessors (Codex bd3eb9e1, constants
+    only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d),
+    B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
+    B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
+    `resolve_delegation/2` and `operator?/1` are implemented. Every other
+    function is still a non-permissive RED declaration returning
+    `{:error, :not_implemented}`; none fabricates success.
     """
 
+    import Kernel, except: [binding: 0]
+
+    require Ash.Query
+
+    alias SdrAgent.Accounts.User
+    alias SdrAgent.Actor
+    alias SdrAgent.Audit
+    alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Audit.Kernel, as: AuditKernel
+    alias SdrAgent.Operations.PrototypeDatabaseBinding
+    alias SdrAgent.Operations.PrototypeDelegation
+    alias SdrAgent.Prototype.Binding
+    alias SdrAgent.Prototype.Checks.KernelMarker
+    alias SdrAgent.Repo
+
+    @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
+    @database "sdr_agent_prototype"
+    @agents [:claude_code, :codex_cli]
+    @correlation ~r/\A[A-Za-z0-9._:-]{8,128}\z/
+    @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
+                    "(pg_control_system()).system_identifier FROM pg_database d " <>
+                    "WHERE d.datname = current_database()"
+
+    # Amendment item 1 (D-249: accepted interior text 54769 B), exact.
+    @policy_entry %{
+      database: "sdr_agent_prototype",
+      dataset_class: :real_prototype,
+      identity: %{provider: :claude_cli, ledger_generation: 2, profile_ids: [:claude_cli_opus]},
+      usage_origins: [:assignment],
+      purposes: [:qualification, :evidence_extraction, :outreach_proposal],
+      witness_mode: :absent,
+      funding_id: "d237-funding/1",
+      max_contacts: 3,
+      label: "UNVERIFIED (PROTOTYPE)",
+      acceptance_ref: "D-249",
+      text_sha256: "99a2869ea7501eeeb4615137f23f830de5ddabc2ac746ae6638fbc6fafde9ac0"
+    }
+
+    # Amendment item 4, exact: `total_attempts` is a ceiling, not a target;
+    # `expires_at` is exclusive.
+    @funding_entry %{
+      total_attempts: 50,
+      starts_at: ~U[2026-10-28 02:38:32.000000Z],
+      expires_at: ~U[2026-11-07 07:00:00.000000Z],
+      profile_ids: [:claude_cli_opus],
+      funded_scope: [{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}],
+      allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}],
+      decision_refs: ["D-238", "D-239", "D-243"]
+    }
+
+    @doc "The compiled `d237-prototype/1` policy entry, exact."
+    @spec policy_entry() :: map()
+    def policy_entry, do: @policy_entry
+
+    @doc "The compiled `d237-funding/1` funding entry, exact."
+    @spec funding_entry() :: map()
+    def funding_entry, do: @funding_entry
+
+    @doc "Lowercase hex of the policy entry's `sdr-canonical-json/1` sha256."
+    @spec policy_entry_sha256() :: String.t()
+    def policy_entry_sha256, do: hex(Canonical.sha256(@policy_entry))
+
+    @doc "Lowercase hex of the funding entry's `sdr-canonical-json/1` sha256 (the golden vector)."
+    @spec funding_entry_sha256() :: String.t()
+    def funding_entry_sha256, do: hex(Canonical.sha256(@funding_entry))
+
+    @doc "`:prototype` while a boot snapshot is in effect; otherwise `:ordinary`."
+    @spec runtime() :: SdrAgent.Prototype.runtime()
+    def runtime do
+      case current() do
+        {:prototype, %Binding{}} -> :prototype
+        _ordinary -> :ordinary
+      end
+    end
+
+    @doc "The boot snapshot, in prototype runtime only."
+    @spec binding() :: {:ok, Binding.t()} | {:error, :not_prototype_runtime}
+    def binding do
+      case current() do
+        {:prototype, %Binding{} = snapshot} -> {:ok, snapshot}
+        _ordinary -> {:error, :not_prototype_runtime}
+      end
+    end
+
+    # The runtime in effect. A test-seam build reads the calling process only
+    # (`SdrAgent.Prototype.Authority.TestSeam`); no global lookup. Any other
+    # build keeps its RED declaration until BootCheck fixes the VM runtime
+    # (increment G): ordinary, typed dynamic through `red/1`, never written.
+    if @test_seams do
+      @runtime_key {SdrAgent.Prototype, :runtime}
+
+      defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
+    else
+      defp current, do: red(:ordinary)
+    end
+
     @doc "Setup phase 2; see the moduledoc."
-    @spec bootstrap(keyword()) :: {:ok, map()} | {:error, atom()}
-    def bootstrap(_opts), do: red({:error, :not_implemented})
+    @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
+    def bootstrap(opts) do
+      with {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
+           {:ok, correlation} <- setup_correlation(Keyword.get(opts, :session_correlation)),
+           {:ok, created} <-
+             Audit.transaction(fn -> bootstrap_steps(opts, agent, correlation) end) do
+        {:ok, created}
+      else
+        _failed -> {:error, :bootstrap_failed}
+      end
+    rescue
+      _error -> {:error, :bootstrap_failed}
+    end
 
-    @doc "The boot snapshot of a binding row."
-    @spec snapshot(struct()) :: {:ok, SdrAgent.Prototype.Binding.t()} | {:error, atom()}
-    def snapshot(_binding), do: red({:error, :not_implemented})
+    # Inside the transaction: any error rolls every write back.
+    defp bootstrap_steps(opts, agent, correlation) do
+      with {:ok, tenant} <- Audit.bootstrap(slug: "d237", name: "D-237 prototype"),
+           setup = [
+             actor: Actor.system(:kernel, tenant.id),
+             context: KernelMarker.context(:setup)
+           ],
+           {:ok, anchor} <- create(User, :create_prototype_anchor, %{}, setup),
+           {:ok, auditor} <- create_auditor(Keyword.get(opts, :auditor_password), setup),
+           {:ok, identity} <- prototype_identity(),
+           {:ok, binding} <-
+             create(
+               PrototypeDatabaseBinding,
+               :create,
+               %{
+                 instance_id: Keyword.get_lazy(opts, :instance_id, &Ecto.UUID.generate/0),
+                 operator_user_id: anchor.id,
+                 auditor_user_id: auditor && auditor.id,
+                 policy_entry_sha256: policy_entry_sha256(),
+                 database_oid: identity.database_oid,
+                 system_identifier: identity.system_identifier
+               },
+               setup
+             ),
+           created = %{
+             tenant: tenant,
+             anchor: anchor,
+             auditor: auditor,
+             binding: binding,
+             delegation: nil
+           },
+           :ok <- seam(:before_delegation, created),
+           {:ok, delegation} <-
+             create(
+               PrototypeDelegation,
+               :create_setup,
+               %{agent: agent, session_correlation: correlation},
+               setup
+             ) do
+        %{created | delegation: delegation}
+      else
+        _failed -> Repo.rollback(:bootstrap_failed)
+      end
+    end
 
-    @doc "Resolver steps 3-7 (IF-1) for `snapshot` and a delegation row or nil."
-    @spec resolve_delegation(SdrAgent.Prototype.Binding.t(), struct() | nil) ::
-            {:ok, SdrAgent.Actor.t()} | {:error, atom()}
-    def resolve_delegation(_snapshot, _delegation), do: red({:error, :not_implemented})
+    defp setup_agent(agent) when agent in @agents, do: {:ok, Atom.to_string(agent)}
+    defp setup_agent(_agent), do: {:error, :invalid_agent}
+
+    defp setup_correlation(correlation) when is_binary(correlation) do
+      if Regex.match?(@correlation, correlation),
+        do: {:ok, correlation},
+        else: {:error, :invalid_correlation}
+    end
+
+    defp setup_correlation(_correlation), do: {:error, :invalid_correlation}
+
+    defp create_auditor(nil, _setup), do: {:ok, nil}
+
+    defp create_auditor(password, setup),
+      do: create(User, :create_prototype_auditor, %{password: password}, setup)
+
+    defp create(resource, action, params, opts) do
+      resource
+      |> Ash.Changeset.for_create(action, params, opts)
+      |> Ash.create()
+    end
+
+    # The live identity, read inside the open transaction; the database must
+    # be the prototype database.
+    defp prototype_identity do
+      case live_identity() do
+        {:ok, %{database: @database} = identity} -> {:ok, identity}
+        _other -> {:error, :not_the_prototype_database}
+      end
+    end
+
+    @doc """
+    The live database name, its `pg_database` oid and the cluster's
+    `system_identifier`, in one plain read; any failure is
+    `{:error, :live_identity_unavailable}`. In a test-seam build the test
+    database's own name reads as `sdr_agent_prototype` (every other value is
+    the real one).
+    """
+    @spec live_identity() ::
+            {:ok,
+             %{database: String.t(), database_oid: pos_integer(), system_identifier: integer()}}
+            | {:error, :live_identity_unavailable}
+    def live_identity do
+      case Repo.query(@identity_sql, []) do
+        {:ok, %{rows: [[name, oid, system_identifier]]}}
+        when is_binary(name) and is_integer(oid) and oid > 0 and is_integer(system_identifier) ->
+          {:ok,
+           test_alias(%{database: name, database_oid: oid, system_identifier: system_identifier})}
+
+        _other ->
+          {:error, :live_identity_unavailable}
+      end
+    rescue
+      _error -> {:error, :live_identity_unavailable}
+    end
+
+    if @test_seams do
+      # The test database reads as the prototype database (the binding's
+      # CHECK fixes `database` to it); only the name is aliased.
+      defp test_alias(%{database: name} = identity) do
+        test_database = Keyword.get(Application.get_env(:sdr_agent, Repo, []), :database)
+        if name == test_database, do: %{identity | database: @database}, else: identity
+      end
+
+      # A one-argument hook from the calling process's dictionary at a named
+      # boundary (the rollback proof's late-failure point).
+      defp seam(name, arg) do
+        case Process.get({__MODULE__, name}) do
+          hook when is_function(hook, 1) -> hook.(arg)
+          _none -> nil
+        end
+
+        :ok
+      end
+    else
+      defp test_alias(identity), do: identity
+      defp seam(_name, _arg), do: :ok
+    end
+
+    @doc """
+    The boot snapshot of a binding row: exactly the `SdrAgent.Prototype.Binding`
+    fields of a real `PrototypeDatabaseBinding` struct. Anything else (a map,
+    another resource's row, nil) is `{:error, :not_a_binding}`.
+    """
+    @spec snapshot(term()) :: {:ok, Binding.t()} | {:error, :not_a_binding}
+    def snapshot(%PrototypeDatabaseBinding{} = row),
+      do: {:ok, struct!(Binding, Map.new(Binding.fields(), &{&1, Map.fetch!(row, &1)}))}
+
+    def snapshot(_other), do: {:error, :not_a_binding}
+
+    @doc """
+    Re-reads the singleton binding row (one plain kernel read) and the live
+    identity, and compares every field with the boot snapshot. A missing or
+    second row, any difference, an unavailable identity or an exception is
+    `{:error, :binding_mismatch}`. Nothing is cached.
+    """
+    @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
+    def check_live do
+      with {:ok, snapshot} <- binding() do
+        if live_matches?(snapshot), do: :ok, else: {:error, :binding_mismatch}
+      end
+    end
+
+    defp live_matches?(snapshot) do
+      with {:ok, [row]} <- read_bindings(),
+           {:ok, ^snapshot} <- snapshot(row),
+           {:ok, live} <- live_identity() do
+        live == %{
+          database: row.database,
+          database_oid: row.database_oid,
+          system_identifier: row.system_identifier
+        }
+      else
+        _mismatch -> false
+      end
+    rescue
+      _error -> false
+    end
+
+    defp read_bindings do
+      PrototypeDatabaseBinding
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.limit(2)
+      |> Ash.read()
+    end
+
+    @doc """
+    The authoritative operator resolver (IF-1): the boot snapshot, a live
+    check, one plain kernel read of the delegation, then
+    `resolve_delegation/2`; on every call, nothing cached.
+    """
+    @spec operator_actor(term()) ::
+            {:ok, Actor.t()} | {:error, SdrAgent.Prototype.resolve_error()}
+    def operator_actor(delegation_id) do
+      with {:ok, snapshot} <- binding(),
+           :ok <- check_live(),
+           {:ok, delegation} <- read_delegation(delegation_id) do
+        resolve_delegation(snapshot, delegation)
+      end
+    end
+
+    # One plain kernel read of the delegation. A malformed id is rejected
+    # (read as nil) before any typed UUID query; a read error or an exception
+    # is `:binding_mismatch`.
+    defp read_delegation(id) do
+      case Ecto.UUID.cast(id) do
+        {:ok, uuid} ->
+          PrototypeDelegation
+          |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+          |> Ash.Query.filter(id == ^uuid)
+          |> Ash.read_one()
+          |> case do
+            {:ok, delegation} -> {:ok, delegation}
+            {:error, _error} -> {:error, :binding_mismatch}
+          end
+
+        :error ->
+          {:ok, nil}
+      end
+    rescue
+      _error -> {:error, :binding_mismatch}
+    end
+
+    @doc "Resolver steps 4-7 for `snapshot` and a delegation row (nil: `:delegation_not_found`)."
+    @spec resolve_delegation(Binding.t(), struct() | nil) ::
+            {:ok, Actor.t()} | {:error, SdrAgent.Prototype.resolve_error()}
+    def resolve_delegation(_snapshot, nil), do: {:error, :delegation_not_found}
+
+    def resolve_delegation(%Binding{} = snapshot, delegation) do
+      cond do
+        delegation.tenant_id != snapshot.tenant_id ->
+          {:error, :delegation_foreign_tenant}
+
+        delegation.binding_id != snapshot.id ->
+          {:error, :delegation_wrong_binding}
+
+        delegation.operator_user_id != snapshot.operator_user_id ->
+          {:error, :anchor_mismatch}
+
+        true ->
+          {:ok,
+           %Actor{type: :prototype_operator, id: delegation.id, tenant_id: snapshot.tenant_id}}
+      end
+    end
+
+    @doc "True only when `operator_actor(actor.id)` resolves to exactly `actor`."
+    @spec operator?(term()) :: boolean()
+    def operator?(%Actor{type: :prototype_operator, id: id} = actor) when is_binary(id),
+      do: operator_actor(id) == {:ok, actor}
+
+    def operator?(_actor), do: false
 
     @doc "`:ok` when a Repo config targets exactly the prototype socket, port and database."
     @spec check_repo_target(keyword()) :: :ok | {:error, :repo_target_mismatch}
@@ -71,6 +434,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
             {:ok, %{sha256: String.t(), remaining: non_neg_integer()}} | {:error, atom()}
     def check_worksheet(_bytes, _sha256_hex, _evidence_root), do: red({:error, :not_implemented})
 
+    defp hex(digest), do: Base.encode16(digest, case: :lower)
+
     # RED stub result, typed dynamic() so callers compile against the stub
     # (Elixir 1.20 infers literal returns). Read-only: nothing writes the key
     # (ruling e); removed in GREEN.
@@ -98,27 +463,75 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
 
-      RED stage (D-237 S1): every function returns `{:error, :not_implemented}`.
+      Keys are `{SdrAgent.Prototype, atom}` in the calling process's
+      dictionary; `lookup/1` reads them.
+
+      Stage (D-237 S1): B1a `enter_runtime/1` (Codex b743eb5d) and B1b
+      `leave_runtime/0`, the `put_live_identity/1` storage and the
+      `$callers` `lookup/1` (Codex b591e1a6) are implemented. Nothing reads
+      the stored live identity yet (its consumer is B2). `clear/0` (Codex
+      4d315a96) deletes exactly those two keys from the calling process.
       """
 
-      @doc "Enters prototype runtime with `snapshot` for the calling process."
-      @spec enter_runtime(SdrAgent.Prototype.Binding.t()) :: :ok | {:error, atom()}
-      def enter_runtime(_snapshot), do: red({:error, :not_implemented})
+      alias SdrAgent.Prototype.Binding
 
-      @doc "Returns the calling process to ordinary runtime."
-      @spec leave_runtime() :: :ok | {:error, atom()}
-      def leave_runtime, do: red({:error, :not_implemented})
+      @runtime_key {SdrAgent.Prototype, :runtime}
+      @identity_key {SdrAgent.Prototype, :live_identity}
+
+      @doc "Enters prototype runtime with `snapshot` for the calling process."
+      @spec enter_runtime(Binding.t()) :: :ok
+      def enter_runtime(%Binding{} = snapshot) do
+        Process.put(@runtime_key, {:prototype, snapshot})
+        :ok
+      end
+
+      @doc """
+      Returns the calling process to ordinary runtime. It stores `:ordinary`
+      rather than deleting the key, so a caller's prototype runtime is not
+      re-inherited through `$callers`.
+      """
+      @spec leave_runtime() :: :ok
+      def leave_runtime do
+        Process.put(@runtime_key, :ordinary)
+        :ok
+      end
 
       @doc "Overrides the live identity for the calling process (`map` or `:raise`)."
-      @spec put_live_identity(map() | :raise) :: :ok | {:error, atom()}
-      def put_live_identity(_overrides), do: red({:error, :not_implemented})
+      @spec put_live_identity(map() | :raise) :: :ok
+      def put_live_identity(overrides) when overrides == :raise or is_map(overrides) do
+        Process.put(@identity_key, overrides)
+        :ok
+      end
 
-      @doc "Removes every seam key of the calling process."
-      @spec clear() :: :ok | {:error, atom()}
-      def clear, do: red({:error, :not_implemented})
+      @doc """
+      Removes the seam's two keys (runtime and live identity) from the
+      calling process only; no caller or other process is touched.
+      """
+      @spec clear() :: :ok
+      def clear do
+        Process.delete(@runtime_key)
+        Process.delete(@identity_key)
+        :ok
+      end
 
-      # RED stub result, typed dynamic() (see SdrAgent.Prototype.Authority).
-      defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+      @doc false
+      # The value of `key` in the calling process, else in the first of its
+      # explicit `$callers` that has it, read as `SdrAgent.Clock` reads them
+      # (clock.ex:76-87); a dead caller contributes nil, and `$callers` is
+      # never changed.
+      @spec lookup(term()) :: term()
+      def lookup(key) do
+        Enum.find_value([self() | Process.get(:"$callers", [])], fn pid ->
+          if pid == self(), do: Process.get(key), else: remote(pid, key)
+        end)
+      end
+
+      defp remote(pid, key) do
+        case Process.info(pid, :dictionary) do
+          {:dictionary, dict} -> dict |> List.keyfind(key, 0, {key, nil}) |> elem(1)
+          nil -> nil
+        end
+      end
     end
   end
 end

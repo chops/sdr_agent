@@ -22,7 +22,9 @@ defmodule SdrAgent.Operations.PrototypeDatabaseBinding do
 
   CREATE-ONLY: a trigger rejects update, delete and truncate; foreign keys
   are RESTRICT. Rows are written only by setup phase 2 (event
-  `prototype.binding.created`). Reads: the audit kernel (the boot check and
+  `prototype.binding.created`) through `:create`, which only a kernel
+  request carrying the prototype `:setup` marker
+  (`SdrAgent.Prototype.Checks.KernelMarker`) passes. Reads: the audit kernel (the boot check and
   the operator resolver read the row as plain kernel reads).
   """
   use Ash.Resource,
@@ -102,11 +104,45 @@ defmodule SdrAgent.Operations.PrototypeDatabaseBinding do
 
   actions do
     defaults [:read]
+
+    # D-237 setup phase 2 only: authorized solely by
+    # `SdrAgent.Prototype.Checks.KernelMarker` with the `:setup` marker. The
+    # caller supplies the instance, the anchor and optional auditor, the
+    # compiled policy entry's digest and the live identity it read inside
+    # the same transaction; every fixed value is set here, and the tenant is
+    # the kernel actor's.
+    create :create do
+      description "D-237 setup: the singleton prototype database binding."
+
+      accept [
+        :instance_id,
+        :operator_user_id,
+        :auditor_user_id,
+        :policy_entry_sha256,
+        :database_oid,
+        :system_identifier
+      ]
+
+      change set_attribute(:dataset_class, @dataset_class)
+      change set_attribute(:policy_id, @policy_id)
+      change set_attribute(:funding_id, @funding_id)
+      change set_attribute(:witness_mode, @witness_mode)
+      change set_attribute(:database, @database)
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "prototype.binding.created", category: :domain_change}
+    end
   end
 
   policies do
     policy action_type(:read) do
       authorize_if Checks.KernelContext
+    end
+
+    policy action(:create) do
+      authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :setup}
     end
   end
 
