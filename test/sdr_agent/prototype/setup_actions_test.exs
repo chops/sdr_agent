@@ -142,11 +142,14 @@ defmodule SdrAgent.Prototype.SetupActionsTest do
       @name name
 
       test "#{inspect(resource)} #{name} is Forbidden, writing nothing", ctx do
+        # Arrange every prerequisite (the input's user, the refused callers'
+        # admin) BEFORE the counts, so they measure only the refused calls.
         params = params(@resource, @name, ctx.tenant)
+        callers = refused_callers(ctx.tenant)
         before_rows = Map.new(@tables, &{&1, count(&1)})
         before_events = length(events(ctx.tenant))
 
-        for {caller, opts} <- refused_callers(ctx.tenant) do
+        for {caller, opts} <- callers do
           result = create(@resource, @name, params, opts)
 
           assert match?({:error, %Ash.Error.Forbidden{}}, result),
