@@ -11,7 +11,9 @@ defmodule SdrAgent.PrototypeSetupEffects do
   `created/0`). `observer.log.()` is the ordered log;
   `observer.seed` is the exact synthetic seed term `read_seed` returns by
   default (a fresh reference inside, so identity can be checked). Every
-  value is synthetic; nothing connects to a database or reads a file.
+  value is synthetic except the data directory, which is the pinned
+  prototype path string (setup accepts a marker only for it); nothing
+  connects to a database or reads a file or path.
   """
 
   alias SdrAgent.Accounts.User
@@ -45,7 +47,9 @@ defmodule SdrAgent.PrototypeSetupEffects do
   ]
 
   @system_identifier 7_400_000_000_000_000_001
-  @data_dir "/synthetic/d237/pgdata"
+  # The pinned prototype data directory string (S4 IF-7 r2 §2; S1 I4 r2
+  # §3): setup accepts a marker only for this path. Nothing reads it.
+  @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
   @ids %{
     tenant: "0190f0f0-0000-7000-8000-000000000001",
     anchor: "0190f0f0-0000-7000-8000-000000000002",

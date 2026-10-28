@@ -29,7 +29,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0,1`
       with `app_names/0`, `write_credential/1` (still a stub; the credential
       is owner-held), `check_fresh/0`, `check_resumable/0`,
-      `public_tables/0` and `pinned_migrations/0`;
+      `public_tables/0` and `pinned_migrations/0`; and phase 0's
+      `maintenance_target/0`, `maintenance_identity/0` and
+      `maintenance_result/1` (S1 I4 r2; deny-only declarations);
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
       evidence under a root;
     - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
@@ -360,6 +362,39 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec valid_correlation?(term()) :: boolean()
     def valid_correlation?(value) when is_binary(value), do: Regex.match?(@correlation, value)
     def valid_correlation?(_value), do: false
+
+    @doc """
+    Setup phase 0's maintenance target (S1 I4 r2 §2.1): exactly the
+    prototype socket directory and port, the maintenance database
+    `"postgres"` and the cluster's bootstrap superuser, with no host, URL,
+    endpoint or password. A constant: nothing reads the environment or the
+    Repo configuration for it. RED: not implemented.
+    """
+    @spec maintenance_target() :: keyword() | {:error, :not_implemented}
+    def maintenance_target, do: red({:error, :not_implemented})
+
+    @doc """
+    Setup phase 0's maintenance identity (S1 I4 r2 §2): one statement on
+    `maintenance_target/0`, run by a monitored helper process, giving
+    `{:ok, %{database:, system_identifier:, data_directory:}}`,
+    `{:error, :maintenance_unavailable}` or
+    `{:error, :maintenance_cleanup_unacknowledged}`. RED: not implemented.
+    """
+    @spec maintenance_identity() ::
+            {:ok, map()}
+            | {:error,
+               :maintenance_unavailable | :maintenance_cleanup_unacknowledged | :not_implemented}
+    def maintenance_identity, do: red({:error, :not_implemented})
+
+    @doc """
+    The pure decoder of the maintenance statement's result (S1 I4 r2 §2.2):
+    exactly one row of a binary database name, a positive integer
+    identifier and a binary data directory is `{:ok, map}`; anything else
+    is `{:error, :maintenance_unavailable}`. RED: not implemented.
+    """
+    @spec maintenance_result(term()) ::
+            {:ok, map()} | {:error, :maintenance_unavailable | :not_implemented}
+    def maintenance_result(_result), do: red({:error, :not_implemented})
 
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
@@ -1137,6 +1172,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         build, independent of the fixed runtime (Codex 026058ec); an
         explicit `verify!(switch: ...)` takes precedence. Process-local
         only (never read from `$callers`).
+      - `put_maintenance/1` sets the calling process's maintenance-read
+        seam (S1 I4 r2 §2.4): a scripted test connector and the read's
+        millisecond bounds, which `maintenance_identity/0` reads once in
+        the calling process before it starts anything. Process-local only
+        (never read from `$callers`).
       - `leave_runtime/0` returns the process to ordinary runtime;
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
@@ -1166,6 +1206,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @runtime_key {SdrAgent.Prototype, :runtime}
       @identity_key {SdrAgent.Prototype, :live_identity}
       @boot_switch_key {SdrAgent.Prototype, :boot_switch}
+      @maintenance_key {SdrAgent.Prototype, :maintenance}
+      @maintenance_keys [:connector, :down_ms, :reply_ms, :stop_ms]
       @live_stages [:binding_read, :identity_read, :delegation_read]
       @live_kinds [:returned_error, :raise, :abort]
 
@@ -1210,6 +1252,32 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @doc "The calling process's own boot-switch input, or nil (process-local)."
       @spec boot_switch() :: term()
       def boot_switch, do: Process.get(@boot_switch_key)
+
+      @doc """
+      Sets the calling process's maintenance-read seam: exactly
+      `%{connector: {module, script}, reply_ms:, down_ms:, stop_ms:}`, a
+      test connector module with its script and non-negative millisecond
+      bounds. Anything else raises `ArgumentError` and stores nothing.
+      """
+      @spec put_maintenance(map()) :: :ok
+      def put_maintenance(seam) do
+        if maintenance_seam?(seam),
+          do: Process.put(@maintenance_key, seam),
+          else: raise(ArgumentError, "test seam: malformed maintenance seam")
+
+        :ok
+      end
+
+      @doc "The calling process's own maintenance-read seam, or nil (process-local)."
+      @spec maintenance() :: map() | nil
+      def maintenance, do: Process.get(@maintenance_key)
+
+      defp maintenance_seam?(%{connector: {module, _script}} = seam) when is_atom(module) do
+        Enum.sort(Map.keys(seam)) == @maintenance_keys and
+          Enum.all?([seam.reply_ms, seam.down_ms, seam.stop_ms], &(is_integer(&1) and &1 >= 0))
+      end
+
+      defp maintenance_seam?(_seam), do: false
 
       @doc """
       Runs `fun` inside a live-fault scope and returns its result; a raise,
@@ -1271,8 +1339,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       defp restore(key, previous), do: Process.put(key, previous)
 
       @doc """
-      Removes the seam's keys (runtime, live identity and boot switch) from
-      the calling process only; no caller or other process is touched. A
+      Removes the seam's keys (runtime, live identity, boot switch and
+      maintenance) from the calling process only; no caller or other
+      process is touched. A
       live-fault scope is left alone: it belongs to its `with_live_fault/3`
       call, which alone restores it, and its shared claim is never reset.
       """
@@ -1281,6 +1350,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         Process.delete(@runtime_key)
         Process.delete(@identity_key)
         Process.delete(@boot_switch_key)
+        Process.delete(@maintenance_key)
         :ok
       end
 

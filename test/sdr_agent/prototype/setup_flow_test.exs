@@ -28,6 +28,14 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   two proceeding states are controls, and every other shape is
   `{:unexpected, 1}`; `repo_state_check/1` is its pure decision.
 
+  S1 I4 r2 (Codex c18f8134) adds: S4's IF-7 marker family (ten codes
+  refuse as `cluster_identity_mismatch`; `:cluster_check_failed`, a
+  caller defect, stays `{:unexpected, 0}`), the marker's pinned data
+  directory and identifier bound before any equality, S3's phase-3
+  `:seed_invalid` and `:seed_differs` codes, and a source cross-check of
+  this file's pinned S4 copy against `SdrAgent.Prototype.Cluster` (a
+  structural prerequisite until S4's pure GREEN is in the build).
+
   RED at the declarations (every function `{:error, :not_implemented}`, no
   effect called): each failure exposes a missing declaration, not an
   executed effect scenario (Codex 57fc6bb4).
@@ -173,8 +181,40 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:seed_forbidden, :fresh, :seed_run},
     {:seed_binding_mismatch, :fresh, :seed_run},
     {:seed_not_prototype_runtime, :fresh, :seed_run},
-    {:seed_not_implemented, :fresh, :seed_run}
+    {:seed_not_implemented, :fresh, :seed_run},
+    {:s4_uid_unknown, :fresh, :cluster_marker},
+    {:s4_marker_missing, :fresh, :cluster_marker},
+    {:s4_marker_not_owned, :fresh, :cluster_marker},
+    {:s4_marker_invalid, :fresh, :cluster_marker},
+    {:s4_marker_mismatch, :fresh, :cluster_marker},
+    {:s4_data_dir_not_owned, :fresh, :cluster_marker},
+    {:s4_binary_mismatch, :fresh, :cluster_marker},
+    {:s4_control_unreadable, :fresh, :cluster_marker},
+    {:s4_control_mismatch, :fresh, :cluster_marker},
+    {:s4_socket_dir_not_owned, :fresh, :cluster_marker},
+    {:s4_cluster_check_failed, :fresh, :cluster_marker},
+    {:seed_invalid_content, :fresh, :seed_run},
+    {:seed_differs, :fresh, :seed_run}
   ]
+
+  # S4 IF-7 r2 (231914a cluster_test.exs:17-29): the ten codes that
+  # refuse, in step order; `:cluster_check_failed` (the eleventh, a caller
+  # defect) is not a positive finding and stays unexpected (Codex c18f8134
+  # Q2). This file's own pinned copy; never read from S4 at run time.
+  @s4_refusing [
+    :uid_unknown,
+    :marker_missing,
+    :marker_not_owned,
+    :marker_invalid,
+    :marker_mismatch,
+    :data_dir_not_owned,
+    :binary_mismatch,
+    :control_unreadable,
+    :control_mismatch,
+    :socket_dir_not_owned
+  ]
+  @s4_family @s4_refusing ++ [:cluster_check_failed]
+  @max_identifier 18_446_744_073_709_551_615
 
   # Every effect with a closed success shape, its phase and its mode: an
   # unknown return (`:maybe`) stops there as `{:unexpected, phase}`.
@@ -437,6 +477,17 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
         assert Setup.cluster_identity_check(m, i) == {:error, :unexpected}, inspect({m, i})
       end
     end
+
+    test "a marker outside S4's contract is unexpected even when the facts are equal" do
+      for {m, i} <- [
+            {marker(%{data_dir: "/synthetic/d237/pgdata"}),
+             identity(%{data_directory: "/synthetic/d237/pgdata"})},
+            {marker(%{system_identifier: @max_identifier + 1}),
+             identity(%{system_identifier: @max_identifier + 1})}
+          ] do
+        assert Setup.cluster_identity_check(m, i) == {:error, :unexpected}, inspect({m, i})
+      end
+    end
   end
 
   describe "real_effects/1 (shape only; nothing invoked)" do
@@ -448,6 +499,20 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
       for {name, arity} <- E.effects() do
         assert is_function(Map.get(effects, name), arity), "#{name}/#{arity}"
       end
+    end
+  end
+
+  # Integration prerequisite (S1 I4 r2 §3): this file's pinned S4 copy
+  # against S4's own module. Until S4's pure GREEN is in the build the
+  # module is absent (or deny-only), so this fails structurally; it is
+  # never a source of the reasons Setup uses.
+  describe "S4 IF-7 cross-check (integration prerequisite)" do
+    test "the pinned family and data directory equal SdrAgent.Prototype.Cluster's" do
+      cluster = SdrAgent.Prototype.Cluster
+
+      assert Code.ensure_loaded?(cluster), "S4's Cluster module is absent from this build"
+      assert Function.capture(cluster, :reasons, 0).() == @s4_family
+      assert Function.capture(cluster, :pinned, 0).().root <> "/pgdata" == E.data_dir()
     end
   end
 
@@ -734,6 +799,23 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     do: {%{}, seed_answer(:not_prototype_runtime), seed_refused()}
 
   defp scenario(:seed_not_implemented), do: {%{}, seed_answer(:not_implemented), {:unexpected, 3}}
+
+  # S3 seed design D7: content Invalid in an action, and a seed that
+  # differs from the recorded one (Codex c18f8134 Q4: the explicit reason).
+  defp scenario(:seed_invalid_content),
+    do: {%{}, seed_answer(:seed_invalid), refused(3, :seed_invalid)}
+
+  defp scenario(:seed_differs), do: {%{}, seed_answer(:seed_differs), refused(3, :seed_differs)}
+
+  for code <- @s4_refusing do
+    defp scenario(unquote(:"s4_#{code}")),
+      do:
+        {%{}, %{cluster_marker: {:error, unquote(code)}},
+         refused(0, :cluster_identity_mismatch)}
+  end
+
+  defp scenario(:s4_cluster_check_failed),
+    do: {%{}, %{cluster_marker: {:error, :cluster_check_failed}}, {:unexpected, 0}}
 
   ## Helpers
 
