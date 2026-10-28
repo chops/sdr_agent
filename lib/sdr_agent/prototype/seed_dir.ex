@@ -4,8 +4,22 @@ defmodule SdrAgent.Prototype.SeedDir do
   one directory, mode 0700, holding exactly the four plain JSON files
   `offering_profile.json`, `writing_guide.json`, `campaign.json` and
   `provenance.json`, each a regular 0600 file of at most 64 KiB whose full
-  sha256 equals its argument. Built on `SdrAgent.Prototype.BoundedJson`; it
-  never evaluates its input and never touches the network.
+  sha256 equals its argument. It never evaluates its input and never
+  touches the network.
+
+  **Reading (Codex R4).** After the lstat precheck of the root and the four
+  files, each file is read through ONE handle, as `SpotcheckManifest.artifact/2`
+  reads an artifact: the root must still be the checked directory and still
+  0700 (`{"seed_dir", :changed | :dir_mode}`); the file by `lstat` must be a
+  regular 0600 file of at most 64 KiB (`:not_regular`, `:file_mode`,
+  `:too_large`); the opened object itself (fstat on the handle) must be that
+  same file, still 0600 and within the bound (`:changed`), with the root
+  rechecked again before any byte is read; the read stops at the bound plus
+  one sentinel byte (`:too_large`); the handle is closed on every path; the
+  full sha256 of those bytes must equal the argument (`:digest_mismatch`).
+  The bytes are then decoded by `SdrAgent.Prototype.BoundedJson.decode/2`.
+  Nothing is chmod-ed or repaired. Known limitation (availability only): a
+  FIFO substituted after the precheck can block the open.
 
   `read/2` checks:
   - the exact key sets of IF-7 (no class field; a provenance key inside the
@@ -82,11 +96,11 @@ defmodule SdrAgent.Prototype.SeedDir do
   @spec read(Path.t(), map()) :: {:ok, map()} | {:error, {String.t(), atom()}}
   def read(dir, sha256s) when is_binary(dir) and is_map(sha256s) do
     with :ok <- digests(sha256s),
-         :ok <- directory(dir),
+         {:ok, root} <- directory(dir),
          :ok <- entries(dir),
          :ok <- modes(dir),
          :ok <- seam(:after_precheck, dir),
-         {:ok, bins} <- read_all(dir, sha256s),
+         {:ok, bins} <- read_all(dir, root, sha256s),
          {:ok, docs} <- decode_all(bins),
          :ok <- profile(docs[:offering_profile]),
          :ok <- guide(docs[:writing_guide]),
@@ -118,8 +132,11 @@ defmodule SdrAgent.Prototype.SeedDir do
 
   defp directory(dir) do
     case File.lstat(dir) do
-      {:ok, %File.Stat{type: :directory, mode: mode}} when (mode &&& 0o777) == 0o700 -> :ok
-      _other -> {:error, {"seed_dir", :dir_mode}}
+      {:ok, %File.Stat{type: :directory, mode: mode} = root} when (mode &&& 0o777) == 0o700 ->
+        {:ok, root}
+
+      _other ->
+        {:error, {"seed_dir", :dir_mode}}
     end
   end
 
@@ -152,20 +169,116 @@ defmodule SdrAgent.Prototype.SeedDir do
     end)
   end
 
-  defp read_all(dir, sha256s) do
+  defp read_all(dir, root, sha256s) do
     Enum.reduce_while(Enum.sort(@files), {:ok, %{}}, fn name, {:ok, acc} ->
       key = @keys[name]
 
-      case BoundedJson.read_file(Path.join(dir, name), sha256s[key], @max_bytes) do
-        {:ok, bin} ->
-          seam(:after_read, {name, bin})
-          {:cont, {:ok, Map.put(acc, key, bin)}}
-
-        {:error, {_path, rule}} ->
-          {:halt, {:error, {name, rule}}}
+      case read_one(dir, root, name, sha256s[key]) do
+        {:ok, bin} -> {:cont, {:ok, Map.put(acc, key, bin)}}
+        {:error, _} = error -> {:halt, error}
       end
     end)
   end
+
+  # One file through ONE handle (see the moduledoc, "Reading").
+  defp read_one(dir, root, name, sha256) do
+    path = Path.join(dir, name)
+
+    with :ok <- same_root(dir, root),
+         {:ok, checked} <- private_file(path, name),
+         {:ok, bytes} <- read_checked(dir, root, path, name, checked) do
+      if hex(:crypto.hash(:sha256, bytes)) == sha256,
+        do: {:ok, bytes},
+        else: {:error, {name, :digest_mismatch}}
+    end
+  end
+
+  # The root is still the checked directory, and still 0700.
+  defp same_root(dir, root) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory} = now} ->
+        cond do
+          not same_object?(now, root) -> {:error, {"seed_dir", :changed}}
+          (now.mode &&& 0o777) != 0o700 -> {:error, {"seed_dir", :dir_mode}}
+          true -> :ok
+        end
+
+      _other ->
+        {:error, {"seed_dir", :changed}}
+    end
+  end
+
+  # By lstat: a regular 0600 file within the bound.
+  defp private_file(path, name) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :regular} = stat} -> private_stat(stat, name)
+      {:ok, _other} -> {:error, {name, :not_regular}}
+      {:error, _reason} -> {:error, {name, :unreadable}}
+    end
+  end
+
+  defp private_stat(stat, name) do
+    cond do
+      (stat.mode &&& 0o777) != 0o600 -> {:error, {name, :file_mode}}
+      stat.size > @max_bytes -> {:error, {name, :too_large}}
+      true -> {:ok, stat}
+    end
+  end
+
+  # Before any content is read, the opened object itself (fstat on the
+  # handle) must be the checked file, still private and within the bound,
+  # and the root must still be the checked 0700 directory. The read stops
+  # at the bound plus one sentinel byte. The handle is closed on every path.
+  defp read_checked(dir, root, path, name, checked) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, handle} ->
+        try do
+          with :ok <- opened_object(handle, name, checked),
+               :ok <- same_root(dir, root),
+               :ok <- seam(:after_open, {name, handle}),
+               {:ok, bytes} <- read_at_most(handle, @max_bytes + 1, [], name),
+               :ok <- seam(:after_read, {name, bytes}) do
+            if byte_size(bytes) <= @max_bytes,
+              do: {:ok, bytes},
+              else: {:error, {name, :too_large}}
+          end
+        after
+          :file.close(handle)
+        end
+
+      {:error, _reason} ->
+        {:error, {name, :unreadable}}
+    end
+  end
+
+  defp opened_object(handle, name, checked) do
+    with {:ok, info} <- :file.read_file_info(handle, time: :posix),
+         opened = File.Stat.from_record(info),
+         true <- opened.type == :regular and same_object?(opened, checked),
+         {:ok, _stat} <- private_stat(opened, name) do
+      :ok
+    else
+      {:error, {^name, _rule}} = error -> error
+      _changed -> {:error, {name, :changed}}
+    end
+  end
+
+  defp same_object?(a, b),
+    do:
+      a.inode == b.inode and a.major_device == b.major_device and a.minor_device == b.minor_device
+
+  # At most `left` bytes in total, however the reads are split.
+  defp read_at_most(_handle, 0, acc, _name), do: {:ok, :erlang.iolist_to_binary(acc)}
+
+  defp read_at_most(handle, left, acc, name) do
+    case :file.read(handle, left) do
+      {:ok, data} -> read_at_most(handle, left - byte_size(data), [acc, data], name)
+      :eof -> {:ok, :erlang.iolist_to_binary(acc)}
+      {:error, _reason} -> {:error, {name, :unreadable}}
+    end
+  end
+
+  defp hex(bin), do: Base.encode16(bin, case: :lower)
 
   defp decode_all(bins) do
     Enum.reduce_while(Enum.sort(@files), {:ok, %{}}, fn name, {:ok, acc} ->
@@ -461,9 +574,12 @@ defmodule SdrAgent.Prototype.SeedDir do
   # a test may act or observe at a named boundary of `read/2` through a
   # one-argument function in its own process dictionary under
   # `{SdrAgent.Prototype.SeedDir, name}`: `:after_precheck` (the directory,
-  # once every lstat check passed and before any file is opened) and
-  # `:after_read` (`{file name, bytes}` once a file's bytes are read). Its
-  # return value is ignored. Every other build compiles `seam/2` to `:ok`.
+  # once every lstat check passed and before any file is opened),
+  # `:after_open` (`{file name, handle}` once the opened object and the root
+  # are checked, before any byte is read) and `:after_read` (`{file name,
+  # bytes}` right after the bounded read, before its size and digest
+  # checks). Its return value is ignored: a hook can act on the filesystem,
+  # never skip a check. Every other build compiles `seam/2` to `:ok`.
   if @test_seams do
     defp seam(name, arg) do
       case Process.get({__MODULE__, name}) do
