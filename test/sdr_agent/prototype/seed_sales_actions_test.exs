@@ -29,15 +29,20 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
 
   RED stage: the four actions are declared and explicitly refused for every
   caller (each has its own `forbid_if always()` policy, since the broad
-  create policy authorizes always), with no body. Expected classifications
-  (see the map): the D4, D5 and D6-event assertions fail first on that
-  stub's `Forbidden` (their later assertions are unexecuted); the
-  reserved-sender guard and the D5 nil campaign sequence are reached
-  behavioural RED; the D5 returned-error cases also need an injection seam
-  for the reference read that is NOT yet scoped (a prerequisite, requested
-  separately); the input and accept-list controls, the deny cases and the
-  ordinary regressions pass already: the deny cases are pending-refusal
-  controls, not least-privilege GREEN.
+  create policy authorizes always), with no body. Classifications observed
+  at the RED (see the map): the D4 creates, the D5 nonexistent, foreign and
+  missing-campaign-sequence cases (an ordinary campaign's sequence is
+  nullable, so only the action can require it), the D6 wrong-shape digests
+  and the D6 events fail first on that stub's `Forbidden`, and their later
+  assertions are unexecuted; the reserved-sender guard is reached
+  behavioural RED (the declaration has no sender guard); the D5
+  returned-error cases also need an injection seam for the reference read
+  that is NOT yet scoped (a prerequisite, requested separately). A missing
+  step sequence and a missing campaign ICP are already refused at the input
+  (required attributes), as are the missing, nil and non-string digests and
+  the server-owned fields (controls); the deny cases and the ordinary
+  regressions pass too: the deny cases are pending-refusal controls, not
+  least-privilege GREEN.
 
   Synthetic `.test` data in a sandboxed prototype binding. The database
   admits one tenant, so a foreign row exists only by moving a real row's
