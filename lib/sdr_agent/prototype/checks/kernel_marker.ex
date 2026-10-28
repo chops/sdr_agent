@@ -19,14 +19,16 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
   """
   use Ash.Policy.SimpleCheck
 
-  alias SdrAgent.Audit.Checks.KernelContext
-
   @compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @impl true
   def describe(opts), do: "an audit-kernel request carrying the prototype #{opts[:marker]} marker"
 
   if @compiled do
+    # Aliased inside the compiled branch only: the production branch never
+    # names the kernel check (no unused alias under --warnings-as-errors).
+    alias SdrAgent.Audit.Checks.KernelContext
+
     @markers %{setup: :sdr_prototype_setup, task_entry: :sdr_prototype_task_entry}
 
     @impl true
