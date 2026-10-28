@@ -122,6 +122,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     context_links: [agent_run_id: :model_result_release_agent_run_id],
     arguments: [:gate_cause_id, :gate_classification]
   ]
+  # D-237 IF-4: a prototype refusal's withheld event also records its closed
+  # code (`@prototype_codes`).
+  @refusal_event Keyword.put(@event, :arguments, [
+                   :gate_cause_id,
+                   :gate_classification,
+                   :prototype_refusal
+                 ])
 
   postgres do
     table "model_result_releases"
@@ -230,6 +237,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @gate_classifications
       end
 
+      # D-237 IF-4 (amendment item 5): the closed code of a
+      # prototype_authority_refused decision (SdrAgent.Prototype.Release);
+      # ReleaseDecision requires it there and refuses it anywhere else.
+      argument :prototype_refusal, :atom do
+        constraints one_of: @prototype_codes
+      end
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision
@@ -238,7 +252,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         where: [attribute_equals(:disposition, :released)]
 
       change {AppendEvent, [event_type: "model.result.withheld"] ++ @event},
-        where: [attribute_equals(:disposition, :withheld)]
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_does_not_equal(:reason, :prototype_authority_refused)
+        ]
+
+      change {AppendEvent, [event_type: "model.result.withheld"] ++ @refusal_event},
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_equals(:reason, :prototype_authority_refused)
+        ]
 
       change {AppendEvent, [event_type: "model.result.calibration"] ++ @event},
         where: [attribute_equals(:disposition, :calibration)]

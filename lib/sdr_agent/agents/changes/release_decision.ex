@@ -6,6 +6,15 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     1. Statically: an allowed disposition/reason pair
        (`ModelResultRelease.allowed_pair?/2`); `evidence_sha256` present for
        `:calibration` and absent otherwise; a link for `:released`.
+       The D-237 runtime partition (interfaces r6 IF-4) follows the context
+       check, before any read: in prototype runtime `:released` is refused;
+       `:released_unverified` and `:prototype_authority_refused` are refused
+       outside it; `:released_unverified` is refused outside the prototype
+       gate's own Prelocked context and, until its closed basis is recorded,
+       inside it too; `prototype_authority_refused` carries exactly one
+       `prototype_refusal` code (refused on any other reason); the
+       `:reconciled` classification only with the code
+       `witness_mode_mismatch`.
     2. Before the insert, with no row lock requested after the chain head
        (the event is appended in an after-action hook): the invocation is
        re-read **in the release's tenant** and locked `FOR SHARE`, then the
@@ -56,6 +65,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Failure
+  alias SdrAgent.Prototype
 
   @terminal [:completed, :failed, :unknown]
   @fingerprint [:disposition, :reason, :wire_witness_link_id, :evidence_sha256]
@@ -110,6 +120,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
     with {:ok, mode} <- lock_mode(changeset.context, ids),
          :ok <- check_gate_cause(changeset, mode),
+         :ok <- prototype_rules(changeset, mode),
          {:ok, invocation} <- fetch(ModelInvocation, get.(:model_invocation_id), tenant_id, mode),
          {:ok, link} <- fetch_link(get.(:wire_witness_link_id), tenant_id, mode) do
       changeset =
@@ -168,6 +179,68 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
       true -> {:error, :gate_cause_id, "must be the finalizer's selected receipt"}
     end
   end
+
+  ## D-237 runtime partition (interfaces r6 IF-4; amendment item 5)
+
+  # In prototype runtime the ordinary :released decision is unreachable;
+  # the prototype values are decided only in prototype runtime. A
+  # released_unverified decision is refused outside the prototype gate's own
+  # Prelocked context (finalizer :prototype_gate) and, inside it, without
+  # its closed basis (d237-basis/1), which no decision records yet. A
+  # prototype_authority_refused decision carries exactly one closed code,
+  # and only it may record the :reconciled classification, with the code
+  # witness_mode_mismatch (Codex 2c9450b7 ruling 3b).
+  defp prototype_rules(changeset, mode) do
+    disposition = Ash.Changeset.get_attribute(changeset, :disposition)
+    reason = Ash.Changeset.get_attribute(changeset, :reason)
+    code = Ash.Changeset.get_argument(changeset, :prototype_refusal)
+    classification = Ash.Changeset.get_argument(changeset, :gate_classification)
+
+    with :ok <- runtime_partition(disposition, reason, Prototype.runtime()),
+         :ok <- unverified(disposition, mode),
+         :ok <- refusal_code(reason, code) do
+      reconciled(classification, {reason, code})
+    end
+  end
+
+  defp runtime_partition(:released, _reason, :prototype),
+    do: {:error, :disposition, "the ordinary release is unreachable in prototype runtime"}
+
+  defp runtime_partition(_disposition, _reason, :prototype), do: :ok
+
+  defp runtime_partition(disposition, reason, _ordinary)
+       when disposition == :released_unverified or reason == :prototype_authority_refused,
+       do: {:error, :disposition, "is decided only in prototype runtime"}
+
+  defp runtime_partition(_disposition, _reason, _ordinary), do: :ok
+
+  defp unverified(:released_unverified, {:prelocked, %Prelocked{finalizer: :prototype_gate}}),
+    do: {:error, :disposition, "needs its closed basis (d237-basis/1)"}
+
+  defp unverified(:released_unverified, _mode),
+    do: {:error, :disposition, "is decided only by the prototype gate's own context"}
+
+  defp unverified(_disposition, _mode), do: :ok
+
+  defp refusal_code(:prototype_authority_refused, code) do
+    if code in ModelResultRelease.prototype_codes(),
+      do: :ok,
+      else: {:error, :prototype_refusal, "must be one prototype refusal code"}
+  end
+
+  defp refusal_code(_reason, nil), do: :ok
+
+  defp refusal_code(_reason, _code),
+    do: {:error, :prototype_refusal, "is recorded only for a prototype refusal"}
+
+  defp reconciled(:reconciled, {:prototype_authority_refused, :witness_mode_mismatch}), do: :ok
+
+  defp reconciled(:reconciled, _refusal),
+    do:
+      {:error, :gate_classification,
+       "reconciled is recorded only by the prototype gate's witness_mode_mismatch refusal"}
+
+  defp reconciled(_classification, _refusal), do: :ok
 
   # The receipt, when bound, is this invocation's reconciliation cause.
   defp check_receipt(%Prelocked{receipt_id: nil}), do: :ok
