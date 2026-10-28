@@ -28,10 +28,10 @@ defmodule SdrAgent.Outreach.Changes.PrototypeCapture do
     * the operation's immutable recipient is not suppressed by email or
       domain under Outreach's own normalised matching
       (`SdrAgent.Outreach.matching_suppressions/2`;
-      `prototype_recipient_suppressed`); a failed lookup refuses closed
-      (`prototype_suppression_unchecked`) at once, issuing no further query
-      on the possibly aborted transaction and never reading it as "not
-      suppressed";
+      `prototype_recipient_suppressed`); the lookup runs in its own
+      savepoint, and a failed lookup is rolled back to it and refuses closed
+      (`prototype_suppression_unchecked`) at once, never read as "not
+      suppressed" and never surfacing the database error;
     * the server-derived block is present (`prototype_assurance_unavailable`).
 
   The raised message carries the code only: no recipient, SQL or inner
@@ -144,10 +144,25 @@ defmodule SdrAgent.Outreach.Changes.PrototypeCapture do
       end
     end
 
+    # The lookup runs in its own savepoint: a failed query (which may abort
+    # the transaction, and which the data layer answers by rolling back the
+    # innermost transaction) is rolled back to that savepoint, so the
+    # receipt's transaction stays usable only long enough to raise the fixed
+    # refusal; no other query follows and nothing of the error is kept.
     defp lookup(email, actor) do
-      SdrAgent.Outreach.matching_suppressions(email, actor: actor)
+      case SdrAgent.Repo.transaction(fn -> matching(email, actor) end) do
+        {:ok, rows} -> {:ok, rows}
+        {:error, _rolled_back} -> :unchecked
+      end
     rescue
       _error -> :unchecked
+    end
+
+    defp matching(email, actor) do
+      case SdrAgent.Outreach.matching_suppressions(email, actor: actor) do
+        {:ok, rows} when is_list(rows) -> rows
+        _failed -> SdrAgent.Repo.rollback(:unchecked)
+      end
     end
 
     defp refuse!(code) do
