@@ -120,7 +120,8 @@ defmodule SdrAgent.PrototypeGateFixtures do
 
     assert match?({:ok, %{id: _}}, result), "provisioning failed: #{inspect(result)}"
     {:ok, grant} = result
-    grant
+    # The provisioned grant with its allocations (S1 returns them unloaded).
+    Ash.load!(grant, :allocations, authorize?: false)
   end
 
   defp worksheet(root) do
@@ -265,7 +266,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
     [event] = reserved_events(fx, invocation)
 
     tamper!(
-      "UPDATE audit_events SET payload = jsonb_set(payload, $2, $3::jsonb) WHERE id = $1",
+      "UPDATE audit_events SET payload = jsonb_set(payload, $2, $3::text::jsonb) WHERE id = $1",
       [Ecto.UUID.dump!(event.id), ["arguments", "prototype_authority", key], Jason.encode!(value)]
     )
   end

@@ -339,19 +339,42 @@ defmodule SdrAgent.Prototype.AdmissionTest do
       %{fx: fx, grant: grant}
     end
 
-    test "prototype runtime: an in-scope call the prototype gate admits is never charged", ctx do
+    # RED-b2: the authority check after the room check replaces the brake.
+    # An ordinary grant is not this binding's grant (C2 r2 provenance): an
+    # audited gate refusal before any charge, never a fallback.
+    test "prototype runtime: an in-scope call on an ordinary grant is refused grant_not_eligible",
+         ctx do
       PrototypeGateFixtures.enter!(ctx.fx)
       run = PrototypeGateFixtures.run!(ctx.fx)
       {:ok, before} = Agents.get_run(run.id, actor: ctx.fx.agent)
 
       result = PrototypeGateFixtures.reserve(ctx.fx, run)
 
-      # Forbidden, not a gate Refused: the call passed the prototype gate and
-      # the charge brake refused it; the reservation rolled back entirely.
-      assert match?({:error, %Ash.Error.Forbidden{}}, result), "reserve: #{inspect(result)}"
+      assert match?(
+               {:error,
+                %Refused{
+                  reason: :prototype_not_authorized,
+                  check: :grant_not_eligible,
+                  stage: :reservation
+                }},
+               result
+             ),
+             "reserve: #{inspect(result)}"
+
+      {:error, refused} = result
+      assert [event] = events_of_type(ctx.fx.tenant, "model.reservation.refused")
+      assert {event.id, event.agent_run_id} == {refused.event_id, run.id}
+
+      assert {event.payload["reason"], event.payload["check"], event.payload["failure_id"]} ==
+               {"prototype_not_authorized", "grant_not_eligible", refused.failure_id}
+
+      failure = Ash.get!(SdrAgent.Operations.Failure, refused.failure_id, authorize?: false)
+
+      assert {failure.class, failure.subject_resource, failure.subject_id, failure.operation_id} ==
+               {:provider_error, "SdrAgent.Agents.AgentRun", run.id, run.operation_id}
+
       assert PrototypeGateFixtures.invocations(ctx.fx) == 0
       assert events_of_type(ctx.fx.tenant, "model.invocation.reserved") == []
-      assert events_of_type(ctx.fx.tenant, "model.reservation.refused") == []
       {:ok, reread} = Agents.get_run(run.id, actor: ctx.fx.agent)
       assert reread.budget.model_calls_reserved == before.budget.model_calls_reserved
       assert charged(grant_id: ctx.grant.id) == 0

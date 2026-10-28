@@ -324,15 +324,20 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
       %{fx: fx, run: fx.run, invocation: fx.invocation}
     end
 
-    test "inside the prototype gate's own context (finalizer :prototype_gate): refused, nothing written",
+    # RED-b2: inside the gate's own context a decision still needs its closed
+    # basis; without one it is refused on :basis, and nothing is written.
+    test "inside the prototype gate's own context (finalizer :prototype_gate) without a basis: refused",
          ctx do
       result = decide_under(ctx, :prototype_gate)
 
-      assert refused_on?(result, :disposition, "needs its closed basis (d237-basis/1)"),
+      assert refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
              "decided: #{inspect(result)}"
 
       assert G.release(ctx.invocation) == nil
       assert events_of_type(ctx.fx.tenant, "model.result.released_unverified") == []
+
+      assert Agents.released_output(ctx.invocation, actor: ctx.fx.agent) ==
+               {:error, :result_not_released}
     end
 
     test "inside another Prelocked context (no finalizer): refused as not the gate's own", ctx do
