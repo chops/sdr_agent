@@ -222,10 +222,23 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
            "after the failed read: #{inspect(post)}"
   end
 
-  # One later transaction of its own: begin, successful statements, commit.
+  # Exactly one later transaction of its own (Codex 7e2eb9ab): one `begin`
+  # first, one `commit` last, no `rollback` and no other boundary, and
+  # between them only successful business statements (no fault, live read
+  # or probe).
   defp own_transaction!(segment) do
+    labels = Enum.map(segment, &elem(&1, 0))
+    delimiters = for label <- labels, label in [:begin, :commit, :rollback], do: label
+
+    assert delimiters == [:begin, :commit],
+           "refusal transaction delimiters: #{inspect(delimiters)}"
+
     assert match?([{:begin, :ok} | _], segment), "the refusal transaction: #{inspect(segment)}"
     assert List.last(segment) == {:commit, :ok}, "the refusal transaction: #{inspect(segment)}"
+    interior = segment |> Enum.drop(1) |> Enum.drop(-1)
+    assert interior != [], "the refusal transaction is empty"
+    foreign = for {label, _code} <- interior, not match?({:other, _}, label), do: label
+    assert foreign == [], "inside the refusal transaction: #{inspect(foreign)}"
     failed = for {label, code} <- segment, code != :ok, do: label
     assert failed == [], "the refusal transaction failed: #{inspect(failed)}"
   end
