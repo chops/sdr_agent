@@ -31,10 +31,17 @@ defmodule SdrAgent.Prototype.SafeLog do
   passes an event through: an internal failure yields the withheld event
   at `:error`.
 
-  Staged GREEN (D-237 S1b, Codex b069e93f): `filter/2` is implemented;
-  `event/2`, `say/2`, `attach/0,1` and `detach/0` still return
+  Levels (Codex b069e93f ruling 2): `event/2` logs a valid event at
+  `:warning` when its `result` is `:refused` or `:rolled_back`, at `:info`
+  otherwise, and a malformed one at `:warning`. `say/2` prints a malformed
+  one as the same fixed line, `"prototype: log content withheld"` (ruling 3).
+
+  Staged GREEN (D-237 S1b, Codex b069e93f): `filter/2`, `event/2` and
+  `say/2` are implemented; `attach/0,1` and `detach/0` still return
   `{:error, :not_implemented}`.
   """
+
+  require Logger
 
   @withheld "prototype: log content withheld"
   @levels [:emergency, :alert, :critical, :error, :warning, :notice, :info, :debug]
@@ -193,13 +200,58 @@ defmodule SdrAgent.Prototype.SafeLog do
   def reasons(:provision), do: @provision_reasons
   def reasons(:op), do: @op_reasons
 
-  @doc "Emits one content-free log event of `code` with `refs`."
-  @spec event(code(), keyword()) :: :ok | {:error, :not_implemented}
-  def event(_code, _refs), do: red({:error, :not_implemented})
+  @doc """
+  Emits one content-free log event of `code` with `refs`: the fixed message
+  `"prototype: <code>"` with the metadata `sdr_prototype_code` and
+  `sdr_prototype_refs` (in shape order), at `:warning` for a `:refused` or
+  `:rolled_back` result and `:info` otherwise. Refs that do not match the
+  code's pinned shape log `"prototype: log content withheld"` at `:warning`
+  instead, with `sdr_prototype_code: :withheld` and no ref value. Always
+  `:ok`.
+  """
+  @spec event(code(), keyword()) :: :ok
+  def event(code, refs) do
+    case validate(code, refs) do
+      {:ok, ordered} ->
+        # Structural keys, read only by the content-free filter; never for the formatter.
+        # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
+        Logger.log(event_level(ordered), "prototype: #{code}",
+          sdr_prototype_code: code,
+          sdr_prototype_refs: ordered
+        )
 
-  @doc "Prints one content-free stdout line of `code` with `refs`."
-  @spec say(code(), keyword()) :: :ok | {:error, :not_implemented}
-  def say(_code, _refs), do: red({:error, :not_implemented})
+      :error ->
+        # Structural key, read only by the content-free filter; never for the formatter.
+        # credo:disable-for-next-line Credo.Check.Warning.MissedMetadataKeyInLoggerConfig
+        Logger.log(:warning, @withheld, sdr_prototype_code: :withheld)
+    end
+
+    :ok
+  end
+
+  defp event_level(refs) do
+    if Keyword.get(refs, :result) in [:refused, :rolled_back], do: :warning, else: :info
+  end
+
+  @doc """
+  Prints one stdout line of `code` with `refs` in shape order
+  (`prototype: <code> key=value ...`). Refs that do not match the code's
+  pinned shape print exactly `"prototype: log content withheld"`, with no
+  code or value. Always `:ok`.
+  """
+  @spec say(code(), keyword()) :: :ok
+  def say(code, refs) do
+    line =
+      case validate(code, refs) do
+        {:ok, ordered} -> Enum.join(["prototype: #{code}" | Enum.map(ordered, &pair/1)], " ")
+        :error -> @withheld
+      end
+
+    IO.puts(line)
+  end
+
+  # A validated ref: a closed atom, a bounded integer or a canonical UUID.
+  defp pair({key, value}), do: "#{key}=#{value}"
 
   @doc """
   The primary filter `:sdr_prototype_content_free` as a pure `:logger`
