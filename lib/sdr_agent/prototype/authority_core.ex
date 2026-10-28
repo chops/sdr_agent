@@ -88,6 +88,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @funded_ceiling 50
     @window_starts_at "2026-10-28T02:38:32.000000Z"
     @worksheet_max_bytes 16_384
+    # A conservative processing bound per counts-only evidence receipt (the
+    # worksheet's own 16 KiB; accepted by Codex 47825d4a). It is not an IF-2
+    # value: IF-2 states no evidence size. Larger is :budget_unbounded.
+    @evidence_max_bytes 16_384
     @worksheet_keys ~w(schema shared_total window_starts_at as_of routes previous_bindings)
     @route_keys ~w(route basis consumed evidence)
     @evidence_keys ~w(path sha256)
@@ -170,6 +174,121 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
     else
       defp current, do: red(:ordinary)
+    end
+
+    @doc """
+    Creates or replays this agent session's delegation (IF-3), from the boot
+    snapshot only, in this order: the snapshot (else
+    `:not_prototype_runtime`), an exactly supported agent (`:invalid_agent`),
+    a bounded correlation (`:invalid_correlation`) and the live check
+    (`:binding_mismatch`, on every call, replays included). Then, in one
+    `SdrAgent.Audit.transaction/1`, a replay of (binding, agent,
+    correlation) returns the existing id with no row or event; otherwise
+    `PrototypeDelegation :enter` creates exactly one row and one event, as
+    the kernel with the `:task_entry` marker, with binding, tenant and
+    anchor forced from the snapshot.
+
+    A concurrent creator's unique violation on that identity is re-read
+    only AFTER the failed top-level transaction has rolled back, never
+    inside the aborted transaction; any other failure is
+    `:binding_mismatch`, never a replay. A call inside an already-open
+    transaction (a nested Audit or Repo transaction is not a savepoint) is
+    refused with `:binding_mismatch` after the input checks and before any
+    query or write; the one caller, the task entry, never nests.
+    """
+    @spec enter_session(term(), term()) ::
+            {:ok, Ecto.UUID.t()} | {:error, SdrAgent.Prototype.enter_error()}
+    def enter_session(agent, correlation) do
+      with {:ok, snapshot} <- binding(),
+           {:ok, agent} <- setup_agent(agent),
+           {:ok, correlation} <- setup_correlation(correlation),
+           :ok <- not_nested(),
+           :ok <- check_live() do
+        enter(snapshot, agent, correlation)
+      end
+    end
+
+    # A nested Audit.transaction is a plain nested Repo.transaction, not a
+    # savepoint (Codex a95a89fb R1): the unique-race recovery could only run
+    # in an aborted caller transaction. The task entry is the one caller and
+    # never nests, so an already-open transaction is refused before any
+    # query or write.
+    defp not_nested, do: if(Repo.in_transaction?(), do: {:error, :binding_mismatch}, else: :ok)
+
+    defp enter(snapshot, agent, correlation) do
+      fn -> replay_or_create(snapshot, agent, correlation) end
+      |> Audit.transaction()
+      |> case do
+        {:ok, id} ->
+          {:ok, id}
+
+        {:error, failure} ->
+          # The transaction (or savepoint) has rolled back: only now may a
+          # unique conflict on the session identity be re-read.
+          if session_conflict?(failure),
+            do: reread_session(snapshot, agent, correlation),
+            else: {:error, :binding_mismatch}
+      end
+    end
+
+    defp replay_or_create(snapshot, agent, correlation) do
+      case seam_lookup(find_session(snapshot.id, agent, correlation)) do
+        {:ok, %PrototypeDelegation{id: id}} -> id
+        {:ok, nil} -> create_session(snapshot, agent, correlation)
+        _error -> Repo.rollback(:binding_mismatch)
+      end
+    end
+
+    defp create_session(snapshot, agent, correlation) do
+      seam(:before_session_create, snapshot)
+
+      PrototypeDelegation
+      |> Ash.Changeset.for_create(
+        :enter,
+        %{agent: agent, session_correlation: correlation},
+        actor: Actor.system(:kernel, snapshot.tenant_id),
+        context: KernelMarker.context(:task_entry)
+      )
+      |> Ash.create()
+      |> case do
+        {:ok, delegation} -> delegation.id
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+
+    defp reread_session(snapshot, agent, correlation) do
+      case find_session(snapshot.id, agent, correlation) do
+        {:ok, %PrototypeDelegation{id: id}} -> {:ok, id}
+        _none_or_error -> {:error, :binding_mismatch}
+      end
+    end
+
+    # Exactly the identity's unique violation (AshPostgres reports it as
+    # InvalidAttribute with the constraint name), whether Ash rolled the
+    # transaction back with its changeset or returned the error class.
+    @session_identity_index "prototype_delegations_unique_session_index"
+
+    defp session_conflict?(%Ash.Changeset{errors: errors}), do: unique_session?(errors)
+    defp session_conflict?(%Ash.Error.Invalid{errors: errors}), do: unique_session?(errors)
+    defp session_conflict?(_other), do: false
+
+    defp unique_session?(errors) do
+      Enum.any?(List.wrap(errors), fn
+        %Ash.Error.Changes.InvalidAttribute{private_vars: vars} when is_list(vars) ->
+          vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
+
+        _other ->
+          false
+      end)
+    end
+
+    defp find_session(binding_id, agent, correlation) do
+      PrototypeDelegation
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.filter(
+        binding_id == ^binding_id and agent == ^agent and session_correlation == ^correlation
+      )
+      |> Ash.read_one()
     end
 
     @doc """
@@ -344,9 +463,20 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
         :ok
       end
+
+      # The unique-race proof: when the calling process sets
+      # `{SdrAgent.Prototype.Authority, :miss_session_lookup}` to true, the
+      # in-transaction session lookup reports none (a competitor that
+      # committed after the lookup). The post-rollback re-read is unaffected.
+      defp seam_lookup(result) do
+        if Process.get({__MODULE__, :miss_session_lookup}) == true,
+          do: {:ok, nil},
+          else: result
+      end
     else
       defp seam_identity(identity), do: identity
       defp seam(_name, _arg), do: :ok
+      defp seam_lookup(result), do: result
     end
 
     @doc """
@@ -504,10 +634,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     4. Every evidence reference resolves under the root to its exact bytes.
        Otherwise `:budget_unbounded`.
 
-    Stage (D-237 S1 C1, Codex a6850b13): steps 1-3 are implemented. Step 4
-    waits for the reviewed shared private reader (S1b), so every evidence
-    reference is unresolved and refuses `:budget_unbounded` (fail closed):
-    no worksheet passes yet.
+    Step 4 reads each of the six references (five routes and
+    `previous_bindings`) once through S1b's reviewed private reader,
+    `SdrAgent.Prototype.BoundedJson.read_private/4` (Codex 983296fb): the
+    IF-2 path grammar, a 0700 real root, no group- or other-writable
+    directory, a 0600 regular leaf, one handle and the exact sha256. Any
+    refusal of the reader is `:budget_unbounded`; no evidence byte is
+    returned or logged.
     """
     @spec check_worksheet(binary(), String.t(), Path.t()) ::
             {:ok, %{sha256: String.t(), remaining: non_neg_integer()}}
@@ -614,10 +747,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         else: {:error, :budget_below_ceiling}
     end
 
-    # Step 4 waits for the reviewed shared private reader (S1b; Codex
-    # a6850b13 D4): until then no evidence reference resolves, so every
-    # otherwise-sufficient worksheet refuses (fail closed).
-    defp evidence_resolved(_worksheet, _evidence_root), do: red({:error, :budget_unbounded})
+    # Step 4: every reference resolves under the root to its exact bytes
+    # through the shared reader (Codex a6850b13 D4); the bytes are dropped.
+    defp evidence_resolved(worksheet, evidence_root) do
+      references = [
+        worksheet["previous_bindings"]["evidence"]
+        | Enum.map(worksheet["routes"], & &1["evidence"])
+      ]
+
+      # A duplicated reference (the same path twice) is unbounded (IF-2).
+      distinct? = Enum.uniq_by(references, & &1["path"]) == references
+
+      if distinct? and Enum.all?(references, &resolves?(&1, evidence_root)),
+        do: :ok,
+        else: {:error, :budget_unbounded}
+    end
+
+    defp resolves?(%{"path" => path, "sha256" => sha256}, root) do
+      match?({:ok, _bytes}, BoundedJson.read_private(root, path, sha256, @evidence_max_bytes))
+    end
 
     defp hex(digest), do: Base.encode16(digest, case: :lower)
 
