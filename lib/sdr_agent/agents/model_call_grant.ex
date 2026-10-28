@@ -133,6 +133,21 @@ defmodule SdrAgent.Agents.ModelCallGrant do
               [event_type: "model.grant.allocation_released", previous: [:revision]] ++ @event}
     end
 
+    # D-237 (interfaces r6 IF-2 "Provisioning"; Codex a6850b13): the one
+    # prototype grant. RED: declared inert and deny-only (`forbid_if always()`
+    # below). Its in-action validation, server-derived arguments and
+    # OperatorAction policy come with C2 GREEN; caller values for the
+    # server-derived arguments will be refused.
+    create :provision_prototype do
+      accept []
+      argument :worksheet, :string, allow_nil?: false, constraints: [trim?: false]
+      argument :evidence_root, :string, allow_nil?: false, constraints: [trim?: false]
+      argument :budget_worksheet_sha256, :string
+      argument :funding_id, :string
+      argument :delegation_id, :string
+      argument :binding_id, :string
+    end
+
     update :revoke do
       require_atomic? false
       accept []
@@ -152,6 +167,11 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   policies do
     policy action_type([:create, :update, :destroy, :action]) do
       authorize_if CurrentAdmin
+    end
+
+    # RED (D-237 S1 C2): deny-only until its reviewed GREEN.
+    policy action(:provision_prototype) do
+      forbid_if always()
     end
 
     policy action_type(:read) do

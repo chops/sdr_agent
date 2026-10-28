@@ -25,6 +25,21 @@ defmodule SdrAgent.Audit.Payload do
       recorded purpose is fixed by the scope. Same fail-closed
       `payload_view` access as `:read_content`, under REC's own identity
       (S12 supplementary ruling S1–S3).
+    * `:store_prototype_input` — D-237: the prototype operator only, and only
+      inside the private scope the D-237 import and seed functions attach
+      (`SdrAgent.Audit.Checks.PrototypeInputScope`): the actor's tenant and
+      delegation, an approved purpose and the exact sha256s of the bytes
+      being stored. Same insert-if-absent body as `:store`, no AuditEvent.
+    * `:read_dossier_source_content` — D-237: AGT only, in the live binding,
+      inside the scope `SdrAgent.Research.read_dossier_sources/4` builds
+      (`SdrAgent.Audit.Checks.DossierSourceScope`): the sources of its run's
+      lead entry. A fail-closed `payload_view` access under AGT's own
+      identity, purpose `d237_dossier_source`.
+    * `:read_prototype_review_content` — D-237: the prototype operator only,
+      inside the scope `SdrAgent.Prototype.Output` builds
+      (`SdrAgent.Audit.Checks.PrototypeReviewScope`): one receipt's rendered
+      payload. A fail-closed `payload_view` access under the operator's
+      identity, purpose `d237_prototype_review`.
 
   Append-only (trigger).
   """
@@ -99,6 +114,33 @@ defmodule SdrAgent.Audit.Payload do
       change SdrAgent.Audit.Changes.TraceIds
     end
 
+    # D-237 (interfaces r6 R4): the operator's scoped store, identical to
+    # `:store` (content-addressed, insert-if-absent, no AuditEvent; the
+    # referencing DossierEntry, DossierSource or SettingsRevision event
+    # carries the hash). Authorized only by `Checks.PrototypeInputScope`.
+    create :store_prototype_input do
+      accept [:content, :content_type]
+      upsert? true
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
+      change SdrAgent.Audit.Changes.SetTenant
+
+      change fn changeset, _context ->
+        case Ash.Changeset.get_attribute(changeset, :content) do
+          content when is_binary(content) ->
+            changeset
+            |> Ash.Changeset.force_change_attribute(:sha256, :crypto.hash(:sha256, content))
+            |> Ash.Changeset.force_change_attribute(:byte_size, byte_size(content))
+
+          _ ->
+            changeset
+        end
+      end
+
+      change SdrAgent.Audit.Changes.TraceIds
+    end
+
     action :read_content, :binary do
       description "Return a payload's content, recording a payload_view AuditAccess first."
       # The kernel opens (or joins) the transaction itself, so a refusal does
@@ -131,6 +173,38 @@ defmodule SdrAgent.Audit.Payload do
         )
       end
     end
+
+    # D-237 (supplement 1 r2 §6a): AGT reads one dossier source of its run's
+    # lead entry, inside the scope `Research.read_dossier_sources/4` builds.
+    action :read_dossier_source_content, :binary do
+      description "AGT (D-237): return one scoped dossier source payload, recording a payload_view first."
+      transaction? false
+      argument :sha256, :binary, allow_nil?: false
+
+      run fn input, context ->
+        SdrAgent.Audit.Kernel.read_content(
+          input.arguments.sha256,
+          Checks.DossierSourceScope.purpose(),
+          context.actor
+        )
+      end
+    end
+
+    # D-237 (interfaces r6 R4): the operator reads one receipt's rendered
+    # payload, inside the scope `Prototype.Output` builds.
+    action :read_prototype_review_content, :binary do
+      description "OPR (D-237): return one scoped review payload, recording a payload_view first."
+      transaction? false
+      argument :sha256, :binary, allow_nil?: false
+
+      run fn input, context ->
+        SdrAgent.Audit.Kernel.read_content(
+          input.arguments.sha256,
+          Checks.PrototypeReviewScope.purpose(),
+          context.actor
+        )
+      end
+    end
   end
 
   policies do
@@ -159,6 +233,18 @@ defmodule SdrAgent.Audit.Payload do
 
     policy action(:read_reconciliation_content) do
       authorize_if Checks.ReconciliationScope
+    end
+
+    policy action(:store_prototype_input) do
+      authorize_if Checks.PrototypeInputScope
+    end
+
+    policy action(:read_dossier_source_content) do
+      authorize_if Checks.DossierSourceScope
+    end
+
+    policy action(:read_prototype_review_content) do
+      authorize_if Checks.PrototypeReviewScope
     end
 
     policy action_type(:read) do
