@@ -75,6 +75,9 @@ defmodule SdrAgent.Prototype.ContainmentConfigTest do
     for kind <- [:provision, :import, :op, :serve] do
       assert Containment.phases(kind) == [:sealed], "#{kind} has a phase beyond :sealed"
     end
+
+    assert Containment.phases(:export) == {:error, :descriptor_unknown},
+           "an unadopted kind has a phase sequence"
   end
 
   test "config_check: a clean environment is accepted for every adopted kind" do
@@ -99,7 +102,12 @@ defmodule SdrAgent.Prototype.ContainmentConfigTest do
       {Map.put(@clean, "PHX_SERVER", ""), :serve, :phx_server_env},
       {Map.put(@clean, "PHX_SERVER", "true"), :import, :phx_server_env},
       {Map.merge(@clean, %{"OTEL_X" => "1", "PHX_SERVER" => "1"}), :serve, :otel_env},
-      {:not_a_map, :serve, :descriptor_unknown}
+      {:not_a_map, :serve, :descriptor_unknown},
+      {Map.put(@clean, "PATH", :not_a_binary), :serve, :descriptor_unknown},
+      {Map.put(@clean, :__struct__, __MODULE__), :export, :entry_unadopted},
+      {Map.put(@clean, :__struct__, __MODULE__), :serve, :descriptor_unknown},
+      {Map.put(@clean, :__struct__, MapSet), :serve, :descriptor_unknown},
+      {Map.put(@clean, :__struct__, "not_a_module"), :serve, :descriptor_unknown}
     ]
 
     for {{env, entry, code}, index} <- Enum.with_index(rows) do

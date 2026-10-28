@@ -157,7 +157,8 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
     rows = [
       {{:x_test_f, {fn _event, _config -> :stop end, []}}, :handler_closure},
       {{:x_test_f, {&SdrAgent.Prototype.SafeLog.filter/2, self()}}, :descriptor_unknown},
-      {{:x_test_f}, :descriptor_unknown}
+      {{:x_test_f}, :descriptor_unknown},
+      {{:x_test_f, {&OpentelemetryOban.JobHandler.handle_job_start/4, []}}, :handler_forbidden}
     ]
 
     for {{filter, code}, index} <- Enum.with_index(rows) do
@@ -222,7 +223,11 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
       {[{:inet, ~c"tcp_inet", {:ok, [:open, :mystery]}}], :listener_unknown},
       {[{:socket, {:ok, %{rstates: [:listen]}}}], :listener_unknown},
       {List.duplicate({:inet, ~c"tcp_inet", {:ok, [:open, :connected]}}, 1025),
-       :descriptor_unbounded}
+       :descriptor_unbounded},
+      {[{:inet, ~c"sctp_inet", {:ok, [:open, :bound]}}], :listener_present},
+      {[{:inet, ~c"tcp_inet", {:ok, []}}], :listener_unknown},
+      {[{:inet, ~c"raw_inet", {:ok, [:open]}}], :listener_unknown},
+      {:not_a_census, :listener_unknown}
     ]
 
     for {{entries, code}, index} <- Enum.with_index(rows) do
@@ -244,6 +249,9 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
     assert Containment.bounded?(worst) == true, "the worst accepted descriptor was refused"
     assert Containment.bounded?(%{a: [1, "b", {:c, 2}]}) == true, "a plain term was refused"
     assert Containment.bounded?([[[[[[[[1]]]]]]]]) == true, "depth 8 was refused"
+
+    assert Containment.bounded?(List.to_tuple(Enum.to_list(1..65))) == true,
+           "a 65-element tuple was refused (only maps are capped at 64 entries)"
 
     assert Containment.bounded?(List.duplicate(Enum.to_list(1..60), 512)) == true,
            "31233 nodes were refused"
@@ -304,7 +312,11 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
       {Map.delete(@descriptor, :anchor_sinks), :descriptor_unknown},
       {%{@descriptor | tracers: List.duplicate({:global, @tracer}, 513)}, :descriptor_unbounded},
       {Map.delete(@descriptor, :logger), :descriptor_unknown},
-      {Map.put(@descriptor, :extra, 1), :descriptor_unknown}
+      {Map.put(@descriptor, :extra, 1), :descriptor_unknown},
+      {%{@descriptor | tracers: []}, :tracer_provider},
+      {%{@descriptor | handlers: List.duplicate(@query_log, 257)}, :descriptor_unbounded},
+      {put_in(@descriptor, [:env, :names], ["ERL_CRASH_DUMP_BYTES", "HOME", "PATH", "X_TEST"]),
+       :seal_mismatch}
     ]
 
     for {{descriptor, code}, index} <- Enum.with_index(rows) do
@@ -336,6 +348,56 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
     assert Containment.evaluate(:precheck, :serve, forbidden, @pinned) ==
              {:error, :handler_forbidden},
            "the precheck accepted a forbidden handler family"
+
+    assert Containment.evaluate(:other, :serve, @descriptor, @pinned) ==
+             {:error, :descriptor_unknown},
+           "an unknown gate was evaluated"
+
+    assert Containment.evaluate(:seal, :export, @descriptor, @pinned) ==
+             {:error, :entry_unadopted},
+           "an unadopted kind was evaluated"
+
+    # r2 (Codex 9584536a R2, R3): the projected Logger-handler schema and
+    # the forbidden family over every projected filter, through precheck.
+    std = @std_projection
+    pubsub = Phoenix.LiveDashboard.LoggerPubSubBackend
+    mcp = Tidewave.MCP.Logger
+    head = @descriptor.logger.filters
+    handlers = fn list -> put_in(@descriptor, [:logger, :handlers], list) end
+    primary = fn list -> put_in(@descriptor, [:logger, :filters], list) end
+    vendor = {:x_test_vendor, {OpentelemetryOban.Logger, :filter, 2}, []}
+    family = {:x_test_family, {OpentelemetryBandit, :filter, 2}, []}
+    near_miss = {:x_test_near, {OpentelemetryObanx.Logger, :filter, 2}, []}
+    req_llm = {:x_test_req, {ReqLLM.OpenTelemetry, :filter, 2}, []}
+    bad_level = handlers.([%{std | level: :not_a_level}])
+
+    rows = [
+      {bad_level, {:error, :descriptor_unknown}},
+      {handlers.([%{std | filter_default: :maybe}]), {:error, :descriptor_unknown}},
+      {handlers.([%{std | filters: :not_filters}]), {:error, :descriptor_unknown}},
+      {handlers.([%{std | filters: [{:x_test_f, :not_an_mfa, []}]}]),
+       {:error, :descriptor_unknown}},
+      {handlers.([%{std | formatter: {:logger_formatter, %{}}}]), {:error, :descriptor_unknown}},
+      {handlers.([%{std | destination: :somewhere}]), {:error, :descriptor_unknown}},
+      {handlers.([%{std | id: :x_test_other, module: pubsub, destination: {:module, pubsub}}]),
+       {:error, :descriptor_unknown}},
+      {handlers.([std, %{std | id: mcp, module: mcp, destination: {:module, mcp}}]), :ok},
+      {primary.(head ++ [vendor]), {:error, :handler_forbidden}},
+      {primary.(head ++ [family]), {:error, :handler_forbidden}},
+      {primary.(head ++ [near_miss]), :ok},
+      {handlers.([%{std | filters: [req_llm]}]), {:error, :handler_forbidden}}
+    ]
+
+    for {{descriptor, expected}, index} <- Enum.with_index(rows) do
+      assert Containment.evaluate(:precheck, :serve, descriptor, @pinned) == expected,
+             "precheck row #{index} is not #{inspect(expected)}"
+    end
+
+    assert Containment.canonical(bad_level) == {:error, :descriptor_unknown},
+           "a malformed Logger projection was canonicalized"
+
+    assert Containment.fingerprint(bad_level) == {:error, :descriptor_unknown},
+           "a malformed Logger projection was fingerprinted"
   end
 
   test "fingerprint: canonical ordering, and the tracer cache excluded" do
@@ -360,11 +422,16 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
            }) ==
              fingerprint,
            "a new valid tracer cache entry changed the fingerprint"
+
+    assert Containment.fingerprint(%{}) == {:error, :descriptor_unknown},
+           "a malformed descriptor was fingerprinted"
   end
 
   test "seal, advance and recheck decisions" do
     assert Containment.seal_decision(nil, :serve, [:sealed]) == {:put, {:serve, 0}},
            "a first seal was not put"
+
+    hex = String.duplicate("a", 64)
 
     rows = [
       {Containment.seal_decision({:serve, 0}, :serve, [:sealed]), {:error, :seal_exists}},
@@ -388,7 +455,16 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
          String.duplicate("b", 64)
        ), {:error, :seal_mismatch}},
       {Containment.recheck_decision(nil, String.duplicate("a", 64), String.duplicate("a", 64)),
-       {:error, :seal_absent}}
+       {:error, :seal_absent}},
+      {Containment.seal_decision(nil, :setup, [:sealed]), {:error, :seal_phase}},
+      {Containment.recheck_decision({:serve, 0}, "x.test", "x.test"), {:error, :seal_mismatch}},
+      {Containment.recheck_decision({:setup, 4}, hex, hex), :ok},
+      {Containment.recheck_decision({:serve, 1}, hex, hex), {:error, :seal_mismatch}},
+      {Containment.recheck_decision({:setup, 5}, hex, hex), {:error, :seal_mismatch}},
+      {Containment.recheck_decision({:setup, 4096}, hex, hex), {:error, :seal_mismatch}},
+      {Containment.recheck_decision({:setup, -1}, hex, hex), {:error, :seal_mismatch}},
+      {Containment.recheck_decision({:setup, :one}, hex, hex), {:error, :seal_mismatch}},
+      {Containment.advance_decision({:setup, -1}, :setup, :sealed), {:error, :seal_phase}}
     ]
 
     for {{actual, expected}, index} <- Enum.with_index(rows) do

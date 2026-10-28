@@ -63,7 +63,8 @@ defmodule SdrAgent.Prototype.ClosedErrorEngineShapeTest do
       {%{kind: :error, reason: %ArgumentError{message: "canary"}, stacktrace: []}, @closed},
       {%{kind: :throw, reason: "canary", stacktrace: []}, @closed},
       {%{kind: :exit, reason: {:shutdown, "canary"}, stacktrace: []}, @closed},
-      {nil, nil}
+      {nil, nil},
+      {:not_a_map, @closed}
     ]
 
     for {{unsaved, expected}, index} <- Enum.with_index(rows) do
