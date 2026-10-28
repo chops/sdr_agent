@@ -90,7 +90,10 @@ defmodule SdrAgent.Prototype.ClusterTest do
   test "parse_marker keeps leading zeros as text (compared as text later)" do
     zeros = String.replace(@good, "7400000000000000001", "07400000000000000001")
 
-    assert {:ok, %{system_identifier: "07400000000000000001"}} = Cluster.parse_marker(zeros),
+    assert match?(
+             {:ok, %{system_identifier: "07400000000000000001"}},
+             Cluster.parse_marker(zeros)
+           ),
            "a leading-zero identifier was normalized or refused by the parser"
   end
 
