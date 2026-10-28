@@ -55,6 +55,13 @@ defmodule SdrAgent.Prototype.AdmissionTest do
     error -> {:raised, error.__struct__}
   end
 
+  # Committed invocations charged to a grant or an allocation.
+  defp charged(filter) do
+    ModelInvocation
+    |> Ash.Query.do_filter(filter)
+    |> Ash.count!(authorize?: false)
+  end
+
   # The shape of a reservation result, without its content.
   defp outcome({:error, %Ash.Error.Forbidden{}}), do: :forbidden
   defp outcome({:error, %{__struct__: error}}), do: {:error, error}
@@ -157,7 +164,7 @@ defmodule SdrAgent.Prototype.AdmissionTest do
       # reservation, reservation event or charge, for ClaudeCLI and the
       # Fake, atom- or string-keyed.
       tenant = bootstrap!()
-      AgentsFixtures.grant!(tenant)
+      grant = AgentsFixtures.grant!(tenant)
       %{run: run, agent: agent} = AgentsFixtures.running_run(tenant)
       n = System.unique_integer([:positive])
 
@@ -191,6 +198,11 @@ defmodule SdrAgent.Prototype.AdmissionTest do
       assert events_of_type(tenant, "model.invocation.reserved") == []
       {:ok, reread} = Agents.get_run(run.id, actor: agent)
       assert reread.budget.model_calls_reserved == run.budget.model_calls_reserved
+
+      # No charge: grant and allocation consumption derive from committed
+      # charged invocations.
+      assert charged(grant_id: grant.id) == 0
+      assert charged(allocation_id: hd(grant.allocations).id) == 0
     end
   end
 end
