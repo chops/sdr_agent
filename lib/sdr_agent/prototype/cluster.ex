@@ -1,6 +1,8 @@
-# DRAFT r2 (outside the repository; review only). Deny-only declarations:
-# every function returns {:error, :not_implemented}. Compiled only in builds
-# with the prototype authority; the production build has no cluster code.
+# Pure GREEN (S4 IF-7): the reason family, the pinned facts, the three pure
+# parsers, the paths-map shape and the malformed-map refusal of check/1.
+# check/1 on a valid map and marker/0 stay deny-only: no filesystem,
+# command or reader behaviour exists yet. Compiled only in builds with the
+# prototype authority; the production build has no cluster code.
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.Cluster do
     @moduledoc """
@@ -75,8 +77,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     passed these checks" — never absence, adoption of another directory, or
     permission to repair.
 
-    Stage: deny-only (S4 IF-7 r2 draft). Every function returns
-    `{:error, :not_implemented}`.
+    Stage: pure GREEN. `reasons/0`, `pinned/0`, `parse_marker/1`,
+    `parse_control/1`, `parse_uid/1`, `paths_ok?/1` and step 0 of `check/1`
+    are implemented. `check/1` on a valid paths map and `marker/0` still
+    return `{:error, :not_implemented}`: steps 1-12 do not exist yet.
     """
 
     @type marker :: %{system_identifier: pos_integer(), data_dir: String.t()}
@@ -106,13 +110,44 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
             binary: String.t()
           }
 
+    @reasons [
+      :uid_unknown,
+      :marker_missing,
+      :marker_not_owned,
+      :marker_invalid,
+      :marker_mismatch,
+      :data_dir_not_owned,
+      :binary_mismatch,
+      :control_unreadable,
+      :control_mismatch,
+      :socket_dir_not_owned,
+      :cluster_check_failed
+    ]
+    # bin/prototype-pg:26-29 (S4 09ad3ce).
+    @pinned %{
+      root: "/Users/charles/.local/state/sdr-agent/prototype/d237",
+      socket_dir: "/private/tmp/d237-pg",
+      port: 5541,
+      pg_bin: "/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin"
+    }
+    @path_keys [:pg_bin, :port, :root, :socket_dir]
+    # <P>: 1..1024 bytes of printable ASCII without `"` (0x22) or `\` (0x5C).
+    @p "[\\x20\\x21\\x23-\\x5B\\x5D-\\x7E]{1,1024}"
+    @marker ~r/\A\{"system_identifier":"([0-9]{1,20})","data_dir":"(#{@p})","socket_dir":"(#{@p})","port":([0-9]{1,5}),"binary":"(#{@p})"\}\n\z/
+    @marker_max 4096
+    @control_label "Database system identifier:"
+    @control_line ~r/\ADatabase system identifier: +([0-9]{1,20})\z/
+    @control_max 65_536
+    @uid ~r/\A([0-9]{1,10})\n\z/
+    @path_byte ~r/\A[\x20-\x7E]+\z/
+
     @doc "The pinned cluster facts (equal to `bin/prototype-pg:26-29`)."
-    @spec pinned() :: paths() | {:error, :not_implemented}
-    def pinned, do: red({:error, :not_implemented})
+    @spec pinned() :: paths()
+    def pinned, do: @pinned
 
     @doc "The closed failure family, in step order."
-    @spec reasons() :: [failure()] | {:error, :not_implemented}
-    def reasons, do: red({:error, :not_implemented})
+    @spec reasons() :: [failure()]
+    def reasons, do: @reasons
 
     @doc "Runs the proof on the pinned facts."
     @spec marker() :: {:ok, marker()} | {:error, failure() | :not_implemented}
@@ -120,7 +155,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc "Runs the proof on an explicit, trusted paths map (tests, scratch roots)."
     @spec check(term()) :: {:ok, marker()} | {:error, failure() | :not_implemented}
-    def check(_paths), do: red({:error, :not_implemented})
+    def check(paths) do
+      if paths_ok?(paths),
+        do: red({:error, :not_implemented}),
+        else: {:error, :cluster_check_failed}
+    end
 
     @doc """
     Pure: the exact marker template. `{:ok, fields}` with the field TEXTS, or
@@ -130,28 +169,85 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     `{"system_identifier":"<1-20 [0-9]>","data_dir":"<P>","socket_dir":"<P>","port":<1-5 [0-9]>,"binary":"<P>"}\\n`,
     where `<P>` is 1..1024 bytes of printable ASCII without `"` or `\\`.
     """
-    @spec parse_marker(binary()) :: {:ok, fields()} | {:error, :marker_invalid | :not_implemented}
-    def parse_marker(_bytes), do: red({:error, :not_implemented})
+    @spec parse_marker(binary()) :: {:ok, fields()} | {:error, :marker_invalid}
+    def parse_marker(bytes) when is_binary(bytes) and byte_size(bytes) <= @marker_max do
+      case Regex.run(@marker, bytes, capture: :all_but_first) do
+        [identifier, data_dir, socket_dir, port, binary] ->
+          {:ok,
+           %{
+             system_identifier: identifier,
+             data_dir: data_dir,
+             socket_dir: socket_dir,
+             port: port,
+             binary: binary
+           }}
+
+        nil ->
+          {:error, :marker_invalid}
+      end
+    end
+
+    def parse_marker(_bytes), do: {:error, :marker_invalid}
 
     @doc """
     Pure: the control-file identifier TEXT from captured `pg_controldata`
     output: exactly one line equal to `Database system identifier:` + one
-    or more spaces + 1-20 ASCII digits; at most 65536 bytes in total.
+    or more spaces + 1-20 ASCII digits; at most 65536 bytes in total. Any
+    other line starting with the label also refuses.
     """
-    @spec parse_control(binary()) ::
-            {:ok, String.t()} | {:error, :control_unreadable | :not_implemented}
-    def parse_control(_output), do: red({:error, :not_implemented})
+    @spec parse_control(binary()) :: {:ok, String.t()} | {:error, :control_unreadable}
+    def parse_control(output) when is_binary(output) and byte_size(output) <= @control_max do
+      labelled =
+        output
+        |> String.split("\n")
+        |> Enum.filter(&String.starts_with?(&1, @control_label))
+
+      with [line] <- labelled,
+           [digits] <- Regex.run(@control_line, line, capture: :all_but_first) do
+        {:ok, digits}
+      else
+        _other -> {:error, :control_unreadable}
+      end
+    end
+
+    def parse_control(_output), do: {:error, :control_unreadable}
 
     @doc "Pure: `id -u` output, exactly 1-10 ASCII digits and one `\"\\n\"`."
-    @spec parse_uid(binary()) ::
-            {:ok, non_neg_integer()} | {:error, :uid_unknown | :not_implemented}
-    def parse_uid(_output), do: red({:error, :not_implemented})
+    @spec parse_uid(binary()) :: {:ok, non_neg_integer()} | {:error, :uid_unknown}
+    def parse_uid(output) when is_binary(output) do
+      case Regex.run(@uid, output, capture: :all_but_first) do
+        [digits] -> {:ok, String.to_integer(digits)}
+        nil -> {:error, :uid_unknown}
+      end
+    end
 
-    @doc "Pure: the paths-map shape (step 0)."
-    @spec paths_ok?(term()) :: boolean() | {:error, :not_implemented}
-    def paths_ok?(_paths), do: red({:error, :not_implemented})
+    def parse_uid(_output), do: {:error, :uid_unknown}
 
-    # RED stub result, typed dynamic() so callers compile against it.
+    @doc """
+    Pure: the paths-map shape (step 0): a map with exactly the keys `root`,
+    `socket_dir`, `port` and `pg_bin`; each path an absolute canonical
+    printable-ASCII path (not `/`, no trailing `/`, no `//`, no `.` or `..`
+    component); `port` an integer 1..65535.
+    """
+    @spec paths_ok?(term()) :: boolean()
+    def paths_ok?(%{root: root, socket_dir: socket_dir, port: port, pg_bin: pg_bin} = paths) do
+      exact_keys? = paths |> Map.keys() |> Enum.sort() == @path_keys
+      port? = is_integer(port) and port in 1..65_535
+      exact_keys? and port? and Enum.all?([root, socket_dir, pg_bin], &canonical_path?/1)
+    end
+
+    def paths_ok?(_paths), do: false
+
+    defp canonical_path?(path) when is_binary(path) do
+      String.starts_with?(path, "/") and path != "/" and not String.ends_with?(path, "/") and
+        not String.contains?(path, "//") and Regex.match?(@path_byte, path) and
+        path |> String.split("/", trim: true) |> Enum.all?(&(&1 not in [".", ".."]))
+    end
+
+    defp canonical_path?(_path), do: false
+
+    # RED stub result for the still deny-only steps 1-12, typed dynamic() so
+    # callers compile against it.
     defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   end
 end
