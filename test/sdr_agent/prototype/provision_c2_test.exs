@@ -746,11 +746,15 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
         try do
           provision(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
         rescue
-          error -> {:raised, error.__struct__}
+          error -> {:raised, error}
         end
 
       assert seen(:ran) == true, "prerequisite: the :scope_bound hook ran (#{inspect(raised)})"
-      assert raised == {:raised, ArgumentError}
+      # Ash raises the hook's exception wrapped as Ash.Error.Unknown (observed
+      # at 936506e); the injected message must be the cause.
+      assert match?({:raised, _error}, raised), "the injected raise: #{inspect(raised)}"
+      {:raised, error} = raised
+      assert Exception.message(error) =~ "injected", "raise cause: #{inspect(error)}"
       assert counts() == before
       assert registered() == 0, "after raise: #{inspect(registered())}"
     end
