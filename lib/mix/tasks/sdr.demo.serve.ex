@@ -38,6 +38,9 @@ defmodule Mix.Tasks.Sdr.Demo.Serve do
   @doc false
   @impl Mix.Task
   def run(_args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.demo.serve") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     Mix.env() == :test || Mix.raise("mix sdr.demo.serve runs only with MIX_ENV=test")
     Mix.Task.run("app.config")
 

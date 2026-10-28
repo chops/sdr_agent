@@ -20,6 +20,9 @@ defmodule Mix.Tasks.Sdr.Demo.Status do
   @doc false
   @impl Mix.Task
   def run(args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.demo.status") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     {opts, _rest, invalid} = OptionParser.parse(args, strict: [check: :boolean])
     invalid == [] || Mix.raise("usage: mix sdr.demo.status [--check]")
 
