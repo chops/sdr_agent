@@ -133,17 +133,55 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert count("oban_jobs") == 0
     end
 
-    test "any failing step rolls back the tenant, users, binding and delegation" do
+    # Codex 97b19ad4: the rollback proof must show that the failure came AFTER
+    # earlier writes. The test-build hook `{Authority, :before_delegation}`
+    # runs inside bootstrap's transaction, after the tenant, anchor and
+    # binding writes and before the delegation's; here it reports the row
+    # counts it sees there and then raises (the injected late failure).
+    test "a failure after the earlier writes rolls back the tenant, users, binding and delegation" do
+      test_pid = self()
+      tables = ~w(tenants users prototype_database_bindings prototype_delegations)
+
+      Process.put({@authority, :before_delegation}, fn _created ->
+        send(test_pid, {:written, Map.new(tables, &{&1, count(&1)})})
+        raise "injected late bootstrap failure"
+      end)
+
       result =
-        call(@authority, :bootstrap, [[agent: :claude_code, session_correlation: "bad"]])
+        call(@authority, :bootstrap, [
+          [agent: :claude_code, session_correlation: "setup-session-0002"]
+        ])
 
-      # The correlation is checked only by the delegation, the last write, so
-      # the tenant, users and binding were written before the refusal.
       assert result == {:error, :bootstrap_failed},
-             "a bootstrap failing at its last step returned #{inspect(result)}"
+             "a bootstrap failing before its last write returned #{inspect(result)}"
 
-      for table <- ~w(tenants users prototype_database_bindings prototype_delegations) do
+      assert_received {:written, written}, "the late failure point was never reached"
+
+      assert written == %{
+               "tenants" => 1,
+               "users" => 1,
+               "prototype_database_bindings" => 1,
+               "prototype_delegations" => 0
+             }
+
+      for table <- tables do
         assert count(table) == 0, "#{table} kept a row after the rollback"
+      end
+    end
+
+    test "a malformed agent or correlation is refused and writes nothing" do
+      for opts <- [
+            [agent: :claude_code, session_correlation: "bad"],
+            [agent: :other_agent, session_correlation: "setup-session-0003"]
+          ] do
+        result = call(@authority, :bootstrap, [opts])
+
+        assert result == {:error, :bootstrap_failed},
+               "#{inspect(opts)} returned #{inspect(result)}"
+
+        for table <- ~w(tenants users prototype_database_bindings prototype_delegations) do
+          assert count(table) == 0, "#{inspect(opts)}: #{table} kept a row"
+        end
       end
     end
 

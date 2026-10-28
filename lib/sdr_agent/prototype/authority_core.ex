@@ -15,7 +15,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       auditor (`auditor_password:`), the binding and the setup session's
       delegation (`agent:`, `session_correlation:`); `{:ok, %{tenant:,
       anchor:, auditor:, binding:, delegation:}}`, or
-      `{:error, :bootstrap_failed}` with everything rolled back;
+      `{:error, :bootstrap_failed}` with everything rolled back. In a
+      test-seam build only (`:prototype_test_seams`), inside that
+      transaction after the binding write and before the delegation's, it
+      calls the one-argument hook `{SdrAgent.Prototype.Authority,
+      :before_delegation}` from the calling process's dictionary with the
+      rows created so far (the rollback proof's late-failure point);
     - `snapshot/1`: the `SdrAgent.Prototype.Binding` of a binding row;
     - `resolve_delegation/2`: resolver steps 3-7 of IF-1 for a boot snapshot
       and a delegation row (or nil);
