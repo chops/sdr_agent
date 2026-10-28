@@ -39,6 +39,8 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.Checks.GrantContext
+  alias SdrAgent.Agents.ModelCallAllocation
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Prototype
 
@@ -411,6 +413,50 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
              "later-session replay: #{inspect(result)}"
 
       assert counts() == before
+    end
+  end
+
+  describe "the operator's raw allocation create (Codex 4281bb5c R1)" do
+    defp all_events do
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM audit_events", [])
+      n
+    end
+
+    test "is Forbidden with or without the public grant marker, writing nothing", ctx do
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}],
+             "prerequisite: the genuine provision created exactly the one :b1 allocation"
+
+      before = counts()
+      events_before = all_events()
+
+      planned = %{
+        grant_id: grant.id,
+        grant_revision: grant.revision,
+        profile_id: :claude_cli_opus
+      }
+
+      attempts = [
+        extra_b2: Map.merge(planned, %{key: :b2, applies_to: [:b1], attempts: 51}),
+        exact_terms_b2: Map.merge(planned, %{key: :b2, applies_to: [:b1], attempts: 50}),
+        exact_copy_b1: Map.merge(planned, %{key: :b1, applies_to: [:b1], attempts: 50})
+      ]
+
+      for {name, attrs} <- attempts,
+          {marker_name, context} <- [no_marker: %{}, public_marker: GrantContext.context()] do
+        result =
+          ModelCallAllocation
+          |> Ash.Changeset.for_create(:create, attrs, actor: ctx.fx.actor, context: context)
+          |> Ash.create()
+
+        assert match?({:error, %Ash.Error.Forbidden{}}, result),
+               "#{name} with #{marker_name}: expected Forbidden, got #{inspect(result)}"
+      end
+
+      assert counts() == before, "a raw allocation create wrote"
+      assert all_events() == events_before, "a raw allocation create appended an event"
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}]
     end
   end
 
