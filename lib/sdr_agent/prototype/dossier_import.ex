@@ -253,12 +253,27 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         actor
         |> entries()
         |> Ash.Query.select([:contact_id])
-        |> Ash.read()
+        |> count_read()
         |> case do
           {:ok, records} -> {:ok, records |> MapSet.new(& &1.contact_id) |> MapSet.size()}
           {:error, _error} -> {:error, :import_failed}
         end
       end
+    end
+
+    # Test-seam builds only: a read result a test put under
+    # `{__MODULE__, :count_fault}` in the calling process replaces the count
+    # read, so no query runs (fault controls, Codex 42f5b1e0). Other builds
+    # always read.
+    if @test_seams do
+      defp count_read(query) do
+        case Process.get({__MODULE__, :count_fault}) do
+          nil -> Ash.read(query)
+          fault -> fault
+        end
+      end
+    else
+      defp count_read(query), do: Ash.read(query)
     end
 
     # The fresh real resolver must return exactly this actor (type, delegation
