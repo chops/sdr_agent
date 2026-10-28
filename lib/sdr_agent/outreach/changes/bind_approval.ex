@@ -6,7 +6,11 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
   `FOR SHARE` (lock order enrollment → draft → campaign → contact → chain
   head):
 
-    * the approver is an active operator (the policy admits only ADM/REV);
+    * the approver is an active operator (the policy admits only ADM/REV),
+      or, in D-237 prototype runtime (interfaces r6 IF-3 "Delegated
+      approval"), the live resolved prototype operator whose `approver_id`
+      (set by the scoped `ActorUser`) is the binding's anchor, an active
+      `agent_operator` user of the operator's tenant;
     * the draft is `pending_review` and its *current* revision is the
       `draft_revision_id` argument with exactly the `content_sha256` (hex)
       argument — otherwise the verdict is stale and refused;
@@ -72,7 +76,7 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     arg = &Ash.Changeset.get_argument(changeset, &1)
 
     cond do
-      not match?(%{status: :active}, actor) ->
+      not active_approver?(changeset, actor) ->
         {:approver_id, "must be an active operator"}
 
       is_nil(draft) ->
@@ -89,6 +93,35 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
 
       true ->
         nil
+    end
+  end
+
+  # A human approver is an active user (unchanged); a prototype operator is
+  # re-resolved live and needs the binding's active anchor as `approver_id`.
+  defp active_approver?(_changeset, %{status: :active}), do: true
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp active_approver?(changeset, %SdrAgent.Actor{type: :prototype_operator} = actor) do
+      anchor_id = Ash.Changeset.get_attribute(changeset, :approver_id)
+
+      is_binary(anchor_id) and SdrAgent.Prototype.operator?(actor) and
+        binding_anchor?(anchor_id) and active_anchor?(anchor_id, actor.tenant_id)
+    end
+  end
+
+  defp active_approver?(_changeset, _actor), do: false
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp binding_anchor?(anchor_id),
+      do: match?({:ok, %{operator_user_id: ^anchor_id}}, SdrAgent.Prototype.binding())
+
+    defp active_anchor?(anchor_id, tenant_id) do
+      anchor =
+        SdrAgent.Accounts.User
+        |> Ash.Query.filter(id == ^anchor_id and tenant_id == ^tenant_id)
+        |> Ash.read_one!(authorize?: false)
+
+      match?(%{status: :active, role: :agent_operator}, anchor)
     end
   end
 
