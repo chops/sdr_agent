@@ -320,6 +320,12 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
       end
     end
 
+    test "a file of exactly 1 MiB is read; the bound is inclusive", ctx do
+      bytes = String.duplicate("a", 1_048_576)
+      ref = F.artifact!(ctx.dir, "exact.txt", bytes)
+      assert SpotcheckManifest.artifact(ctx.dir, ref) == {:ok, bytes}
+    end
+
     test "a selected row whose claim names an invalid artifact is refused", ctx do
       row =
         F.put(F.company(1), ["contact", "evidence", "email", "artifact"], %{
@@ -333,6 +339,114 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
 
       assert DossierParser.select(dossier, parsed, ["row-1"], ctx.dir) ==
                {:error, {"companies[0].contact.evidence.email.artifact", :artifact_invalid}}
+    end
+  end
+
+  describe "artifact reads under substitution (Codex GREEN-1 R1; synchronized test seams)" do
+    # The hooks run inside artifact/2 at its named boundaries (test-seam build
+    # only); each test acts at an exact point, with no timing.
+    setup ctx do
+      dir = F.scratch_dir!()
+      bytes = "Team page copy. Jordan Testperson: jordan@acme1.test. Thanks."
+      ref = F.artifact!(dir, "s1-team.txt", bytes)
+      sentinel = "SENTINEL-NEVER-READ " <> @marker
+      outside = F.scratch_dir!()
+      target = F.write!(outside, "s1-team.txt", sentinel)
+      test_pid = self()
+
+      record = fn bytes ->
+        send(test_pid, {:read, byte_size(bytes), String.contains?(bytes, "SENTINEL-NEVER-READ")})
+      end
+
+      on_exit(fn ->
+        for n <- [:after_precheck, :after_open, :after_read],
+            do: Process.delete({SpotcheckManifest, n})
+      end)
+
+      Map.merge(ctx, %{
+        dir: dir,
+        ref: ref,
+        bytes: bytes,
+        outside: outside,
+        target: target,
+        record: record
+      })
+    end
+
+    defp hook(name, fun), do: Process.put({SpotcheckManifest, name}, fun)
+
+    test "the file replaced by a symlink after the precheck: refused, the target never read",
+         ctx do
+      hook(:after_read, ctx.record)
+
+      hook(:after_precheck, fn path ->
+        File.rename!(path, Path.join(F.scratch_dir!(), "moved.txt"))
+        File.ln_s!(ctx.target, path)
+      end)
+
+      refused!(SpotcheckManifest.artifact(ctx.dir, ctx.ref), "artifact", :artifact_invalid)
+      refute_received {:read, _size, true}, "the substituted target's bytes were read"
+    end
+
+    test "the root replaced by a symlink after the precheck: refused, the target never read",
+         ctx do
+      hook(:after_read, ctx.record)
+
+      hook(:after_precheck, fn _path ->
+        File.rename!(ctx.dir, Path.join(F.scratch_dir!(), "moved-root"))
+        File.ln_s!(ctx.outside, ctx.dir)
+      end)
+
+      refused!(SpotcheckManifest.artifact(ctx.dir, ctx.ref), "artifact", :artifact_invalid)
+      refute_received {:read, _size, true}, "bytes under the substituted root were read"
+    end
+
+    test "the file grown past the bound after the precheck: refused with a bounded read", ctx do
+      hook(:after_read, ctx.record)
+
+      hook(:after_precheck, fn path ->
+        File.write!(path, String.duplicate("g", 2_097_152), [:append])
+      end)
+
+      refused!(SpotcheckManifest.artifact(ctx.dir, ctx.ref), "artifact", :artifact_invalid)
+
+      receive do
+        {:read, size, _} ->
+          assert size <= 1_048_577, "read #{size} bytes, past the bound and its sentinel byte"
+      after
+        0 -> :ok
+      end
+    end
+
+    test "the file grown past the bound after it is opened: the read stops at the bound plus one byte",
+         ctx do
+      hook(:after_read, ctx.record)
+
+      hook(:after_open, fn _handle ->
+        File.write!(Path.join(ctx.dir, "s1-team.txt"), String.duplicate("g", 2_097_152), [:append])
+      end)
+
+      refused!(SpotcheckManifest.artifact(ctx.dir, ctx.ref), "artifact", :artifact_invalid)
+      assert_received {:read, size, false}, "the opened handle was never read"
+      assert size <= 1_048_577, "read #{size} bytes, past the bound and its sentinel byte"
+    end
+
+    test "the one handle is closed on success and on refusal", ctx do
+      test_pid = self()
+      hook(:after_open, fn handle -> send(test_pid, {:opened, handle}) end)
+
+      assert SpotcheckManifest.artifact(ctx.dir, ctx.ref) == {:ok, ctx.bytes}
+      assert_received {:opened, handle}, "artifact/2 read through no reported handle"
+
+      assert :file.read(handle, 1) == {:error, :einval},
+             "the handle was left open after a success"
+
+      bad = %{ctx.ref | "sha256" => F.sha256("other")}
+      refused!(SpotcheckManifest.artifact(ctx.dir, bad), "artifact", :artifact_invalid)
+      assert_received {:opened, handle}
+
+      assert :file.read(handle, 1) == {:error, :einval},
+             "the handle was left open after a refusal"
     end
   end
 end

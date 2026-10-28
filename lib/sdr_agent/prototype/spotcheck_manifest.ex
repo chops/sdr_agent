@@ -32,6 +32,7 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
   @artifact_max_bytes 1_048_576
   @artifact_file ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @hex64 ~r/\A[0-9a-f]{64}\z/
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @doc "Reads the manifest at `path` once, by its full sha256, and parses it against `dossier`."
   @spec read(Path.t(), String.t(), {map(), String.t()}) :: {:ok, map()} | {:error, term()}
@@ -54,7 +55,9 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
          true <- (dir_mode &&& 0o777) == 0o700,
          {:ok, %File.Stat{type: :regular} = before} <- File.lstat(path),
          true <- (before.mode &&& 0o777) == 0o600 and before.size <= @artifact_max_bytes,
+         :ok <- seam(:after_precheck, path),
          {:ok, bytes} <- File.read(path),
+         :ok <- seam(:after_read, bytes),
          {:ok, %File.Stat{type: :regular} = after_read} <- File.lstat(path),
          true <- same_file?(before, after_read) and byte_size(bytes) == before.size,
          true <- String.valid?(bytes),
@@ -69,6 +72,24 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
 
   # The file read is the file checked: the same inode, size and mtime.
   defp same_file?(a, b), do: a.inode == b.inode and a.size == b.size and a.mtime == b.mtime
+
+  # Test-seam builds only (`:claude_cli_test_seams`, fixed at compile time):
+  # a test may act or observe at a named boundary of `artifact/2` through a
+  # one-argument function in its own process dictionary under
+  # `{SdrAgent.Prototype.SpotcheckManifest, name}`. Every other build
+  # compiles `seam/2` to `:ok`.
+  if @test_seams do
+    defp seam(name, arg) do
+      case Process.get({__MODULE__, name}) do
+        hook when is_function(hook, 1) -> hook.(arg)
+        _none -> nil
+      end
+
+      :ok
+    end
+  else
+    defp seam(_name, _arg), do: :ok
+  end
 
   # RED stub result, typed dynamic() so success clauses of callers compile
   # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
