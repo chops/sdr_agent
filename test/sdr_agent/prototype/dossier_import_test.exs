@@ -542,6 +542,44 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       assert call(@import, :cap_used, [ctx.actor]) == {:ok, 1}
       assert {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))} == before
     end
+
+    # Codex 8ff184e4: a read failure is pinned to the closed :import_failed
+    # (never {:ok, 0}, a raw Ash error or a MatchError), and a call inside an
+    # open transaction, where a failed Ash read would roll the caller back by
+    # throw, is refused before any read.
+    test "a failed count read is the closed {:error, :import_failed}, never a count or a raw error",
+         ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+
+      # A real PostgreSQL failure of the count read: the test-build seam sets
+      # an empty search path just before it, so the table is not found.
+      fail = fn ->
+        Repo.query!("SET LOCAL search_path TO pg_catalog", [])
+        :ok
+      end
+
+      result = capture(fn -> call(@import, :cap_used, [ctx.actor, [before_count: fail]]) end)
+      assert result == {:error, :import_failed}, "cap_used/2 returned #{inspect(result)}"
+    end
+
+    test "inside an open transaction it is refused before any read; that transaction stays usable",
+         ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+
+      for {label, open} <- [repo: &Repo.transaction/1, audit: &SdrAgent.Audit.transaction/1] do
+        {:ok, result} =
+          open.(fn ->
+            result = capture(fn -> call(@import, :cap_used, [ctx.actor]) end)
+            assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+            result
+          end)
+
+        assert result == {:error, :import_failed},
+               "#{label}: cap_used/1 returned #{inspect(result)}"
+      end
+    end
   end
 
   describe "layering and inputs (source checks)" do
