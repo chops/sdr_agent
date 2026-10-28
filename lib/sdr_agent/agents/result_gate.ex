@@ -63,6 +63,7 @@ defmodule SdrAgent.Agents.ResultGate do
   alias SdrAgent.Operations
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Operations.Operation
+  alias SdrAgent.Prototype
   alias SdrAgent.Repo
 
   # Slice B row B3 (accepted): the compiled gate mode, set by no config
@@ -269,11 +270,26 @@ defmodule SdrAgent.Agents.ResultGate do
   never a release). Returns
   `{:released, release, output}`, `{:withheld, release, run}` or
   `{:error, reason}` (nothing written).
+
+  **D-237 (interfaces r6 IF-4).** At its head, in prototype runtime, it
+  dispatches with the same four arguments to the prototype gate's own
+  decision (`SdrAgent.Prototype.Release`, referenced only here) and never
+  falls back to the ordinary branches below; `:interrupted` and `:timeout`
+  never release there either.
   """
-  @spec finalize(struct(), map(), {:ok | :timeout, map()}, keyword()) ::
+  @spec finalize(struct(), map(), {:ok | :timeout | :interrupted, map()}, keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
-  def finalize(invocation, gate, {kind, receipt}, opts \\ [])
+  def finalize(invocation, gate, outcome, opts \\ [])
+
+  def finalize(invocation, gate, {kind, _receipt} = outcome, opts)
       when kind in [:ok, :timeout, :interrupted] do
+    case Prototype.runtime() do
+      :prototype -> SdrAgent.Prototype.Release.finalize(invocation, gate, outcome, opts)
+      _ordinary -> ordinary_finalize(invocation, gate, outcome, opts)
+    end
+  end
+
+  defp ordinary_finalize(invocation, gate, {kind, receipt}, opts) do
     plan = plan(kind, receipt)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
     guard = Keyword.get(opts, :guard, fn _run -> :ok end)
@@ -373,18 +389,20 @@ defmodule SdrAgent.Agents.ResultGate do
     not superseded?
   end
 
+  @doc false
   # The exact selected cause, locked FOR UPDATE before the head (live or
   # resolved): the receipt's for a mismatch or a reconcile-opened reason;
   # for a gate-opened reason (timeout), the deduplicated existing gate cause.
-  defp select_cause(%{release?: true}, _receipt, _invocation, _run), do: {:ok, nil}
+  # Also the prototype gate's selection for its non-mismatch outcomes.
+  def select_cause(%{release?: true}, _receipt, _invocation, _run), do: {:ok, nil}
 
-  defp select_cause(%{reason: :witness_mismatch}, receipt, invocation, run),
+  def select_cause(%{reason: :witness_mismatch}, receipt, invocation, run),
     do: mismatch_cause(receipt, invocation, run)
 
-  defp select_cause(%{reason: :witness_timeout} = plan, _receipt, invocation, run),
+  def select_cause(%{reason: :witness_timeout} = plan, _receipt, invocation, run),
     do: existing_gate_cause(plan.reason, invocation, run)
 
-  defp select_cause(plan, receipt, invocation, run) do
+  def select_cause(plan, receipt, invocation, run) do
     case usable(receipt.cause_id, invocation, run, :warning) do
       {:ok, cause} -> {:ok, cause}
       :none -> existing_gate_cause(plan.reason, invocation, run)
@@ -491,6 +509,13 @@ defmodule SdrAgent.Agents.ResultGate do
       gate_cause_id: cause.id,
       gate_classification: plan.classification
     }
+
+    # D-237: a prototype refusal records its closed code.
+    attrs =
+      case Map.get(plan, :prototype_refusal) do
+        nil -> attrs
+        code -> Map.put(attrs, :prototype_refusal, code)
+      end
 
     with {:ok, release} <- Agents.decide_result_release(attrs, actor: actor, prelocked: prelocked),
          {:ok, run} <- stop(run, release, cause, plan, actor, prelocked) do

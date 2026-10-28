@@ -203,8 +203,12 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
       else: interrupted(invocation, run)
   end
 
-  # Row R7-2 (isolated here): a known mismatch is never downgraded.
-  defp mismatch(invocation, run) do
+  @doc false
+  # Row R7-2 (isolated here): a known mismatch is never downgraded. Also the
+  # prototype gate's mismatch selection (D-237 IF-4, A2): `{:ok, plan, cause}`
+  # (cause nil: a bound critical is opened under the head) or
+  # `{:error, :mismatch_cause_unbound}`.
+  def mismatch(invocation, run) do
     plan = ResultGate.plan(:ok, %{status: :mismatch})
 
     with {:ok, live} <- lock_live(invocation, :critical) do
