@@ -466,21 +466,12 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
 
       refute_received {:called, _scope}
 
-      # After the failed statement: exactly one non-control statement (the
-      # probe) comes first, and no transaction-control statement (a recovery
-      # or savepoint command) precedes it; at most the owner's rollback
-      # follows it.
-      after_abort = sql |> Enum.drop_while(&(not String.contains?(&1, "1/0"))) |> Enum.drop(1)
-      control? = &(&1 =~ ~r/\A\s*(begin|commit|rollback|savepoint|release)/i)
-
-      assert match?([first | _] when is_binary(first), after_abort) and
-               not control?.(hd(after_abort)),
-             "the probe is not the first statement after the abort: #{length(after_abort)}"
-
-      assert Enum.count(after_abort, &(not control?.(&1))) == 1,
-             "statements after the abort: #{Enum.count(after_abort, &(not control?.(&1)))}"
-
-      assert Enum.count(after_abort, control?) <= 1
+      # Codex ab4320ae: right after the failed statement, exactly the pinned
+      # probe (`G.state_probe/0`, `SELECT 1`), then exactly the owner's
+      # rollback, and nothing else (`StateProbeOracleTest` holds this
+      # oracle's positive and negative controls).
+      assert G.probe_then_owner_rollback?(sql),
+             "captured after the abort: #{inspect(G.after_abort(sql))}"
     end
 
     test "the caller's row policy holds: another tenant's actor gets not_found", ctx do

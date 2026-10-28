@@ -433,6 +433,30 @@ defmodule SdrAgent.PrototypeGateFixtures do
     end
   end
 
+  @state_probe "SELECT 1"
+
+  @doc """
+  The pinned first statement of `ReleasedScope.run/3`: one raw read-only
+  state probe of the current transaction (Codex 79819840 R2; ab4320ae).
+  """
+  def state_probe, do: @state_probe
+
+  @doc """
+  The R2 oracle over SQL captured by `SdrAgent.GateFixtures.capture/1` around
+  an owning `Audit.transaction`: right after the FIRST observed `abort`
+  statement come exactly the state probe and then exactly the owner's
+  rollback (`"rollback"`, DBConnection's transaction log entry), and nothing
+  else. A business statement, a second probe, a savepoint, release or commit,
+  or a missing probe fails it. Pinned by `StateProbeOracleTest`'s controls.
+  """
+  def probe_then_owner_rollback?(sql, abort \\ "SELECT 1/0") do
+    match?([^abort, @state_probe, "rollback"], Enum.drop_while(sql, &(&1 != abort)))
+  end
+
+  @doc "The captured statements after the first `abort` (for value-free messages)."
+  def after_abort(sql, abort \\ "SELECT 1/0"),
+    do: sql |> Enum.drop_while(&(&1 != abort)) |> Enum.drop(1)
+
   @doc """
   A value-free summary of a result for assertion messages (Codex 3122b0d4
   R5: no basis, output or raw error dumps): the result's tag and, for an
