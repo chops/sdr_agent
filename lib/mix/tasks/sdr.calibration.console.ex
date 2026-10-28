@@ -84,6 +84,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   @doc false
   @impl Mix.Task
   def run(["check"]) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     plan = plan!()
     Mix.shell().info(CalibrationConsole.plan_line(plan))
     Mix.shell().info(CalibrationConsole.witness_line(plan))
@@ -95,6 +98,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   def run(["bootstrap-admin" | args]) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     plan = plan!()
     CalibrationConsole.apply!(plan, serve: false)
     CalibrationConsole.ensure_storage!()
@@ -102,6 +108,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   def run(["serve"]) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     plan = plan!()
 
     with {:error, reason} <- CalibrationConsole.check_assets(),
@@ -124,6 +133,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   # R0-07f: argv is parsed first, then the plan is built, then the
   # capture prerequisite is checked, all before any effect.
   def run(["calibrate" | argv]) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     test_build!()
 
     Code.ensure_loaded?(@calibrate) ||
@@ -149,6 +161,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   def run(["calibrate-recover" | argv]) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     test_build!()
 
     Code.ensure_loaded?(@calibrate) ||
@@ -174,6 +189,9 @@ defmodule Mix.Tasks.Sdr.Calibration.Console do
   end
 
   def run(_args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.calibration.console") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     Mix.raise(
       "usage: mix sdr.calibration.console check | serve | bootstrap-admin ARGS | calibrate PROFILE " <>
         "| calibrate-recover ARGS (run it through bin/calibration-console)"

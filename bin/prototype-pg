@@ -1,0 +1,294 @@
+#!/bin/bash -p
+# bin/prototype-pg init|start|status|stop
+#
+# The D-237 isolated prototype PostgreSQL 18 cluster (interfaces r6 IF-7
+# "Cluster", must-fix R5, Q2; amendment item 2 "Its own PostgreSQL 18
+# cluster"; docs/product/d237/prototype-runtime.md).
+#
+# - The roots, the socket directory, the port and the executable are the
+#   pinned constants below. The socket is the only endpoint
+#   (listen_addresses = ''); 5541 names the socket only.
+# - owned (the identity proof) runs before start, status and stop: the
+#   marker, the data directory, the binary, the control file and the socket
+#   directory. A running cluster must also answer with the marker's
+#   system_identifier and data_directory before pg_ctl may signal anything.
+# - init alone creates (or verifies) the 0700 socket directory; start,
+#   status and stop never create a directory. init refuses an existing data
+#   path or marker and never overwrites a marker.
+# - It never inspects other processes, never infers identity from a process
+#   id or name, never signals a process it has not proven to be this
+#   cluster's postmaster, and never deletes, adopts or cleans anything.
+#   Children run with an empty environment.
+#
+# Output: one line "prototype-pg: <command> ok" or "prototype-pg: status
+# running|stopped" (exit 0), or "prototype-pg: refused <code>" (exit 2).
+
+readonly PG_BIN='/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin'
+readonly ROOT='/Users/charles/.local/state/sdr-agent/prototype/d237'
+readonly SOCKET_DIR='/private/tmp/d237-pg'
+readonly PORT='5541'
+readonly LSOF='/usr/sbin/lsof'
+readonly STAT='/usr/bin/stat'
+
+readonly DATA="$ROOT/pgdata"
+readonly MARKER="$ROOT/CLUSTER"
+readonly LOGDIR="$ROOT/log"
+readonly LOG="$LOGDIR/postgres.log"
+readonly SOCKET="$SOCKET_DIR/.s.PGSQL.$PORT"
+readonly SOCKET_LOCK="$SOCKET_DIR/.s.PGSQL.$PORT.lock"
+readonly SUPERUSER='postgres'
+readonly ID_BIN='/usr/bin/id'
+readonly MKDIR='/bin/mkdir'
+readonly CLEAN='/usr/bin/env'
+
+umask 077
+set -u
+
+say() { printf 'prototype-pg: %s\n' "$1"; }
+refuse() { say "refused $1"; exit 2; }
+
+ME=$("$ID_BIN" -u) || refuse uid_unknown
+M_SYSID=''
+LIVE_CODE='live_identity_unavailable'
+
+present() { [ -e "$1" ] || [ -L "$1" ]; }
+
+# lstat (never follows a symlink): "<uid>:<mode>:<type>".
+lstat() { "$STAT" -f '%u:%Lp:%HT' -- "$1" 2>/dev/null; }
+
+owned_dir() {
+  local s
+  s=$(lstat "$1") || return 1
+  [ "$s" = "$ME:700:Directory" ]
+}
+
+owned_file() {
+  local s
+  s=$(lstat "$1") || return 1
+  [ "$s" = "$ME:600:Regular File" ]
+}
+
+empty_dir() {
+  local e
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+    if present "$e"; then return 1; fi
+  done
+  return 0
+}
+
+marker_line() {
+  printf '{"system_identifier":"%s","data_dir":"%s","socket_dir":"%s","port":%s,"binary":"%s"}' \
+    "$1" "$DATA" "$SOCKET_DIR" "$PORT" "$PG_BIN"
+}
+
+# The control file's "Database system identifier" (exactly one line).
+control_sysid() {
+  local out line id='' n=0
+  out=$("$CLEAN" -i "$PG_BIN/pg_controldata" -D "$DATA" 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    if [[ $line =~ ^Database\ system\ identifier:[[:space:]]+([0-9]+)$ ]]; then
+      id=${BASH_REMATCH[1]}
+      n=$((n + 1))
+    fi
+  done <<< "$out"
+  [ "$n" -eq 1 ] || return 1
+  printf '%s' "$id"
+}
+
+pg_status() {
+  "$CLEAN" -i "$PG_BIN/pg_ctl" status -D "$DATA" > /dev/null 2>&1
+}
+
+# The connected server's identity must equal the marker's.
+live_identity() {
+  local out query
+  query="select (pg_control_system()).system_identifier::text || '|' || current_setting('data_directory')"
+  if ! out=$("$CLEAN" -i "$PG_BIN/psql" -X -A -t -q -h "$SOCKET_DIR" -p "$PORT" \
+    -U "$SUPERUSER" -d postgres -c "$query" 2>/dev/null); then
+    LIVE_CODE='live_identity_unavailable'
+    return 1
+  fi
+
+  if [ "$out" = "$M_SYSID|$DATA" ]; then return 0; fi
+  LIVE_CODE='live_identity_mismatch'
+  return 1
+}
+
+# The identity proof before start, status and stop (IF-7 owned!/1).
+owned() {
+  local content size re md ms mp mb c
+  # 1. The marker: a regular file, owned, 0600, exactly its keys.
+  present "$MARKER" || refuse marker_missing
+  owned_file "$MARKER" || refuse marker_not_owned
+  content=$(< "$MARKER") || refuse marker_invalid
+  size=$("$STAT" -f '%z' -- "$MARKER" 2>/dev/null) || refuse marker_invalid
+  re='^\{"system_identifier":"([0-9]{1,20})","data_dir":"([^"]*)","socket_dir":"([^"]*)","port":([0-9]{1,5}),"binary":"([^"]*)"\}$'
+  [[ $content =~ $re ]] || refuse marker_invalid
+  M_SYSID=${BASH_REMATCH[1]}
+  md=${BASH_REMATCH[2]}
+  ms=${BASH_REMATCH[3]}
+  mp=${BASH_REMATCH[4]}
+  mb=${BASH_REMATCH[5]}
+  [ "$size" = "$((${#content} + 1))" ] || refuse marker_invalid
+  [ "$md" = "$DATA" ] && [ "$ms" = "$SOCKET_DIR" ] && [ "$mp" = "$PORT" ] || refuse marker_mismatch
+  # 2. The data directory: real, owned, 0700, exactly the marker's.
+  owned_dir "$DATA" || refuse data_dir_not_owned
+  # 3. The binary: the pinned store path is the marker's.
+  [ "$mb" = "$PG_BIN" ] || refuse binary_mismatch
+  # 4. The control file names the marker's system identifier.
+  c=$(control_sysid) || refuse control_unreadable
+  [ "$c" = "$M_SYSID" ] || refuse control_mismatch
+  # 5. The socket directory: real, owned, 0700 (never created here).
+  owned_dir "$SOCKET_DIR" || refuse socket_dir_not_owned
+}
+
+write_config() {
+  {
+    printf '\n# bin/prototype-pg (D-237 IF-7; amendment item 7), set before the first start.\n'
+    printf '%s\n' \
+      "listen_addresses = ''" \
+      "unix_socket_directories = '$SOCKET_DIR'" \
+      "port = $PORT" \
+      "log_min_messages = fatal" \
+      "log_min_error_statement = panic" \
+      "log_statement = none" \
+      "log_min_duration_statement = -1" \
+      "log_min_duration_sample = -1" \
+      "log_transaction_sample_rate = 0" \
+      "log_error_verbosity = terse" \
+      "log_parameter_max_length = 0" \
+      "log_parameter_max_length_on_error = 0" \
+      "log_connections = ''" \
+      "log_disconnections = off" \
+      "log_autovacuum_min_duration = -1" \
+      "log_checkpoints = off" \
+      "log_lock_waits = off" \
+      "log_lock_failures = off" \
+      "log_temp_files = -1" \
+      "shared_preload_libraries = ''" \
+      "session_preload_libraries = ''" \
+      "logging_collector = off"
+  } >> "$DATA/postgresql.conf"
+}
+
+cmd_init() {
+  local b sysid
+  # Every check first, so a refusal leaves everything unaltered.
+  present "$DATA" && refuse data_path_exists
+  present "$MARKER" && refuse marker_exists
+  if present "$ROOT"; then owned_dir "$ROOT" || refuse root_not_owned; fi
+  if present "$LOGDIR"; then owned_dir "$LOGDIR" || refuse log_dir_not_owned; fi
+
+  if present "$SOCKET_DIR"; then
+    owned_dir "$SOCKET_DIR" || refuse socket_dir_not_owned
+    empty_dir "$SOCKET_DIR" || refuse socket_dir_not_empty
+  fi
+
+  for b in initdb pg_ctl pg_controldata postgres psql; do
+    [ -f "$PG_BIN/$b" ] && [ -x "$PG_BIN/$b" ] || refuse binary_missing
+  done
+
+  if ! present "$ROOT"; then "$MKDIR" -p -m 0700 "$ROOT" || refuse root_create_failed; fi
+  owned_dir "$ROOT" || refuse root_not_owned
+  if ! present "$LOGDIR"; then "$MKDIR" -m 0700 "$LOGDIR" || refuse log_dir_create_failed; fi
+  owned_dir "$LOGDIR" || refuse log_dir_not_owned
+  if ! present "$SOCKET_DIR"; then "$MKDIR" -m 0700 "$SOCKET_DIR" || refuse socket_dir_create_failed; fi
+  owned_dir "$SOCKET_DIR" || refuse socket_dir_not_owned
+  empty_dir "$SOCKET_DIR" || refuse socket_dir_not_empty
+
+  "$CLEAN" -i "$PG_BIN/initdb" -D "$DATA" -U "$SUPERUSER" -E UTF8 --locale=C \
+    --auth-local=trust --auth-host=reject > /dev/null 2>&1 || refuse initdb_failed
+  owned_dir "$DATA" || refuse data_dir_not_owned
+  write_config || refuse config_write_failed
+  sysid=$(control_sysid) || refuse control_unreadable
+
+  # The marker last, by exclusive create: init is complete only after it.
+  (set -o noclobber && printf '%s\n' "$(marker_line "$sysid")" > "$MARKER") 2> /dev/null ||
+    refuse marker_write_failed
+  owned
+  say 'init ok'
+}
+
+# The TCP listener probe, fail closed. lsof's documented no-match result is
+# exit 1 with no output at all: the only "free" answer. Exit 0 with a
+# listing is a listener. Anything else (diagnostics, another status, an
+# unavailable command, death by a signal, an empty success, a listing on a
+# failed status) is an unknown observation, and unknown is not free.
+# Output and diagnostics are captured in memory and never printed.
+probe_listeners() {
+  local out rc
+  out=$("$CLEAN" -i "$LSOF" -nP -iTCP:"$PORT" -sTCP:LISTEN 2>&1)
+  rc=$?
+  if [ "$rc" -eq 1 ] && [ -z "$out" ]; then return 0; fi
+  if [ "$rc" -eq 0 ] && [ -n "$out" ]; then refuse tcp_listener_present; fi
+  refuse listener_probe_failed
+}
+
+cmd_start() {
+  local rc
+  owned
+  pg_status
+  rc=$?
+  case $rc in
+    3) ;;
+    0) refuse already_running ;;
+    *) refuse status_unknown ;;
+  esac
+
+  # A residual socket pair is refused, never removed or adopted.
+  if present "$SOCKET" || present "$SOCKET_LOCK"; then refuse socket_pair_present; fi
+  [ -f "$LSOF" ] && [ -x "$LSOF" ] || refuse lsof_missing
+  probe_listeners
+  owned_dir "$LOGDIR" || refuse log_dir_not_owned
+  if present "$LOG"; then owned_file "$LOG" || refuse log_not_owned; fi
+
+  "$CLEAN" -i "$PG_BIN/pg_ctl" start -D "$DATA" -l "$LOG" -w -t 60 > /dev/null 2>&1 ||
+    refuse start_failed
+  live_identity || refuse "$LIVE_CODE"
+  say 'start ok'
+}
+
+cmd_status() {
+  local rc
+  owned
+  pg_status
+  rc=$?
+
+  case $rc in
+    3) say 'status stopped' ;;
+    0)
+      live_identity || refuse "$LIVE_CODE"
+      say 'status running'
+      ;;
+    *) refuse status_unknown ;;
+  esac
+}
+
+cmd_stop() {
+  local rc
+  owned
+  pg_status
+  rc=$?
+
+  case $rc in
+    0) ;;
+    3) refuse not_running ;;
+    *) refuse status_unknown ;;
+  esac
+
+  # The same proof before pg_ctl may signal anything.
+  live_identity || refuse "$LIVE_CODE"
+  "$CLEAN" -i "$PG_BIN/pg_ctl" stop -D "$DATA" -m fast -w -t 60 > /dev/null 2>&1 ||
+    refuse stop_failed
+  say 'stop ok'
+}
+
+[ "$#" -eq 1 ] || refuse usage
+
+case "$1" in
+  init) cmd_init ;;
+  start) cmd_start ;;
+  status) cmd_status ;;
+  stop) cmd_stop ;;
+  *) refuse usage ;;
+esac

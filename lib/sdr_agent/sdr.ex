@@ -49,7 +49,10 @@ defmodule SdrAgent.SDR do
   checks again under the chain head).
 
   The caller must be an active ADM or REV of the lead's tenant, for a new
-  *and* an already-assigned lead; anyone else gets `Ash.Error.Forbidden`
+  *and* an already-assigned lead, or, in D-237 prototype runtime, the live
+  resolved prototype operator of that tenant calling without any
+  `owner_user_id` option (owner input is Forbidden on that path, never
+  stripped; the existing owner is kept); anyone else gets `Ash.Error.Forbidden`
   and nothing is written (an auditor's attempt is refused and audited by
   `SdrAgent.Audit.Guard`). The authoritative Lead row is re-read `FOR UPDATE`
   first (the supplied struct may be stale): `new` is assigned, `assigned`
@@ -67,7 +70,7 @@ defmodule SdrAgent.SDR do
   end
 
   defp assign_authorized(lead, campaign_id, actor, opts) do
-    with :ok <- authorize(actor, lead) do
+    with :ok <- authorize(actor, lead, opts) do
       Audit.transaction(fn -> committed(do_assign(lead, campaign_id, actor, opts)) end)
     end
   end
@@ -75,11 +78,33 @@ defmodule SdrAgent.SDR do
   defp committed({:ok, value}), do: value
   defp committed({:error, error}), do: Repo.rollback(error)
 
-  defp authorize(%User{role: role, status: :active, tenant_id: tenant_id}, %{tenant_id: tenant_id})
+  defp authorize(
+         %User{role: role, status: :active, tenant_id: tenant_id},
+         %{tenant_id: tenant_id},
+         _opts
+       )
        when role in [:admin, :reviewer] and is_binary(tenant_id),
        do: :ok
 
-  defp authorize(_actor, _lead), do: {:error, Ash.Error.Forbidden.exception([])}
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    # D-237 (supplement 2 r2 section 2, Q1): the live resolved prototype
+    # operator of the lead's tenant, with NO owner input at all: any
+    # caller-present `owner_user_id` (a change, the current value or nil) is
+    # Forbidden here, before assignment, and never stripped. The existing
+    # owner is kept; the `:assign` policy decides the row again.
+    defp authorize(
+           %Actor{type: :prototype_operator, tenant_id: tenant_id} = actor,
+           %{tenant_id: tenant_id},
+           opts
+         )
+         when is_binary(tenant_id) do
+      if not Keyword.has_key?(opts, :owner_user_id) and SdrAgent.Prototype.operator?(actor),
+        do: :ok,
+        else: {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
+
+  defp authorize(_actor, _lead, _opts), do: {:error, Ash.Error.Forbidden.exception([])}
 
   defp do_assign(lead, campaign_id, actor, opts) do
     agent = Actor.system(:agent_runtime, lead.tenant_id)

@@ -31,6 +31,9 @@ defmodule Mix.Tasks.Sdr.Demo.Reply do
   @doc false
   @impl Mix.Task
   def run(args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.demo.reply") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     unless allowed_env?(Mix.env()) do
       Mix.raise("mix sdr.demo.reply runs only in dev and test (MIX_ENV=#{Mix.env()})")
     end

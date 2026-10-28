@@ -6,7 +6,15 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
   `FOR SHARE` (lock order enrollment → draft → campaign → contact → chain
   head):
 
-    * the approver is an active operator (the policy admits only ADM/REV);
+    * the approver is an active operator (the policy admits only ADM/REV),
+      or, in D-237 prototype runtime (interfaces r6 IF-3 "Delegated
+      approval"), the live resolved prototype operator whose `approver_id`
+      (set by the scoped `ActorUser`) is the binding's anchor, an active
+      `agent_operator` user of the operator's tenant;
+    * a prototype operator approves only inside the compiled funding
+      window `[starts_at, expires_at)` (`SdrAgent.Prototype.funding_entry/0`)
+      at the decision instant, otherwise `prototype_outside_window`; the
+      human path has no window;
     * the draft is `pending_review` and its *current* revision is the
       `draft_revision_id` argument with exactly the `content_sha256` (hex)
       argument — otherwise the verdict is stale and refused;
@@ -20,6 +28,11 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
       `verdict`, `status`, `approver_authored_revision`;
     * for a grant, the contact is active, neither its email nor its domain
       is suppressed, and the campaign is not completed or archived;
+    * the grant's delegated event arguments are server-derived: caller
+      values of `approval_mode`, `delegation_id` and `prototype` are
+      scrubbed; in D-237 prototype runtime the grant carries the assurance
+      block (refused as `prototype_assurance_unavailable` without one), and
+      the operator's grant also `"delegated_machine"` and its delegation id;
     * the audit arguments `revision_author` (`{type: user, user_id}` or
       `{type: agent, agent_run_id}`) and `diff_hashes` (sha256 hex of the
       revision's two diffs, or nil) are computed here, never taken as input.
@@ -72,8 +85,8 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     arg = &Ash.Changeset.get_argument(changeset, &1)
 
     cond do
-      not match?(%{status: :active}, actor) ->
-        {:approver_id, "must be an active operator"}
+      refusal = approver_refusal(changeset, actor) ->
+        refusal
 
       is_nil(draft) ->
         {:draft_id, "does not exist"}
@@ -89,6 +102,62 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
 
       true ->
         nil
+    end
+  end
+
+  @inactive {:approver_id, "must be an active operator"}
+
+  # A human approver is an active user (unchanged). A prototype operator is
+  # re-resolved live, needs the binding's active anchor as `approver_id`, and
+  # approves only inside the funding window (start inclusive, end exclusive)
+  # at the decision instant under the draft lock; the human path has no
+  # window. Only a build with the prototype authority has an operator clause.
+  defp approver_refusal(_changeset, %{status: :active}), do: nil
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    @outside_window {:approver_id,
+                     "prototype_outside_window: delegated approval is outside the funding window"}
+
+    defp approver_refusal(changeset, %SdrAgent.Actor{type: :prototype_operator} = actor) do
+      cond do
+        not active_operator?(changeset, actor) -> @inactive
+        outside_window?() -> @outside_window
+        true -> nil
+      end
+    end
+  end
+
+  defp approver_refusal(_changeset, _actor), do: @inactive
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp active_operator?(changeset, actor) do
+      anchor_id = Ash.Changeset.get_attribute(changeset, :approver_id)
+
+      is_binary(anchor_id) and SdrAgent.Prototype.operator?(actor) and
+        binding_anchor?(anchor_id) and active_anchor?(anchor_id, actor.tenant_id)
+    end
+
+    defp binding_anchor?(anchor_id),
+      do: match?({:ok, %{operator_user_id: ^anchor_id}}, SdrAgent.Prototype.binding())
+
+    defp active_anchor?(anchor_id, tenant_id) do
+      anchor =
+        SdrAgent.Accounts.User
+        |> Ash.Query.filter(id == ^anchor_id and tenant_id == ^tenant_id)
+        |> Ash.read_one!(authorize?: false)
+
+      match?(%{status: :active, role: :agent_operator}, anchor)
+    end
+
+    defp outside_window? do
+      case SdrAgent.Prototype.funding_entry() do
+        {:ok, %{starts_at: %DateTime{} = starts_at, expires_at: %DateTime{} = expires_at}} ->
+          now = SdrAgent.Clock.utc_now()
+          DateTime.compare(now, starts_at) == :lt or DateTime.compare(now, expires_at) != :lt
+
+        _no_window ->
+          true
+      end
     end
   end
 
@@ -138,7 +207,53 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
       from_ai_baseline: digest(revision.diff_from_ai_baseline),
       from_parent: digest(revision.diff_from_parent)
     })
+    |> delegated(verdict, actor)
   end
+
+  # The grant's delegated event arguments (interfaces r6 IF-3 / IF-5; Codex
+  # b84b0491), server-derived only: every caller value is scrubbed first. In
+  # prototype runtime the grant carries the assurance block (the label
+  # belongs to the runtime, not the actor, and is never authority), and the
+  # operator's grant also `approval_mode: "delegated_machine"` and its
+  # delegation id; a missing block refuses (`prototype_assurance_unavailable`),
+  # never an unlabelled grant. Ordinary runtime and every rejection carry none.
+  @delegated [:approval_mode, :delegation_id, :prototype]
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp delegated(changeset, :approved, actor) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> labelled(scrub(changeset), actor, SdrAgent.Prototype.assurance())
+        _ordinary -> scrub(changeset)
+      end
+    end
+
+    defp delegated(changeset, _verdict, _actor), do: scrub(changeset)
+
+    defp labelled(changeset, actor, {:ok, %{} = block}) do
+      changeset = Ash.Changeset.force_set_argument(changeset, :prototype, block)
+
+      case actor do
+        %SdrAgent.Actor{type: :prototype_operator, id: delegation_id} ->
+          changeset
+          |> Ash.Changeset.force_set_argument(:approval_mode, "delegated_machine")
+          |> Ash.Changeset.force_set_argument(:delegation_id, delegation_id)
+
+        _human ->
+          changeset
+      end
+    end
+
+    defp labelled(changeset, _actor, _unavailable) do
+      Ash.Changeset.add_error(changeset,
+        field: :approver_id,
+        message: "prototype_assurance_unavailable: no assurance block for the grant"
+      )
+    end
+  else
+    defp delegated(changeset, _verdict, _actor), do: scrub(changeset)
+  end
+
+  defp scrub(changeset), do: Ash.Changeset.force_delete_argument(changeset, @delegated)
 
   defp author(%{author_type: :human, author_user_id: id}), do: %{type: "user", user_id: id}
   defp author(%{author_type: :agent, agent_run_id: id}), do: %{type: "agent", agent_run_id: id}

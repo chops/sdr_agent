@@ -5,6 +5,13 @@ defmodule Mix.Tasks.Sdr.Audit.Verify do
 
   @impl Mix.Task
   def run(argv) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.audit.verify") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
+    verify(argv)
+  end
+
+  defp verify(argv) do
     {opts, args, invalid} =
       OptionParser.parse(argv, strict: [public_key: :string, key_id: :string, key_set: :string])
 

@@ -346,7 +346,20 @@ defmodule SdrAgent.Sales.Lead do
       authorize_if Checks.SeedingAllowed
     end
 
-    policy action([:assign, :convert, :nurture]) do
+    policy action([:convert, :nurture]) do
+      authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
+    end
+
+    # D-237 (supplement 2 r2 section 2): the existing line first and
+    # unchanged, then the live operator AND the actual row tenant; an owner
+    # change stays human-only, directly and through SDR.assign_lead.
+    policy action(:assign) do
+      authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :assign}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
+    end
+
+    policy [action(:assign), changing_attributes([:owner_user_id])] do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
     end
 
@@ -388,6 +401,11 @@ defmodule SdrAgent.Sales.Lead do
                       :reconciler,
                       :scheduler
                     ]}
+
+      # D-237 review_read (supplement 2 r2 section 2): after the existing
+      # lines, the live operator AND the actual row tenant.
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :review_read}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
     end
   end
 

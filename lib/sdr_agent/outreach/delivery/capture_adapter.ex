@@ -18,6 +18,20 @@ defmodule SdrAgent.Outreach.Delivery.CaptureAdapter do
   return `{:error, {class, reason}}` or `:crash` to simulate a provider
   failure, a timeout or a crash on either side of the capture. A fault can
   only make delivery fail; there is nothing else to reach.
+
+  D-237 prototype runtime only. This clause compiles only with
+  `:prototype_authority_compiled`, and the production build has none. The
+  capture's result passes the bounded contract
+  `SdrAgent.Outreach.Errors.CaptureRefused.adapter_result/1` (S4 proposal r3
+  section 3.2):
+  - a typed business refusal becomes the supported permanent outcome
+    `{:error, {:permanent, code}}`;
+  - any other error is raised unchanged, so the worker boundary sanitizes
+    it and the existing crash recovery owns what follows;
+  - an unsupported result shape raises a fixed, value-free
+    `ArgumentError`.
+
+  Ordinary runtime outcomes are unchanged.
   """
   @behaviour SdrAgent.Outreach.Delivery.Adapter
 
@@ -65,17 +79,35 @@ defmodule SdrAgent.Outreach.Delivery.CaptureAdapter do
   end
 
   defp capture(operation, actor) do
-    Outreach.record_receipt(
-      %{
-        delivery_operation_id: operation.id,
-        idempotency_key: operation.idempotency_key,
-        kind: :captured,
-        provider: :capture,
-        provider_message_id: provider_message_id(operation.idempotency_key),
-        rendered_sha256: operation.rendered_sha256
-      },
-      actor: actor
-    )
+    %{
+      delivery_operation_id: operation.id,
+      idempotency_key: operation.idempotency_key,
+      kind: :captured,
+      provider: :capture,
+      provider_message_id: provider_message_id(operation.idempotency_key),
+      rendered_sha256: operation.rendered_sha256
+    }
+    |> Outreach.record_receipt(actor: actor)
+    |> captured()
+  end
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    alias SdrAgent.Outreach.Errors.CaptureRefused
+
+    # D-237 (see the moduledoc): prototype runtime only.
+    defp captured(result) do
+      if SdrAgent.Prototype.runtime() == :prototype do
+        case CaptureRefused.adapter_result(result) do
+          {:ok, receipt} -> {:ok, receipt}
+          {:outcome, outcome} -> {:error, outcome}
+          {:raise, exception} -> raise exception
+        end
+      else
+        result
+      end
+    end
+  else
+    defp captured(result), do: result
   end
 
   defp fault(phase, operation) do
