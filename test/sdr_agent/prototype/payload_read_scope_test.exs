@@ -232,7 +232,8 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
           empty_list: Map.put(base, :sha256s, []),
           not_a_list: Map.put(base, :sha256s, sha),
           missing_hashes: base,
-          not_a_map: [sha]
+          not_a_map: [sha],
+          improper_list: Map.put(base, :sha256s, [sha | :bad_tail])
         ]
       end
 
