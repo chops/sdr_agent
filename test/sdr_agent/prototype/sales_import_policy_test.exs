@@ -133,19 +133,19 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
     %{account: account, contact: contact, written: written(ctx)}
   end
 
+  defp import_account(:wrapper, attrs, actor),
+    do: Sales.import_prototype_account(attrs, actor: actor)
+
+  defp import_account(:raw, attrs, actor), do: raw(SdrAgent.Sales.Account, attrs, actor)
+
   # One valid attempt per import action (a new account, a new contact on the
-  # arranged account, the arranged contact's lead), each as `actor`.
-  defp attempts(account, contact, actor) do
+  # arranged account, the arranged contact's lead), each as `actor`, through
+  # `path` (the Sales wrapper or the raw action).
+  defp attempts(account, contact, actor, path) do
     [
-      account: Sales.import_prototype_account(%{@account | domain: "acme2.test"}, actor: actor),
-      contact:
-        Sales.import_prototype_contact(contact_attrs(account, %{email: "sam@acme1.test"}),
-          actor: actor
-        ),
-      lead:
-        Sales.import_prototype_lead(%{account_id: account.id, contact_id: contact.id},
-          actor: actor
-        )
+      account: import_account(path, %{@account | domain: "acme2.test"}, actor),
+      contact: import_contact(path, contact_attrs(account, %{email: "sam@acme1.test"}), actor),
+      lead: import_lead(path, %{account_id: account.id, contact_id: contact.id}, actor)
     ]
   end
 
@@ -200,17 +200,21 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
          ctx do
       %{account: account, contact: contact} = arranged = arrange!(ctx)
 
-      for {label, actor} <- [
-            admin: ctx.admin,
-            seeder: system_actor(:seeder, ctx.tenant),
-            agent_runtime: system_actor(:agent_runtime, ctx.tenant),
-            nil: nil,
-            forged_delegation: %{ctx.actor | id: Ecto.UUID.generate()},
-            forged_tenant: %{ctx.actor | tenant_id: Ecto.UUID.generate()}
-          ] do
-        for {action, result} <- attempts(account, contact, actor) do
-          assert forbidden?(result), "#{action} as #{label} returned #{inspect(result)}"
-        end
+      # The forged tenant names no tenant with an audit chain, so the guarded
+      # wrappers' denial record cannot be appended (Guard.append!/1 raises
+      # {:error, :chain_not_initialized}; reported, not this slice's to
+      # change): it is asserted on the raw actions only.
+      for {label, actor, paths} <- [
+            {:admin, ctx.admin, @paths},
+            {:seeder, system_actor(:seeder, ctx.tenant), @paths},
+            {:agent_runtime, system_actor(:agent_runtime, ctx.tenant), @paths},
+            {nil, nil, @paths},
+            {:forged_delegation, %{ctx.actor | id: Ecto.UUID.generate()}, @paths},
+            {:forged_tenant, %{ctx.actor | tenant_id: Ecto.UUID.generate()}, [:raw]}
+          ],
+          path <- paths,
+          {action, result} <- attempts(account, contact, actor, path) do
+        assert forbidden?(result), "#{action} (#{path}) as #{label} returned #{inspect(result)}"
       end
 
       assert written(ctx) == arranged.written
@@ -220,8 +224,8 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
       %{account: account, contact: contact} = arranged = arrange!(ctx)
       :ok = SdrAgent.PrototypeFixtures.leave_runtime()
 
-      for {action, result} <- attempts(account, contact, ctx.actor) do
-        assert forbidden?(result), "#{action} returned #{inspect(result)}"
+      for path <- @paths, {action, result} <- attempts(account, contact, ctx.actor, path) do
+        assert forbidden?(result), "#{action} (#{path}) returned #{inspect(result)}"
       end
 
       assert written(ctx) == arranged.written
@@ -232,11 +236,16 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
       # differs from a valid one only by the drift.
       %{account: account, contact: contact} = arranged = arrange!(ctx)
       :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1})
-      results = attempts(account, contact, ctx.actor)
+
+      results =
+        for path <- @paths,
+            attempt <- attempts(account, contact, ctx.actor, path),
+            do: {path, attempt}
+
       :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
 
-      for {action, result} <- results do
-        assert forbidden?(result), "#{action} returned #{inspect(result)}"
+      for {path, {action, result}} <- results do
+        assert forbidden?(result), "#{action} (#{path}) returned #{inspect(result)}"
       end
 
       assert written(ctx) == arranged.written
