@@ -1069,6 +1069,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       - `leave_runtime/0` returns the process to ordinary runtime;
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
+      - `with_live_fault/3` and `live_fault_hits/1` (the live-read fault
+        seam, proposal r2, Codex 7ba6d116): RED declarations only. The
+        scope runs its function and never arms or fires a fault, and the
+        hit count is always 0, so the RED reaches its behavioural
+        assertions. No read site consults them yet.
 
       Keys are `{SdrAgent.Prototype, atom}` in the calling process's
       dictionary; `lookup/1` reads them.
@@ -1085,6 +1090,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @runtime_key {SdrAgent.Prototype, :runtime}
       @identity_key {SdrAgent.Prototype, :live_identity}
       @boot_switch_key {SdrAgent.Prototype, :boot_switch}
+      @live_stages [:binding_read, :identity_read, :delegation_read]
+      @live_kinds [:returned_error, :raise, :abort]
+
+      @typedoc "A live-read stage of the fault seam."
+      @type live_stage :: :binding_read | :identity_read | :delegation_read
+
+      @typedoc "A live-read fault kind."
+      @type live_kind :: :returned_error | :raise | :abort
 
       @doc "Enters prototype runtime with `snapshot` for the calling process."
       @spec enter_runtime(Binding.t()) :: :ok
@@ -1121,6 +1134,19 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @doc "The calling process's own boot-switch input, or nil (process-local)."
       @spec boot_switch() :: term()
       def boot_switch, do: Process.get(@boot_switch_key)
+
+      @doc """
+      RED declaration of the live-read fault scope: runs `fun` and returns
+      its result. It never arms or fires a fault (no read site consults it).
+      """
+      @spec with_live_fault(live_stage(), live_kind(), (-> result)) :: result when result: term()
+      def with_live_fault(stage, kind, fun)
+          when stage in @live_stages and kind in @live_kinds and is_function(fun, 0),
+          do: fun.()
+
+      @doc "RED declaration of the live-fault hit count: always 0."
+      @spec live_fault_hits(live_stage()) :: 0
+      def live_fault_hits(stage) when stage in @live_stages, do: 0
 
       @doc """
       Removes the seam's keys (runtime, live identity and boot switch) from

@@ -15,16 +15,22 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
     SQL and leaves a caller's transaction usable; `:abort` is a real
     `SELECT 1 / 0`, and its exact outcome is pinned by stage at the owner
     boundary (thrown to the owner, or returned and then a failed commit).
-  - Raw layer (F5): the injected statement's `division_by_zero`, the
-    faulted read's 25P02, and nothing but one rollback after it, from Repo
-    telemetry of this process. All of it is SQL Sandbox behaviour: the
-    test's `Repo.transaction` is the logical owner (a savepoint inside the
-    sandbox's transaction); nothing here claims unboxed or outermost
-    rollback semantics.
+  - Raw layer (F5; Codex 7b7f4b1c T2/T3): the EXACT statement list of
+    this process from Repo telemetry (closed labels and result codes only):
+    the real reads before the stage, the injected statement with
+    `Repo.in_transaction?/0` at that point and its `division_by_zero`, the
+    faulted real read (25P02 in the owner), and then no later business
+    statement, only the owner's rollback or commit. All of it is SQL
+    Sandbox behaviour: the test's `Repo.transaction` is the logical owner
+    (a savepoint inside the sandbox's transaction); nothing here claims
+    unboxed or outermost rollback semantics.
 
-  The seam is called through an export guard after the fixture binds
-  (`seam!/0`), so at RED every seam test fails on the absent export. The
-  baselines B1/B2 need no seam. Synthetic `.test` data only.
+  The seam is called after an export guard (`seam!/0`) once the fixture
+  binds. At RED it is a test-build-only no-op declaration that never fires
+  (`with_live_fault/3` runs the function, `live_fault_hits/1` is 0), so
+  every seam test reaches and fails its behavioural assertions. The
+  baselines B1-B3 and the no-seam control need no firing. Synthetic
+  `.test` data only.
   """
   use SdrAgent.PrototypeCase, async: false
 
@@ -62,13 +68,22 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
       assert_received {:next, :in_failed_sql_transaction}
       assert owner == {:error, :rollback}
 
-      assert Enum.drop_while(events, &(elem(&1, 0) != :probe)) == [
+      assert events == [
+               {:begin, :ok},
                {:probe, :division_by_zero},
                {:probe, :in_failed_sql_transaction},
                {:rollback, :ok}
              ]
 
       assert probe("SELECT 1") == {:ok, [[1]]}, "the sandbox connection was not recovered"
+    end
+
+    test "B3: a healthy transaction of the test is begin, its statements, commit" do
+      {owner, events} =
+        with_queries(fn -> Repo.transaction(fn -> {probe("SELECT 1"), :done} end) end)
+
+      assert owner == {:ok, {{:ok, [[1]]}, :done}}
+      assert events == [{:begin, :ok}, {:probe, :ok}, {:commit, :ok}]
     end
 
     test "B2: outside an explicit transaction the sandbox's per-query savepoint recovers" do
@@ -89,7 +104,11 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
         end)
 
       assert results == {:ok, {:ok, fx.actor}}
-      refute Enum.any?(events, &fault_event?/1)
+
+      assert events ==
+               reads_before(:delegation_read) ++
+                 reads_before(:delegation_read) ++ [{read_label(:delegation_read), :ok}]
+
       seam!()
       for stage <- @stages, do: assert(hits(stage) == 0, "#{stage} counted a hit with no scope")
     end
@@ -108,8 +127,10 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
           end)
 
         assert result == {@mismatch, 1}, "#{stage}/#{kind}: #{inspect(result)}"
-        refute Enum.any?(events, &fault_event?/1), "#{stage}/#{kind} executed injected SQL"
-        refute Enum.any?(events, &write_event?/1), "#{stage}/#{kind} wrote"
+
+        assert events == reads_before(stage),
+               "#{stage}/#{kind}: a statement at or after the faulted stage: #{inspect(events)}"
+
         assert call_stage(stage, fx) == ok_value(stage, fx), "#{stage}/#{kind}: scope outlived"
         assert hits(stage) == 0
       end
@@ -133,8 +154,10 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
         assert owner == {{:ok, {@mismatch, 1}}, 1}, "#{stage}/#{kind}: #{inspect(owner)}"
         assert_received {:returned, {@mismatch, 1}}
         assert_received {:probe, :ok}, "#{stage}/#{kind} left the caller's transaction unusable"
-        refute Enum.any?(events, &fault_event?/1), "#{stage}/#{kind} executed injected SQL"
-        refute Enum.any?(events, &write_event?/1), "#{stage}/#{kind} wrote"
+
+        assert events ==
+                 [{:begin, :ok}] ++ reads_before(stage) ++ [{:probe, :ok}, {:commit, :ok}],
+               "#{stage}/#{kind}: #{inspect(events)}"
       end
 
       assert counts() == before
@@ -154,9 +177,12 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
           end)
 
         assert result == {ok_value(stage, fx), 1}, "#{stage}: #{inspect(result)}"
-        assert [{{:fault, ^stage}, :division_by_zero}, next | _rest] = from_fault(events)
-        assert next == {read_label(stage), :ok}, "#{stage}: the real read did not follow"
-        refute Enum.any?(events, &write_event?/1)
+
+        assert events ==
+                 reads_before(stage) ++
+                   [{{:fault, stage, false}, :division_by_zero}, {read_label(stage), :ok}] ++
+                   reads_after(stage),
+               "#{stage}: #{inspect(events)}"
       end
 
       assert counts() == before
@@ -454,10 +480,26 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   defp read_label(:identity_read), do: :raw
   defp read_label(:delegation_read), do: {:read, "prototype_delegations"}
 
+  # The real reads a stage's call issues before reaching that stage
+  # (`check_live/0`: the binding read, then the identity query;
+  # `operator_actor/1`: `check_live/0`, then the delegation read), and after
+  # it when the faulted read succeeds.
+  defp reads_before(:binding_read), do: []
+  defp reads_before(:identity_read), do: [{read_label(:binding_read), :ok}]
+
+  defp reads_before(:delegation_read),
+    do: [{read_label(:binding_read), :ok}, {read_label(:identity_read), :ok}]
+
+  defp reads_after(:binding_read), do: [{read_label(:identity_read), :ok}]
+  defp reads_after(_stage), do: []
+
   # The `:abort` case in the test's transaction: the outcome callback pins
-  # the owner's result and the in-fun observers; here the raw layer (the
-  # injected statement, the faulted real read's 25P02 and then exactly one
-  # rollback), the hit, no write, and the business rows unchanged.
+  # the owner's result and the in-fun observers; here the exact statement
+  # list of this process (the owner's begin, the real reads before the
+  # stage, the injected statement with the transaction state at that point,
+  # the faulted real read's 25P02, then only the identity stage's observer
+  # probe and exactly one rollback: no later business statement), the hit,
+  # and the business rows unchanged.
   defp assert_aborted_owner(stage, fx, outcome) do
     before = counts()
 
@@ -470,12 +512,16 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
     assert n == 1
 
     expected =
-      [{{:fault, stage}, :division_by_zero}, {read_label(stage), :in_failed_sql_transaction}] ++
+      [{:begin, :ok}] ++
+        reads_before(stage) ++
+        [
+          {{:fault, stage, true}, :division_by_zero},
+          {read_label(stage), :in_failed_sql_transaction}
+        ] ++
         if(stage == :identity_read, do: [{:probe, :in_failed_sql_transaction}], else: []) ++
         [{:rollback, :ok}]
 
-    assert from_fault(events) == expected
-    refute Enum.any?(events, &write_event?/1)
+    assert events == expected
     assert probe("SELECT 1") == {:ok, [[1]]}, "the sandbox connection was not recovered"
     assert counts() == before
   end
@@ -545,21 +591,15 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
     end
   end
 
-  defp fault_event?({{:fault, _stage}, _code}), do: true
-  defp fault_event?(_event), do: false
-
-  defp write_event?({{:write, _source}, _code}), do: true
-  defp write_event?(_event), do: false
-
-  defp from_fault(events), do: Enum.drop_while(events, &(not fault_event?(&1)))
-
   @doc false
   def handle_query(_event, _measurements, metadata, test) do
     if self() == test, do: send(test, {:d237_query, classify(metadata)})
   end
 
   # A closed label and result code per Repo statement of this process; no
-  # SQL text, parameter or row leaves the handler.
+  # SQL text, parameter or row leaves the handler. It runs in the emitting
+  # process during the statement, so an injected statement's label carries
+  # `Repo.in_transaction?/0` at the fault point.
   defp classify(%{query: query, source: source, result: result} = metadata) do
     options = Map.get(metadata, :options) || []
     {control(query) || tagged(options) || statement(query, source), code(result)}
@@ -572,9 +612,14 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
 
   defp tagged(options) do
     cond do
-      Keyword.has_key?(options, :d237_live_fault) -> {:fault, options[:d237_live_fault]}
-      Keyword.get(options, :d237_probe) == true -> :probe
-      true -> nil
+      Keyword.has_key?(options, :d237_live_fault) ->
+        {:fault, options[:d237_live_fault], Repo.in_transaction?()}
+
+      Keyword.get(options, :d237_probe) == true ->
+        :probe
+
+      true ->
+        nil
     end
   end
 
