@@ -66,8 +66,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       database failure inside a query or an action aborts the transaction;
       its structured rollback (an Ash query, changeset or action input) is
       returned after the rollback as the closed `:import_failed`, never
-      inspected. Reads are never raising (a read failure is the same closed
-      rollback). Denial records of the guarded calls are appended by
+      inspected. This covers returned errors and structured rollbacks only:
+      the coordinator's own reads use the non-raising `Ash.read/2`, whose
+      returned error is the same closed rollback; a lower layer that raises
+      is not normalized and its proof is still owed. Denial records of the guarded calls are appended by
       `SdrAgent.Audit.transaction/1` after the rollback, and so are kept.
 
     Results carry codes, row ids and ids only, never values; the codes are
@@ -287,7 +289,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     # A read inside the row's transaction: its rows, or the closed
-    # :import_failed rollback on a read failure (never raised).
+    # :import_failed rollback on a returned read error (a raise from below is
+    # not caught here).
     defp read(query) do
       case Ash.read(query) do
         {:ok, records} -> {:ok, records}
