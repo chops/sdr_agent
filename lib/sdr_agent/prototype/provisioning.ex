@@ -163,10 +163,18 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def classify(_snapshot, _event), do: :untrusted
 
-    defp original?(snapshot, event, arguments) do
+    defp original?(snapshot, event, arguments),
+      do: original_event?(event) and commitments?(snapshot, event, arguments)
+
+    # The event's own header: subject, action and the operator actor.
+    defp original_event?(event) do
       event.subject_resource == inspect(ModelCallGrant) and event.action == @action and
-        event.actor_type == :prototype_operator and is_binary(event.actor_id) and
-        arguments["funding_id"] == @funding_id and
+        event.actor_type == :prototype_operator and is_binary(event.actor_id)
+    end
+
+    # The recorded arguments: exactly this binding's commitments.
+    defp commitments?(snapshot, event, arguments) do
+      arguments["funding_id"] == @funding_id and
         arguments["funding_entry_sha256"] == Authority.funding_entry_sha256() and
         arguments["decision_refs"] == decision_refs() and
         arguments["binding_id"] == snapshot.id and
