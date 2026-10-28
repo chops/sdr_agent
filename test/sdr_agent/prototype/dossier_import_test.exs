@@ -14,6 +14,8 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   """
   use SdrAgent.PrototypeCase, async: false
 
+  require Ash.Query
+
   alias SdrAgent.DossierFixtures, as: F
 
   @import SdrAgent.Prototype.DossierImport
@@ -579,6 +581,85 @@ defmodule SdrAgent.Prototype.DossierImportTest do
         assert result == {:error, :import_failed},
                "#{label}: cap_used/1 returned #{inspect(result)}"
       end
+    end
+
+    # Codex 42f5b1e0: the returned read error is classified, not folded. The
+    # evidence first: what a real failed count read returns (the same kernel
+    # read, an empty search path). Then the mapping, through the test-seam
+    # count fault (no query runs): the observed PostgreSQL structure is the
+    # expected store failure (:import_failed); an exact Forbidden is
+    # :forbidden; a wrapped programming error keeps its identity (it is
+    # raised, never returned as :import_failed).
+    test "evidence: a failed count read returns Ash.Error.Unknown of UnknownError leaves wrapping a Postgrex.Error",
+         ctx do
+      query =
+        SdrAgent.Research.DossierEntry
+        |> Ash.Query.for_read(:read, %{}, SdrAgent.Audit.Kernel.opts(ctx.tenant.id))
+        |> Ash.Query.filter(tenant_id == ^ctx.tenant.id)
+        |> Ash.Query.select([:contact_id])
+
+      Repo.query!("SET LOCAL search_path TO pg_catalog", [])
+      result = Ash.read(query)
+
+      leaves =
+        case result do
+          {:error, %Ash.Error.Unknown{errors: errors}} ->
+            Enum.map(errors, &{&1.__struct__, leaf(Map.get(&1, :error))})
+
+          other ->
+            shape(other)
+        end
+
+      assert leaves == [{Ash.Error.Unknown.UnknownError, {Postgrex.Error, :undefined_table}}],
+             "observed #{inspect(leaves)}"
+    end
+
+    test "the observed PostgreSQL structure is :import_failed; an exact Forbidden is :forbidden",
+         ctx do
+      postgres =
+        Ash.Error.Unknown.exception(
+          errors: [
+            Ash.Error.Unknown.UnknownError.exception(
+              error: %Postgrex.Error{postgres: %{code: :undefined_table}}
+            )
+          ]
+        )
+
+      assert count_faulted(ctx, {:error, postgres}) == {:error, :import_failed}
+
+      assert count_faulted(ctx, {:error, Ash.Error.Forbidden.exception([])}) ==
+               {:error, :forbidden}
+    end
+
+    test "a wrapped programming error of the count read keeps its identity, never :import_failed",
+         ctx do
+      for wrapped <- [
+            "synthetic programming error",
+            %RuntimeError{message: "synthetic programming error"}
+          ] do
+        error =
+          Ash.Error.Unknown.exception(
+            errors: [Ash.Error.Unknown.UnknownError.exception(error: wrapped)]
+          )
+
+        result = count_faulted(ctx, {:error, error})
+        assert match?({:raised, Ash.Error.Unknown, _, _}, result), "returned #{inspect(result)}"
+      end
+    end
+  end
+
+  defp leaf(%Postgrex.Error{postgres: %{code: code}}), do: {Postgrex.Error, code}
+  defp leaf(%module{}), do: module
+  defp leaf(other), do: shape(other)
+
+  # cap_used with its count read replaced by `fault` (test-seam build).
+  defp count_faulted(ctx, fault) do
+    Process.put({@import, :count_fault}, fault)
+
+    try do
+      capture(fn -> call(@import, :cap_used, [ctx.actor]) end)
+    after
+      Process.delete({@import, :count_fault})
     end
   end
 
