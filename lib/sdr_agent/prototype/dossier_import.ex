@@ -161,8 +161,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     if @test_seams do
       @doc false
-      # Test-seam builds only: `after_sales:`, a 0-arity function, runs inside
-      # the row's transaction between the Sales and the Research writes.
+      # Test-seam builds only, each a 0-arity function run inside the row's
+      # transaction: `before_lock:` after the entry checks and before the
+      # binding lock; `after_sales:` between the Sales and the Research writes.
       def import_row(row, actor, seams) when is_list(seams), do: run_row(row, actor, seams)
     end
 
@@ -286,6 +287,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     ## One row (inside its transaction)
 
     defp write_row(row, actor, seams) do
+      :ok = seam(seams, :before_lock)
       lock_binding!(actor)
       entry = existing(row, actor)
 
