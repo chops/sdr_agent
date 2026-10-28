@@ -8,7 +8,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     the validated `SdrAgent.Prototype.SeedDir.read/2` result; returns ids and
     digests only.
 
-    `run/2` first re-checks the caller, before any write: prototype runtime
+    `run/2` owns its one transaction (seed design D3), so a call inside an
+    already-open transaction (a Repo or `SdrAgent.Audit.transaction/1`
+    caller) is refused with `{:error, :seed_failed}` first, before any query:
+    before the runtime, actor and live checks below, and before any read or
+    write. That caller's transaction stays usable. The sole callers (setup
+    phase 3 after the phase-2 commit, and the seed task) call it at top
+    level.
+
+    Then `run/2` re-checks the caller, before any write: prototype runtime
     (`:not_prototype_runtime`), the live binding (`SdrAgent.Prototype.check_live/0`,
     `:binding_mismatch`) and the live operator
     (`SdrAgent.Prototype.operator_actor/1`, called fresh, must resolve the
@@ -21,12 +29,23 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     """
 
     alias SdrAgent.Prototype
+    alias SdrAgent.Repo
 
-    @doc "Writes or replays the seed; see the moduledoc."
+    @doc """
+    Writes or replays the seed; see the moduledoc. Inside an already-open
+    transaction it is `{:error, :seed_failed}` before any query.
+    """
     @spec run(map(), SdrAgent.Actor.t()) :: {:ok, map()} | {:error, atom()}
     def run(seed, actor) do
-      with :ok <- live(actor), do: write(seed, actor)
+      with :ok <- not_nested(),
+           :ok <- live(actor),
+           do: write(seed, actor)
     end
+
+    # Seed design D3: the seed owns its one transaction, so an open caller
+    # transaction (a nested Repo or Audit transaction is not a savepoint) is
+    # refused before any query, and that transaction stays usable.
+    defp not_nested, do: if(Repo.in_transaction?(), do: {:error, :seed_failed}, else: :ok)
 
     # The fresh real resolver must return exactly this actor (type, delegation
     # id and tenant), after the live binding check; nothing is taken from the
