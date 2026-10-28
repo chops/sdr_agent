@@ -1,6 +1,6 @@
 defmodule SdrAgent.Prototype.OperatorGatesTest do
   @moduledoc """
-  D-237 least privilege at S4's operator gates (interfaces r6 IF-3 operator
+  D-237 operator gates at S4 (interfaces r6 IF-3 operator
   atoms; amendment item 3 "Allowed actions" and "Refused for the operator";
   plan r7 section 6 row "Least privilege", S4's part):
 
@@ -12,15 +12,19 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     assign, with the transition, stamp, owner and event as before; an
     operator-supplied owner is refused; no other Lead mutation;
   - `SDR.retry_run/2` is refused in prototype runtime for every actor;
-  - the `:review_read` read lines: the operator reads exactly the listed
-    resources (Draft, DraftRevision, RevisionCitation, Approval,
+  - the `:review_read` read lines: the operator reads the fourteen
+    review-read paths (Draft, DraftRevision, RevisionCitation, Approval,
     DeliveryOperation, DeliveryReceipt, AgentRun, Lead, Account, Contact,
     Decision, ResearchArtifact, EvidenceClaim), plus Campaign (Codex S4
     RED ruling 2), and only rows of the binding tenant, through the policy
     itself and nothing else here; a
     forged operator struct reads none of them in ordinary runtime, except
     AgentRun and Decision, whose existing read policy admits any present
-    actor (unchanged);
+    actor (unchanged). Pre-existing metadata-read exceptions remain:
+    AgentRun, Decision and ModelInvocation keep `authorize_if
+    actor_present()` first (Codex 2e1d2cb3), so these tests prove the
+    fourteen paths plus those exceptions, never least privilege; a
+    generation-2 ClaudeCLI output stays ForbiddenField for every such read;
   - the auditor cannot assign, approve or capture.
 
   Grant, provisioning, user-administration and settings refusals are S1's
@@ -56,6 +60,9 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
   # Review resources whose existing read policy is `authorize_if actor_present()`
   # (unchanged by D-237): any present actor reads them, a forged struct included.
   @any_present_actor_reads [SdrAgent.Agents.AgentRun, SdrAgent.Agents.Decision]
+
+  # Outside the fourteen, with the same existing actor_present() read.
+  @any_present_actor_reads_outside [SdrAgent.Agents.ModelInvocation]
 
   @not_review_read [
     SdrAgent.Agents.ModelInvocation,
@@ -152,7 +159,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   # ------------------------------------------------------------------ review_read
 
-  test "the operator reads exactly the :review_read resources of its tenant" do
+  test "the operator reads the fourteen review-read paths of its tenant, plus pre-existing metadata-read exceptions" do
     ctx = prototype_drafted!()
     assert {:ok, _approval} = operator_approve(ctx, ctx.draft)
     deliver!()
@@ -170,7 +177,10 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
              "the operator cannot read a #{inspect(resource)} directly"
     end
 
-    for resource <- @not_review_read do
+    # ModelInvocation keeps its existing actor_present() read (any present
+    # actor, unchanged; no operator line is added): see the existing-semantics
+    # regression. It is not a review_read grant.
+    for resource <- @not_review_read -- @any_present_actor_reads_outside do
       refute match?({:ok, [_ | _]}, Ash.read(resource, actor: ctx.operator)),
              "the operator reads #{inspect(resource)}"
     end
@@ -199,15 +209,18 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     end
   end
 
-  # Codex S4 RED-2 Q1: the exemption above documents existing semantics, not
-  # least privilege. AgentRun's and Decision's :read keeps its existing first
-  # line `authorize_if actor_present()` (no D-237 line ahead of it), so any
-  # present actor, a forged operator struct included, reads their rows.
-  test "existing semantics, not least privilege: AgentRun and Decision :read still admit any present actor" do
+  # Codex S4 RED-2 Q1 and 2e1d2cb3: the exemptions above document existing
+  # semantics, not least privilege. AgentRun's, Decision's and
+  # ModelInvocation's :read keeps its existing first line `authorize_if
+  # actor_present()` (no D-237 line ahead of it), so any present actor, a
+  # forged operator struct included, reads their rows; they are neither
+  # tenant-restricted nor resistant to forged or stale actors. ModelInvocation
+  # gained no operator line at all.
+  test "existing semantics, not least privilege: AgentRun, Decision and ModelInvocation :read still admit any present actor" do
     ctx = prototype_drafted!()
     forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
 
-    for resource <- @any_present_actor_reads do
+    for resource <- @any_present_actor_reads ++ @any_present_actor_reads_outside do
       read_lines =
         for policy <- Ash.Policy.Info.policies(resource),
             match?([{Ash.Policy.Check.ActionType, opts}] when is_list(opts), policy.condition),
@@ -219,16 +232,77 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
              "#{inspect(resource)} :read no longer starts with authorize_if actor_present(): " <>
                inspect(read_lines)
 
+      if resource in @any_present_actor_reads_outside do
+        refute inspect(read_lines) =~ "OperatorAction",
+               "#{inspect(resource)} gained an operator read line"
+      end
+
       assert match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
              "#{inspect(resource)} rows are not readable by any present actor (prototype runtime)"
     end
 
     PrototypeFixtures.leave_runtime()
 
-    for resource <- @any_present_actor_reads do
+    for resource <- @any_present_actor_reads ++ @any_present_actor_reads_outside do
       assert match?({:ok, [_ | _]}, Ash.read(resource, actor: forged)),
              "#{inspect(resource)} rows are not readable by any present actor (ordinary runtime)"
     end
+  end
+
+  # Codex 2e1d2cb3: the ModelInvocation metadata exception grants no business
+  # output. A real generation-2 ClaudeCLI invocation (reserved through the
+  # admission seam in ordinary runtime, then read in both runtimes) keeps
+  # parsed_output, validation_errors and refusal ForbiddenField for the live
+  # operator, a forged operator, ordinary actors and a copied marker; S2's
+  # verified-scope gate stays the only business-output read.
+  test "a generation-2 ClaudeCLI output stays ForbiddenField for the operator, forged operators, ordinary actors and copied markers" do
+    fixture = bound!(enter_runtime: false)
+    tenant = fixture.tenant
+    previous = SdrAgent.AgentsFixtures.put_allowlist!()
+    on_exit(fn -> Application.put_env(:sdr_agent, SdrAgent.Agents.Witness, previous) end)
+    SdrAgent.AgentsFixtures.grant!(tenant)
+    %{run: run, agent: agent} = SdrAgent.AgentsFixtures.running_run(tenant)
+    invocation = SdrAgent.AgentsFixtures.claude_completed!(run, agent, "d237-gate")
+    assert SdrAgent.Agents.ModelInvocation.gated?(invocation), "not a generation-2 ClaudeCLI row"
+
+    forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: tenant.id}
+    admin = human(:admin, tenant)
+    released_marker = SdrAgent.Agents.Checks.ReleasedOutputRead.context()
+
+    calibration_marker =
+      SdrAgent.Agents.Checks.CalibrationContext.context(:claude_cli_opus, invocation.id)
+
+    masked! = fn actor, context, label ->
+      result =
+        Ash.get(SdrAgent.Agents.ModelInvocation, invocation.id, actor: actor, context: context)
+
+      assert match?({:ok, %{id: _}}, result), "#{label}: metadata unreadable: #{inspect(result)}"
+      {:ok, row} = result
+
+      for field <- SdrAgent.Agents.ModelInvocation.output_fields() do
+        assert match?(%Ash.ForbiddenField{}, Map.fetch!(row, field)),
+               "#{label}: #{field} is readable"
+      end
+    end
+
+    cases = fn operator ->
+      for {actor, name} <- [
+            {operator, "operator"},
+            {forged, "forged operator"},
+            {agent, "agent runtime"},
+            {admin, "admin"}
+          ],
+          {context, marker} <- [
+            {%{}, "no marker"},
+            {released_marker, "copied released-output marker"},
+            {calibration_marker, "copied calibration marker"}
+          ],
+          do: masked!.(actor, context, "#{name}, #{marker}")
+    end
+
+    cases.(fixture.actor)
+    enter_window!(fixture)
+    cases.(fixture.actor)
   end
 
   # The twelve review_read lines of Codex 92a99417 step 4 (Lead and Campaign
