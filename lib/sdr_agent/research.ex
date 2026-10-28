@@ -19,12 +19,17 @@ defmodule SdrAgent.Research do
     * `record_qualification/2` (AGT) and `override_qualification/2` (ADM,
       REV) — supersedes lineage, cited evidence;
     * reads (tenant-scoped) — `current_qualification/2`, `fetch/3`,
-      `list_records/2`.
+      `list_records/2`;
+    * D-237 (OPR, prototype runtime) — `record_dossier_entry/2` and
+      `record_dossier_source/2`, called only by the prototype dossier import.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
 
   alias SdrAgent.Audit.GuardedCall
+  alias SdrAgent.Prototype.Checks.OperatorAction
+  alias SdrAgent.Research.DossierEntry
+  alias SdrAgent.Research.DossierSource
   alias SdrAgent.Research.EvidenceClaim
   alias SdrAgent.Research.Qualification
   alias SdrAgent.Research.ResearchArtifact
@@ -71,6 +76,36 @@ defmodule SdrAgent.Research do
 
   @doc "Lists `resource` records in the actor's tenant (`filter:`, `sort:` options)."
   def list_records(resource, opts), do: GuardedCall.list(resource, opts)
+
+  @doc """
+  OPR (D-237, interfaces r6 IF-6; supplement 1 R9): records one imported
+  dossier entry through `DossierEntry :import`, as called by
+  `SdrAgent.Prototype.DossierImport` (S3) inside its per-row transaction.
+  Only the resolved prototype operator passes
+  (`SdrAgent.Prototype.Checks.OperatorAction`, `:import_dossier`, the live
+  resolver on every call); every other actor is refused with `Forbidden`
+  before any changeset is built. The action, its body and its policies are
+  S3's; until it exists the operator's call fails, never falling back to a
+  raw write.
+  """
+  @spec record_dossier_entry(map(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def record_dossier_entry(attrs, opts), do: record_dossier(DossierEntry, attrs, opts)
+
+  @doc """
+  OPR (D-237): records one imported dossier source through
+  `DossierSource :import`, under the same operator gate as
+  `record_dossier_entry/2`.
+  """
+  @spec record_dossier_source(map(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def record_dossier_source(attrs, opts), do: record_dossier(DossierSource, attrs, opts)
+
+  defp record_dossier(resource, attrs, opts) do
+    if OperatorAction.match?(Keyword.get(opts, :actor), nil, action: :import_dossier) do
+      GuardedCall.create(resource, :import, attrs, opts)
+    else
+      {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
 
   defp subject(opts, attrs, key), do: Keyword.put(opts, :subject_id, Map.get(Map.new(attrs), key))
 end

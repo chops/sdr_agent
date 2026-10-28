@@ -33,9 +33,10 @@ defmodule SdrAgent.Prototype do
   `label/0` returns `{:error, :not_prototype_runtime}`.
 
   Stage (D-237 S1): `runtime/0`, `binding/0`, `label/0` and the
-  ordinary-runtime refusals (B1a), and `check_live/0`, `operator_actor/1`
-  and `operator?/1` (B2b) are implemented. In prototype runtime every other
-  function still returns `{:error, :not_implemented}`.
+  ordinary-runtime refusals (B1a), `check_live/0`, `operator_actor/1` and
+  `operator?/1` (B2b), and `policy_entry/0`, `funding_entry/0` and
+  `assurance/0` are implemented. In prototype runtime `enter_session/2`
+  still returns `{:error, :not_implemented}`.
   """
 
   alias SdrAgent.Prototype.Binding
@@ -75,7 +76,7 @@ defmodule SdrAgent.Prototype do
 
     @doc "The IF-5 assurance block."
     @spec assurance() :: {:ok, map()} | {:error, :not_prototype_runtime}
-    def assurance, do: pending()
+    defdelegate assurance(), to: Authority
 
     @doc "Creates or replays this agent session's delegation; returns its id."
     @spec enter_session(:claude_code | :codex_cli, String.t()) ::
@@ -92,11 +93,19 @@ defmodule SdrAgent.Prototype do
 
     @doc "The compiled `d237-prototype/1` policy entry, exactly."
     @spec policy_entry() :: {:ok, map()} | {:error, :not_prototype_runtime}
-    def policy_entry, do: pending()
+    def policy_entry, do: in_runtime(&Authority.policy_entry/0)
 
     @doc "The compiled `d237-funding/1` funding entry, exactly."
     @spec funding_entry() :: {:ok, map()} | {:error, :not_prototype_runtime}
-    def funding_entry, do: pending()
+    def funding_entry, do: in_runtime(&Authority.funding_entry/0)
+
+    # A compiled constant, in prototype runtime only.
+    defp in_runtime(entry) do
+      case Authority.runtime() do
+        :prototype -> {:ok, entry.()}
+        :ordinary -> {:error, :not_prototype_runtime}
+      end
+    end
 
     # Ordinary runtime refuses; prototype runtime is not implemented yet
     # (later increments), so nothing succeeds here.

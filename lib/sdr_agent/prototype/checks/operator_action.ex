@@ -5,12 +5,13 @@ defmodule SdrAgent.Prototype.Checks.OperatorAction do
 
   It passes only when `action` is one of the closed operator atoms
   (`actions/0`), the runtime is prototype, and the authoritative resolver
-  `SdrAgent.Prototype.operator_actor/1` re-run on `actor.id` returns an
-  actor of the same tenant as `actor.tenant_id`. An `SdrAgent.Actor`
-  struct, its type or its fields are never proof by themselves.
+  `SdrAgent.Prototype.operator_actor/1`, re-run on `actor.id`, returns
+  exactly that actor (type, id and tenant). An `SdrAgent.Actor` struct, its
+  type or its fields are never proof by themselves.
 
-  RED stage (D-237 S1): `actions/0` is the contract; `match?/3` refuses
-  every request.
+  It is compiled only with the prototype authority
+  (`:prototype_authority_compiled`); the production build refuses every
+  request and references no authority.
   """
   use Ash.Policy.SimpleCheck
 
@@ -33,10 +34,19 @@ defmodule SdrAgent.Prototype.Checks.OperatorAction do
   @impl true
   def describe(opts), do: "the resolved prototype operator performs #{inspect(opts[:action])}"
 
-  @impl true
-  def match?(_actor, _context, _opts), do: red(false)
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    # The full live path on every call (`SdrAgent.Prototype.Authority.operator?/1`:
+    # boot snapshot, kernel binding read, complete snapshot, real identity,
+    # delegation read and resolution), then the exact actor; nothing cached.
+    @impl true
+    def match?(%SdrAgent.Actor{type: :prototype_operator, id: id} = actor, _authorizer, opts)
+        when is_binary(id) do
+      Keyword.get(opts, :action) in @actions and SdrAgent.Prototype.Authority.operator?(actor)
+    end
 
-  # RED stub result, typed dynamic() so callers compile against the stub
-  # (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+    def match?(_actor, _authorizer, _opts), do: false
+  else
+    @impl true
+    def match?(_actor, _authorizer, _opts), do: false
+  end
 end
