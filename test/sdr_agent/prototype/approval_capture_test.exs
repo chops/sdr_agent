@@ -142,6 +142,11 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     refute Map.has_key?(args, "approval_mode")
     refute Map.has_key?(args, "delegation_id")
     refute args["prototype"] == @forged.prototype
+
+    # Codex b84b0491: in prototype runtime a human's granted event carries
+    # the server-derived assurance block (the label belongs to the runtime,
+    # not the actor), never approval_mode or delegation_id.
+    assert args["prototype"] == block!()
   end
 
   test "a stale revision is refused for the operator" do
