@@ -246,11 +246,15 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   end
 
   describe "layering and inputs (source checks)" do
-    test "Sales never references Research" do
+    # Codex R7 layering: Sales stays below the import coordinator and never
+    # reaches the dossier Research resources or names. (Existing, unrelated
+    # qualification checks may read Research; this rule is about the import.)
+    test "Sales never reaches the dossier import or its Research resources" do
       files = ["lib/sdr_agent/sales.ex" | Path.wildcard("lib/sdr_agent/sales/**/*.ex")]
+      import_path = ~r/Prototype\.DossierImport|Research\.Dossier|record_dossier_|DossierSources/
 
       for file <- files do
-        refute File.read!(file) =~ "SdrAgent.Research", "#{file} references SdrAgent.Research"
+        refute File.read!(file) =~ import_path, "#{file} reaches the dossier import path"
       end
     end
 

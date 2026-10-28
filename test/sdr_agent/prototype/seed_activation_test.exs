@@ -49,13 +49,21 @@ defmodule SdrAgent.Prototype.SeedActivationTest do
     icp
   end
 
+  # A seeder ICP draft unrelated to the seed; each call has its own name
+  # (ICP names are unique per tenant and version).
   defp seeder_draft_icp!(ctx) do
-    {:ok, icp} =
+    name = "Unrelated draft " <> Integer.to_string(System.unique_integer([:positive]))
+
+    result =
       Sales.seed_icp_definition(
-        %{name: "Unrelated draft", description: "x", criteria: %{industries: ["x"]}},
+        %{name: name, description: "x", criteria: %{industries: ["x"]}},
         actor: seeder(ctx)
       )
 
+    assert match?({:ok, _}, result),
+           "prerequisite: the seeder ICP draft returned #{inspect(result)}"
+
+    {:ok, icp} = result
     icp
   end
 
