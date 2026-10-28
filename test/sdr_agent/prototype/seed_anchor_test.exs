@@ -29,6 +29,8 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
 
   alias SdrAgent.Agents.SettingsRevision
   alias SdrAgent.DossierFixtures, as: F
+  alias SdrAgent.Prototype.Changes.SeedAnchor
+  alias SdrAgent.Prototype.Changes.SeedNote
 
   setup do
     fixture = bound!()
@@ -174,11 +176,44 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
     assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
   end
 
-  test "ordinary runtime: :seed_prototype is refused for everyone", ctx do
+  # Codex 3ad0a105 must-fix 2: "everyone" is the operator, an active admin
+  # and the seeder, each with otherwise valid input; and ordinary
+  # :create_revision still admits the active admin there.
+  test "ordinary runtime: :seed_prototype is refused for everyone; :create_revision still admits the admin",
+       ctx do
+    admin = admin_outside_runtime!(ctx)
     :ok = SdrAgent.PrototypeFixtures.leave_runtime()
+    args = %{kind: :writing_guide, content: guide(), note: ctx.note}
 
-    assert {:error, %Ash.Error.Forbidden{}} =
-             seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
+    for {label, actor} <- [
+          operator: ctx.actor,
+          admin: admin,
+          seeder: SdrAgent.Actor.system(:seeder, ctx.tenant.id, "test")
+        ] do
+      assert {:error, %Ash.Error.Forbidden{}} = seed_revision(actor, args), "#{label}"
+    end
+
+    assert revisions() == 0
+
+    allowed =
+      SettingsRevision
+      |> Ash.Changeset.for_create(
+        :create_revision,
+        %{kind: :writing_guide, content: guide(), expected_number: 0},
+        actor: admin
+      )
+      |> Ash.create()
+
+    assert match?({:ok, %SettingsRevision{number: 1}}, allowed),
+           "the admin's :create_revision returned #{inspect(allowed)}"
+  end
+
+  test "in prototype runtime an otherwise-valid active admin is Forbidden on :seed_prototype",
+       ctx do
+    admin = admin_outside_runtime!(ctx)
+    result = seed_revision(admin, %{kind: :writing_guide, content: guide(), note: ctx.note})
+    assert match?({:error, %Ash.Error.Forbidden{}}, result), "returned #{inspect(result)}"
+    assert revisions() == 0
   end
 
   # Codex 969bf261: SeedAnchor itself, reached with the live binding,
@@ -207,6 +242,68 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
 
       result = seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
       assert anchor_refused?(result), "returned #{inspect(result)}"
+      assert revisions() == 0
+    end
+  end
+
+  # Codex 3ad0a105 must-fix 1: a returned READ ERROR is not evidence that the
+  # anchor or the Payload is absent. It keeps its own identity (no business
+  # invalidity on created_by_id or note) and writes nothing; an actually
+  # missing row keeps the business refusal. The read result is injected in
+  # the test-seam build (`{Module, :read_fault}`), so no query runs.
+  describe "read errors are not business refusals" do
+    setup do
+      on_exit(fn ->
+        Process.delete({SeedAnchor, :read_fault})
+        Process.delete({SeedNote, :read_fault})
+      end)
+    end
+
+    defp programming_error,
+      do:
+        Ash.Error.Unknown.exception(
+          errors: [Ash.Error.Unknown.UnknownError.exception(error: "synthetic wrapped failure")]
+        )
+
+    defp faulted(ctx, module, fault) do
+      Process.put({module, :read_fault}, fault)
+      result = seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
+      Process.delete({module, :read_fault})
+      result
+    end
+
+    test "a wrapped error of the anchor read is that error, not an anchor refusal", ctx do
+      result = faulted(ctx, SeedAnchor, {:error, programming_error()})
+      assert match?({:error, %Ash.Error.Unknown{}}, result), "returned #{inspect(result)}"
+      refute anchor_refused?(result)
+      assert inspect(result) =~ "synthetic wrapped failure"
+      refute inspect(result) =~ ctx.provenance.sha256
+      assert revisions() == 0
+    end
+
+    test "a wrapped error of the Payload read is that error, not a note refusal", ctx do
+      result = faulted(ctx, SeedNote, {:error, programming_error()})
+      assert match?({:error, %Ash.Error.Unknown{}}, result), "returned #{inspect(result)}"
+      refute note_refused?(result)
+      assert inspect(result) =~ "synthetic wrapped failure"
+      refute inspect(result) =~ ctx.provenance.sha256
+      assert revisions() == 0
+    end
+
+    test "a Forbidden read keeps Forbidden, for each read", ctx do
+      for module <- [SeedAnchor, SeedNote] do
+        result = faulted(ctx, module, {:error, Ash.Error.Forbidden.exception([])})
+
+        assert match?({:error, %Ash.Error.Forbidden{}}, result),
+               "#{inspect(module)}: #{inspect(result)}"
+      end
+
+      assert revisions() == 0
+    end
+
+    test "an actually missing row keeps the business refusal, for each read", ctx do
+      assert anchor_refused?(faulted(ctx, SeedAnchor, {:ok, nil}))
+      assert note_refused?(faulted(ctx, SeedNote, {:ok, nil}))
       assert revisions() == 0
     end
   end
