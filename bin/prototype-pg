@@ -1,0 +1,16 @@
+#!/bin/bash -p
+# bin/prototype-pg init|start|status|stop — the D-237 isolated prototype
+# PostgreSQL 18 cluster (interfaces r6 IF-7 "Cluster"; amendment item 2).
+#
+# RED stage (D-237 S4): the pinned constants are the contract; every command
+# refuses with the code not_implemented.
+
+readonly PG_BIN='/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin'
+readonly ROOT='/Users/charles/.local/state/sdr-agent/prototype/d237'
+readonly SOCKET_DIR='/private/tmp/d237-pg'
+readonly PORT='5541'
+readonly LSOF='/usr/sbin/lsof'
+readonly STAT='/usr/bin/stat'
+
+printf 'prototype-pg: refused not_implemented\n'
+exit 2
