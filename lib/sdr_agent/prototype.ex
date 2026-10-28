@@ -32,10 +32,10 @@ defmodule SdrAgent.Prototype do
   `:ordinary`, `operator?/1` is `false`, and every other function but
   `label/0` returns `{:error, :not_prototype_runtime}`.
 
-  Stage (D-237 S1 B1a): `runtime/0`, `binding/0`, `label/0` and the
-  ordinary-runtime refusals are implemented. In prototype runtime every
-  other function still returns `{:error, :not_implemented}`, and
-  `operator?/1` is `false`.
+  Stage (D-237 S1): `runtime/0`, `binding/0`, `label/0` and the
+  ordinary-runtime refusals (B1a), and `check_live/0`, `operator_actor/1`
+  and `operator?/1` (B2b) are implemented. In prototype runtime every other
+  function still returns `{:error, :not_implemented}`.
   """
 
   alias SdrAgent.Prototype.Binding
@@ -71,7 +71,7 @@ defmodule SdrAgent.Prototype do
 
     @doc "Re-reads the binding row and the live database identity and compares them with the snapshot."
     @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
-    def check_live, do: pending()
+    defdelegate check_live(), to: Authority
 
     @doc "The IF-5 assurance block."
     @spec assurance() :: {:ok, map()} | {:error, :not_prototype_runtime}
@@ -84,11 +84,11 @@ defmodule SdrAgent.Prototype do
 
     @doc "Resolves the operator actor of `delegation_id` against the live binding."
     @spec operator_actor(Ecto.UUID.t()) :: {:ok, SdrAgent.Actor.t()} | {:error, resolve_error()}
-    def operator_actor(_delegation_id), do: pending()
+    defdelegate operator_actor(delegation_id), to: Authority
 
-    @doc "True only when `operator_actor(actor.id)` succeeds and `actor.tenant_id` matches."
+    @doc "True only when `operator_actor(actor.id)` resolves to exactly `actor`."
     @spec operator?(term()) :: boolean()
-    def operator?(_actor), do: red(false)
+    defdelegate operator?(actor), to: Authority
 
     @doc "The compiled `d237-prototype/1` policy entry, exactly."
     @spec policy_entry() :: {:ok, map()} | {:error, :not_prototype_runtime}

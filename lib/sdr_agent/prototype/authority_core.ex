@@ -49,17 +49,23 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       fixes the VM runtime (increment G, not implemented).
 
     Stage (D-237 S1): the four entry accessors (Codex bd3eb9e1, constants
-    only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d), and
+    only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d),
     B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
-    and B2b1's `snapshot/1` are implemented. Every other
+    B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
+    `resolve_delegation/2` and `operator?/1` are implemented. Every other
     function is still a non-permissive RED declaration returning
     `{:error, :not_implemented}`; none fabricates success.
     """
+
+    import Kernel, except: [binding: 0]
+
+    require Ash.Query
 
     alias SdrAgent.Accounts.User
     alias SdrAgent.Actor
     alias SdrAgent.Audit
     alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Audit.Kernel, as: AuditKernel
     alias SdrAgent.Operations.PrototypeDatabaseBinding
     alias SdrAgent.Operations.PrototypeDelegation
     alias SdrAgent.Prototype.Binding
@@ -297,10 +303,107 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def snapshot(_other), do: {:error, :not_a_binding}
 
-    @doc "Resolver steps 3-7 (IF-1) for `snapshot` and a delegation row or nil."
-    @spec resolve_delegation(SdrAgent.Prototype.Binding.t(), struct() | nil) ::
-            {:ok, SdrAgent.Actor.t()} | {:error, atom()}
-    def resolve_delegation(_snapshot, _delegation), do: red({:error, :not_implemented})
+    @doc """
+    Re-reads the singleton binding row (one plain kernel read) and the live
+    identity, and compares every field with the boot snapshot. A missing or
+    second row, any difference, an unavailable identity or an exception is
+    `{:error, :binding_mismatch}`. Nothing is cached.
+    """
+    @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
+    def check_live do
+      with {:ok, snapshot} <- binding() do
+        if live_matches?(snapshot), do: :ok, else: {:error, :binding_mismatch}
+      end
+    end
+
+    defp live_matches?(snapshot) do
+      with {:ok, [row]} <- read_bindings(),
+           {:ok, ^snapshot} <- snapshot(row),
+           {:ok, live} <- live_identity() do
+        live == %{
+          database: row.database,
+          database_oid: row.database_oid,
+          system_identifier: row.system_identifier
+        }
+      else
+        _mismatch -> false
+      end
+    rescue
+      _error -> false
+    end
+
+    defp read_bindings do
+      PrototypeDatabaseBinding
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.limit(2)
+      |> Ash.read()
+    end
+
+    @doc """
+    The authoritative operator resolver (IF-1): the boot snapshot, a live
+    check, one plain kernel read of the delegation, then
+    `resolve_delegation/2`; on every call, nothing cached.
+    """
+    @spec operator_actor(term()) ::
+            {:ok, Actor.t()} | {:error, SdrAgent.Prototype.resolve_error()}
+    def operator_actor(delegation_id) do
+      with {:ok, snapshot} <- binding(),
+           :ok <- check_live(),
+           {:ok, delegation} <- read_delegation(delegation_id) do
+        resolve_delegation(snapshot, delegation)
+      end
+    end
+
+    # One plain kernel read of the delegation. A malformed id is rejected
+    # (read as nil) before any typed UUID query; a read error or an exception
+    # is `:binding_mismatch`.
+    defp read_delegation(id) do
+      case Ecto.UUID.cast(id) do
+        {:ok, uuid} ->
+          PrototypeDelegation
+          |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+          |> Ash.Query.filter(id == ^uuid)
+          |> Ash.read_one()
+          |> case do
+            {:ok, delegation} -> {:ok, delegation}
+            {:error, _error} -> {:error, :binding_mismatch}
+          end
+
+        :error ->
+          {:ok, nil}
+      end
+    rescue
+      _error -> {:error, :binding_mismatch}
+    end
+
+    @doc "Resolver steps 4-7 for `snapshot` and a delegation row (nil: `:delegation_not_found`)."
+    @spec resolve_delegation(Binding.t(), struct() | nil) ::
+            {:ok, Actor.t()} | {:error, SdrAgent.Prototype.resolve_error()}
+    def resolve_delegation(_snapshot, nil), do: {:error, :delegation_not_found}
+
+    def resolve_delegation(%Binding{} = snapshot, delegation) do
+      cond do
+        delegation.tenant_id != snapshot.tenant_id ->
+          {:error, :delegation_foreign_tenant}
+
+        delegation.binding_id != snapshot.id ->
+          {:error, :delegation_wrong_binding}
+
+        delegation.operator_user_id != snapshot.operator_user_id ->
+          {:error, :anchor_mismatch}
+
+        true ->
+          {:ok,
+           %Actor{type: :prototype_operator, id: delegation.id, tenant_id: snapshot.tenant_id}}
+      end
+    end
+
+    @doc "True only when `operator_actor(actor.id)` resolves to exactly `actor`."
+    @spec operator?(term()) :: boolean()
+    def operator?(%Actor{type: :prototype_operator, id: id} = actor) when is_binary(id),
+      do: operator_actor(id) == {:ok, actor}
+
+    def operator?(_actor), do: false
 
     @doc "`:ok` when a Repo config targets exactly the prototype socket, port and database."
     @spec check_repo_target(keyword()) :: :ok | {:error, :repo_target_mismatch}
