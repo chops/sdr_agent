@@ -15,7 +15,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       auditor (`auditor_password:`), the binding and the setup session's
       delegation (`agent:`, `session_correlation:`); `{:ok, %{tenant:,
       anchor:, auditor:, binding:, delegation:}}`, or
-      `{:error, :bootstrap_failed}` with everything rolled back. In a
+      `{:error, :bootstrap_failed}` with everything rolled back. It is top
+      level only: inside an already-open transaction it refuses with
+      `{:error, :bootstrap_failed}` before any query or write. In a
       test-seam build only (`:prototype_test_seams`), inside that
       transaction after the binding write and before the delegation's, it
       calls the one-argument hook `{SdrAgent.Prototype.Authority,
@@ -352,7 +354,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
     def bootstrap(opts) do
-      with {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
+      with :ok <- bootstrap_top_level(),
+           {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
            {:ok, correlation} <- setup_correlation(Keyword.get(opts, :session_correlation)),
            {:ok, created} <-
              Audit.transaction(fn -> bootstrap_steps(opts, agent, correlation) end) do
@@ -363,6 +366,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     rescue
       _error -> {:error, :bootstrap_failed}
     end
+
+    # Codex 54f4263b P0-2: top level only. A caller's open transaction would
+    # make phase 2 share its physical transaction (no savepoint), so it is
+    # refused first, before any query or write; Repo.in_transaction?/0 issues
+    # no query.
+    defp bootstrap_top_level,
+      do: if(Repo.in_transaction?(), do: {:error, :nested_transaction}, else: :ok)
 
     # Inside the transaction: any error rolls every write back.
     defp bootstrap_steps(opts, agent, correlation) do
