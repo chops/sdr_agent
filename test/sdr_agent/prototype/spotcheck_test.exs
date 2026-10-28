@@ -388,6 +388,14 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
       refute_received {:read, _size, true}, "the substituted target's bytes were read"
     end
 
+    test "the root widened to 0755 after the precheck: refused before any content is read", ctx do
+      hook(:after_read, ctx.record)
+      hook(:after_precheck, fn _path -> File.chmod!(ctx.dir, 0o755) end)
+
+      refused!(SpotcheckManifest.artifact(ctx.dir, ctx.ref), "artifact", :artifact_invalid)
+      refute_received {:read, _size, _sentinel}, "content was read under a widened root"
+    end
+
     test "the root replaced by a symlink after the precheck: refused, the target never read",
          ctx do
       hook(:after_read, ctx.record)
