@@ -4,8 +4,9 @@ defmodule SdrAgent.PrototypeCase do
   `SdrAgent.AuditCase`, plus guards that turn an absent contract into an
   assertion failure (never a compile warning or a crash):
 
-  - `bound!/1` asserts that `SdrAgent.PrototypeFixtures.bind/1` succeeded
-    and returns the fixture;
+  - `bound!/1` asserts that `SdrAgent.PrototypeFixtures.bind/1` (the real
+    bootstrap path) succeeded and returns the fixture; a failure there is a
+    prerequisite failure, never evidence about the test's named behaviour;
   - `loaded!/1` asserts that a module exists;
   - `call/3` calls a function of a module that may not exist yet
     (`Function.capture/3`), after `loaded!/1` and an export check.
@@ -36,11 +37,27 @@ defmodule SdrAgent.PrototypeCase do
 
     ExUnit.Assertions.assert(
       match?({:ok, %{}}, result),
-      "the prototype binding fixture failed: #{inspect(result)} " <>
-        "(IF-2 setup bootstrap and the IF-1 runtime are not implemented)"
+      "prerequisite: the prototype binding fixture (the real bootstrap, snapshot, " <>
+        "seam and resolver path) returned #{inspect(result)}"
     )
 
     {:ok, fixture} = result
+    fixture
+  end
+
+  @doc """
+  Enters prototype runtime with a bound fixture's snapshot, or fails the
+  test as a prerequisite. Arrange users before calling it: prototype runtime
+  refuses user administration for every actor.
+  """
+  def enter!(fixture) do
+    result = SdrAgent.PrototypeFixtures.enter_runtime(fixture.snapshot)
+
+    ExUnit.Assertions.assert(
+      result == :ok,
+      "prerequisite: enter_runtime returned #{inspect(result)}"
+    )
+
     fixture
   end
 

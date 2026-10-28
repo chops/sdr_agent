@@ -1,0 +1,267 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "operator_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"D-243\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "delegation_ref",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "agent",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "session_correlation",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "started_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_delegations_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": "full",
+        "match_with": {
+          "operator_user_id": "operator_user_id",
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_delegations_binding_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_database_bindings"
+      },
+      "scale": null,
+      "size": null,
+      "source": "binding_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "prototype_delegations_trace_ids"
+    },
+    {
+      "attribute": [
+        "delegation_ref"
+      ],
+      "base_filter": null,
+      "check": "delegation_ref = 'D-243'",
+      "name": "prototype_delegations_ref"
+    },
+    {
+      "attribute": [
+        "agent"
+      ],
+      "base_filter": null,
+      "check": "agent IN ('claude_code', 'codex_cli')",
+      "name": "prototype_delegations_agent"
+    },
+    {
+      "attribute": [
+        "session_correlation"
+      ],
+      "base_filter": null,
+      "check": "session_correlation ~ '^[A-Za-z0-9._:-]{8,128}$'",
+      "name": "prototype_delegations_session_correlation"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION prototype_delegations_append_only()",
+      "global?": false,
+      "name": "prototype_delegations_guard_function",
+      "up": "CREATE FUNCTION prototype_delegations_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_delegations_guard_row ON prototype_delegations",
+      "global?": false,
+      "name": "prototype_delegations_guard_row",
+      "up": "CREATE TRIGGER prototype_delegations_guard_row BEFORE UPDATE OR DELETE ON prototype_delegations FOR EACH ROW EXECUTE FUNCTION prototype_delegations_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_delegations_guard_truncate ON prototype_delegations",
+      "global?": false,
+      "name": "prototype_delegations_guard_truncate",
+      "up": "CREATE TRIGGER prototype_delegations_guard_truncate BEFORE TRUNCATE ON prototype_delegations FOR EACH STATEMENT EXECUTE FUNCTION prototype_delegations_append_only()"
+    }
+  ],
+  "has_create_action": false,
+  "hash": "C57A36D3C5EEB994C4B9C5B5C5263C5555E48E1CB1018FDAE9C588D9D43C2D05",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_delegations_unique_session_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "binding_id"
+        },
+        {
+          "type": "atom",
+          "value": "agent"
+        },
+        {
+          "type": "atom",
+          "value": "session_correlation"
+        }
+      ],
+      "name": "unique_session",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "prototype_delegations",
+  "temporal": null
+}

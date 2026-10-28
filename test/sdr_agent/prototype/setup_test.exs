@@ -90,6 +90,7 @@ defmodule SdrAgent.Prototype.SetupTest do
 
     test "the pinned migration set ends with the seven d237 migrations, in order" do
       versions = call(@authority, :pinned_migrations, [])
+      assert is_list(versions), "pinned_migrations/0 returned #{inspect(versions)}"
       names = Enum.map(versions, fn {_version, name} -> name end)
 
       assert Enum.take(names, -7) == [
@@ -140,7 +141,10 @@ defmodule SdrAgent.Prototype.SetupTest do
       result =
         call(@authority, :bootstrap, [[agent: :claude_code, session_correlation: "bad"]])
 
-      assert match?({:error, _}, result), "a bootstrap with a bad correlation succeeded"
+      # The correlation is checked only by the delegation, the last write, so
+      # the tenant, users and binding were written before the refusal.
+      assert result == {:error, :bootstrap_failed},
+             "a bootstrap failing at its last step returned #{inspect(result)}"
 
       for table <- ~w(tenants users prototype_database_bindings prototype_delegations) do
         assert count(table) == 0, "#{table} kept a row after the rollback"
