@@ -25,6 +25,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
   Reads: admin, auditor, `agent_runtime`, kernel.
   Audited: `model.grant.created | terms_changed | allocation_released |
   revoked`, each with the previous revision.
+
+  D-237 (interfaces r6 IF-2; D3): `:provision_prototype` mints the one
+  prototype grant for the resolved operator only, with the exact
+  `d237-funding/1` terms, the anchor as creator and updater and the
+  server-derived arguments on `model.grant.provisioned`
+  (`SdrAgent.Agents.Changes.ProvisionPrototype`). In prototype runtime
+  `:create`, `:update_terms` and `:release_allocation` are refused for
+  every actor (`SdrAgent.Prototype.Checks.PrototypeRuntime`), and `:revoke`
+  is the operator's, for this binding's grant only
+  (`SdrAgent.Prototype.Checks.PrototypeGrantRevoke`; the anchor is the
+  updater). Ordinary runtime is unchanged.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -133,11 +144,13 @@ defmodule SdrAgent.Agents.ModelCallGrant do
               [event_type: "model.grant.allocation_released", previous: [:revision]] ++ @event}
     end
 
-    # D-237 (interfaces r6 IF-2 "Provisioning"; Codex a6850b13): the one
-    # prototype grant. RED: declared inert and deny-only (`forbid_if always()`
-    # below). Its in-action validation, server-derived arguments and
-    # OperatorAction policy come with C2 GREEN; caller values for the
-    # server-derived arguments will be refused.
+    # D-237 (interfaces r6 IF-2 "Provisioning"; closure note r2, Codex
+    # 3e05314f): the one prototype grant, minted only here. The caller
+    # supplies the worksheet bytes and the evidence root; every other
+    # argument is server-derived (a supplied value is refused) and the
+    # change validates, serializes and refuses a second grant inside the
+    # action (`SdrAgent.Agents.Changes.ProvisionPrototype`, listed before
+    # GrantBundle).
     create :provision_prototype do
       accept []
       argument :worksheet, :string, allow_nil?: false, constraints: [trim?: false]
@@ -146,6 +159,17 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       argument :funding_id, :string
       argument :delegation_id, :string
       argument :binding_id, :string
+      argument :allocations, {:array, :map}
+      change SdrAgent.Agents.Changes.ProvisionPrototype
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {GrantBundle, mode: :create}
+
+      change {AppendEvent,
+              [
+                event_type: "model.grant.provisioned",
+                arguments: [:funding_id, :budget_worksheet_sha256, :delegation_id, :binding_id]
+              ] ++ @event}
     end
 
     update :revoke do
@@ -157,21 +181,29 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       change GrantRevision
       change set_attribute(:status, :revoked)
       change set_attribute(:revoked_at, &SdrAgent.Clock.utc_now/0)
-      change relate_actor(:updated_by)
+      change SdrAgent.Agents.Changes.RevokeUpdatedBy
 
       change {AppendEvent,
               [event_type: "model.grant.revoked", previous: [:status, :revision]] ++ @event}
     end
   end
 
+  # D3 (D-237): the write policy is split per action; a write action not
+  # listed here has no applicable policy and is refused.
   policies do
-    policy action_type([:create, :update, :destroy, :action]) do
+    policy action(:provision_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :provision}
+    end
+
+    policy action([:create, :update_terms, :release_allocation]) do
+      forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
       authorize_if CurrentAdmin
     end
 
-    # RED (D-237 S1 C2): deny-only until its reviewed GREEN.
-    policy action(:provision_prototype) do
-      forbid_if always()
+    policy action(:revoke) do
+      authorize_if SdrAgent.Prototype.Checks.PrototypeGrantRevoke
+      forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
+      authorize_if CurrentAdmin
     end
 
     policy action_type(:read) do

@@ -110,6 +110,12 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Repo
 
   @notifications {__MODULE__, :notifications}
+  @provision_meta %{
+    resource: SdrAgent.Agents.ModelCallGrant,
+    action: :provision_prototype,
+    guarded?: true,
+    subject_id: nil
+  }
   # ADR-0004: at most 200 model calls per UTC day; configuration may only lower it.
   @daily_model_call_limit 200
 
@@ -2034,22 +2040,113 @@ defmodule SdrAgent.Agents do
   # --- real-model call grants (C9) -------------------------------------
 
   @doc """
-  OPR (D-237 prototype runtime only; interfaces r6 IF-2 "Provisioning"):
-  checks the budget worksheet (`worksheet:` bytes, `worksheet_sha256:` hex;
-  evidence resolved under `evidence_root:`, default the private handoff
-  `tmp/` directory) and provisions the one `d237-funding/1` grant through
-  `ModelCallGrant :provision_prototype`, with the exact entry terms and the
-  operator anchor as creator and updater. An identical replay returns the
-  same grant; a second grant is refused.
+  OPR (D-237 prototype runtime only; interfaces r6 IF-2 "Provisioning";
+  closure note r2): provisions, or replays, the one `d237-funding/1` grant.
+  `attrs`: `worksheet:` (the budget worksheet bytes) and `worksheet_sha256:`
+  (its hex digest); `opts`: `actor:` and `evidence_root:` (explicit, no
+  default: D2).
 
-  RED stage (D-237 S1): returns `{:error, :not_implemented}`.
+  1. Only the resolved operator (`OperatorAction :provision`, live) passes;
+     any other caller is `Forbidden` before any input is read, audited once
+     through `SdrAgent.Audit.Guard.refuse/2` for a well-formed actor.
+  2. No `evidence_root` is `{:error, :budget_unbounded}`; a digest that
+     does not match the bytes is `{:error, :worksheet_invalid}`.
+  3. In one `SdrAgent.Audit.transaction/1`, under the binding-row lock:
+     when this binding's grant exists by its original provisioned event,
+     it is returned only if it is still active with the exact entry terms
+     and allocation and the original digest equals this one (no evidence
+     is read, nothing is written); any other existing, untrusted or
+     ambiguous provenance is `{:error, :grant_exists}`. Otherwise
+     `ModelCallGrant :provision_prototype` runs (guarded), which re-checks
+     everything itself.
+
+  Refusals of the action are returned as plain reasons: `:grant_exists`,
+  `:worksheet_invalid`, `:budget_unbounded`, `:budget_below_ceiling`,
+  `:binding_mismatch`. Outside prototype runtime, and in a build without
+  the prototype authority, every caller is refused.
   """
   @spec provision_prototype_grant(map(), keyword()) :: {:ok, struct()} | {:error, term()}
-  def provision_prototype_grant(_attrs, _opts), do: d237_red({:error, :not_implemented})
+  def provision_prototype_grant(attrs, opts), do: provision_or_refuse(attrs, opts)
 
-  # RED stub result, typed dynamic() so callers compile (Elixir 1.20 infers
-  # literal returns). Read-only: nothing writes the key; removed in GREEN.
-  defp d237_red(default), do: :persistent_term.get({__MODULE__, :d237_red_stub}, default)
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    alias SdrAgent.Agents.Errors.ProvisionRefused
+    alias SdrAgent.Prototype.Checks.OperatorAction
+    alias SdrAgent.Prototype.Provisioning
+
+    defp provision_or_refuse(attrs, opts) do
+      actor = Keyword.get(opts, :actor)
+
+      if OperatorAction.match?(actor, nil, action: :provision),
+        do: provision_as_operator(attrs, actor, Keyword.get(opts, :evidence_root)),
+        else: Guard.refuse(@provision_meta, actor)
+    end
+
+    defp provision_as_operator(_attrs, _actor, root) when not is_binary(root),
+      do: {:error, :budget_unbounded}
+
+    defp provision_as_operator(%{worksheet: bytes, worksheet_sha256: digest}, actor, root)
+         when is_binary(bytes) and is_binary(digest) do
+      if Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) == digest do
+        fn -> replay_or_mint(bytes, digest, root, actor) end
+        |> SdrAgent.Audit.transaction()
+      else
+        {:error, :worksheet_invalid}
+      end
+    end
+
+    defp provision_as_operator(_attrs, _actor, _root), do: {:error, :worksheet_invalid}
+
+    defp replay_or_mint(bytes, digest, root, actor) do
+      with {:ok, snapshot} <- SdrAgent.Prototype.binding(),
+           :ok <- Provisioning.lock_binding(snapshot) do
+        case Provisioning.lookup(snapshot) do
+          {:one, grant_id, event} -> replay(snapshot, grant_id, event, digest)
+          :untrusted -> Repo.rollback(:grant_exists)
+          :none -> mint(bytes, root, actor)
+        end
+      else
+        _mismatch -> Repo.rollback(:binding_mismatch)
+      end
+    end
+
+    # An identical replay of the unchanged original: no evidence read, no write.
+    defp replay(snapshot, grant_id, event, digest) do
+      with {:ok, grant, allocations} <- Provisioning.lock_grant(snapshot, grant_id),
+           true <- Provisioning.unchanged?(grant, allocations),
+           true <- Provisioning.digest(event) == digest do
+        grant
+      else
+        _changed_or_different -> Repo.rollback(:grant_exists)
+      end
+    end
+
+    defp mint(bytes, root, actor) do
+      case GuardedCall.create(
+             ModelCallGrant,
+             :provision_prototype,
+             %{worksheet: bytes, evidence_root: root},
+             actor: actor,
+             guarded?: true
+           ) do
+        {:ok, grant} -> grant
+        {:error, error} -> Repo.rollback(refusal(error))
+      end
+    end
+
+    defp refusal(%Ash.Error.Invalid{errors: errors} = error) do
+      Enum.find_value(errors, error, fn
+        %ProvisionRefused{reason: reason} -> reason
+        _other -> nil
+      end)
+    end
+
+    defp refusal(error), do: error
+  else
+    # No prototype authority in this build (production): every caller is
+    # refused before any input is read.
+    defp provision_or_refuse(_attrs, opts),
+      do: Guard.refuse(@provision_meta, Keyword.get(opts, :actor))
+  end
 
   @doc """
   ADM: creates a grant and its `allocations` (a list of maps with `:key`,

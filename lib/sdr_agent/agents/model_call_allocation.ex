@@ -19,8 +19,9 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
 
   Actions: `:create`, `:update_terms`, `:release`; only from the grant's own
   action (`SdrAgent.Agents.Checks.GrantContext`) and as an active human
-  admin (`SdrAgent.Agents.Checks.CurrentAdmin`); a direct call is refused
-  before any lock. Reads as the grant. Audited:
+  admin (`SdrAgent.Agents.Checks.CurrentAdmin`), or, for `:create` only,
+  as the D-237 prototype operator within `ModelCallGrant
+  :provision_prototype`; a direct call is refused before any lock. Reads as the grant. Audited:
   `model.grant.allocation_created | allocation_changed`,
   `model.allocation.released`, each carrying `grant_revision`.
   """
@@ -110,7 +111,15 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
       authorize_if GrantContext
     end
 
-    policy action_type([:create, :update, :destroy, :action]) do
+    # The D-237 operator creates allocations only through
+    # `ModelCallGrant :provision_prototype` (the GrantContext marker above
+    # still applies); every other write remains a current admin's.
+    policy action_type(:create) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :provision}
+      authorize_if CurrentAdmin
+    end
+
+    policy action_type([:update, :destroy, :action]) do
       authorize_if CurrentAdmin
     end
 
