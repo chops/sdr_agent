@@ -231,6 +231,83 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     end
   end
 
+  # The twelve review_read lines of Codex 92a99417 step 4 (Lead and Campaign
+  # came with B2 because the assignment path reads them).
+  @step4_reads @review_read -- [SdrAgent.Sales.Lead, SdrAgent.Sales.Campaign]
+
+  defp reviewed! do
+    ctx = prototype_drafted!()
+    assert {:ok, _approval} = operator_approve(ctx, ctx.draft)
+    deliver!()
+    ctx
+  end
+
+  defp kernel_row!(ctx, resource) do
+    result = Ash.read(resource, SdrAgent.Audit.Kernel.opts(ctx.tenant.id))
+    assert match?({:ok, [_ | _]}, result), "no #{inspect(resource)} row in the fixture"
+    {:ok, [row | _]} = result
+    row
+  end
+
+  # Negative synthetic tampering, not a domain-write success path: the row is
+  # moved to a random, foreign tenant by SQL with triggers disabled.
+  defp move_to_foreign_tenant!(resource, id) do
+    table = AshPostgres.DataLayer.Info.table(resource)
+
+    tamper!("UPDATE #{table} SET tenant_id = $1 WHERE id = $2", [
+      Ecto.UUID.dump!(Ecto.UUID.generate()),
+      Ecto.UUID.dump!(id)
+    ])
+  end
+
+  test "review_read: a row moved to a foreign tenant leaves the operator's list and direct read (the twelve)" do
+    ctx = reviewed!()
+
+    # AgentRun and Decision keep their existing actor_present() read (see the
+    # existing-semantics regression): they are not tenant-filtered for any
+    # present actor, so they are exempt here as in the forged-read loops.
+    for resource <- @step4_reads -- @any_present_actor_reads do
+      row = kernel_row!(ctx, resource)
+
+      assert match?({:ok, %{id: _}}, Ash.get(resource, row.id, actor: ctx.operator)),
+             "the operator cannot read its own #{inspect(resource)} row"
+
+      move_to_foreign_tenant!(resource, row.id)
+      listed = Ash.read(resource, actor: ctx.operator)
+      assert match?({:ok, _}, listed), "#{inspect(resource)} list: #{inspect(listed, limit: 3)}"
+      {:ok, rows} = listed
+      refute row.id in Enum.map(rows, & &1.id), "a foreign #{inspect(resource)} row is listed"
+
+      refute match?({:ok, _}, Ash.get(resource, row.id, actor: ctx.operator)),
+             "a foreign #{inspect(resource)} row is read directly"
+    end
+  end
+
+  test "review_read: with a stale binding the live operator reads none of them" do
+    ctx = reviewed!()
+    assert PrototypeFixtures.put_live_identity(%{system_identifier: 1}) == :ok
+
+    for resource <- @review_read -- @any_present_actor_reads do
+      refute match?({:ok, [_ | _]}, Ash.read(resource, actor: ctx.operator)),
+             "a stale-binding operator reads #{inspect(resource)}"
+    end
+  end
+
+  test "review_read grants no mutation: no write action of the twelve for the operator (Approval :approve aside)" do
+    ctx = reviewed!()
+
+    for resource <- @step4_reads,
+        action <- Ash.Resource.Info.actions(resource),
+        action.type != :read,
+        {resource, action.name} != {SdrAgent.Outreach.Approval, :approve} do
+      subject =
+        if action.type in [:create, :action], do: resource, else: kernel_row!(ctx, resource)
+
+      refute Ash.can?({subject, action.name}, ctx.operator) == true,
+             "the operator may #{action.name} #{inspect(resource)}"
+    end
+  end
+
   # ------------------------------------------------------------------ the auditor
 
   test "the bound auditor cannot approve or record a capture" do
