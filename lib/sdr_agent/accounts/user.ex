@@ -26,6 +26,13 @@ defmodule SdrAgent.Accounts.User do
     * `:create_user` — ADM (guarded); `:seed` — SEED in dev/test only;
       `:bootstrap_admin` — kernel requests only, any environment, refused
       once the tenant has a user (tenant row locked);
+    * `:create_prototype_anchor` (the credential-less `agent_operator` at
+      `d237-operator@prototype.invalid`) and `:create_prototype_auditor`
+      (role `auditor` at `d237-auditor@prototype.invalid`, with a generated
+      password of at least 32 characters) — D-237 setup phase 2 only: a
+      kernel request carrying the prototype `:setup` marker
+      (`SdrAgent.Prototype.Checks.KernelMarker`), which no production build
+      matches;
     * `:change_role`, `:change_status` — ADM (guarded); the last active
       admin can be neither demoted nor disabled; disabling revokes all of the
       user's tokens;
@@ -61,6 +68,8 @@ defmodule SdrAgent.Accounts.User do
   # foreign-key value only, never an actor.
   @roles @human_roles ++ [:agent_operator]
   @statuses [:active, :disabled]
+  @prototype_anchor_email "d237-operator@prototype.invalid"
+  @prototype_auditor_email "d237-auditor@prototype.invalid"
 
   authentication do
     add_ons do
@@ -214,6 +223,37 @@ defmodule SdrAgent.Accounts.User do
       change {AppendEvent, event_type: "user.created", category: :domain_change}
     end
 
+    # D-237 setup phase 2 only (interfaces r6 IF-2, IF-3): authorized solely
+    # by `SdrAgent.Prototype.Checks.KernelMarker` with the `:setup` marker,
+    # which only `SdrAgent.Prototype.Authority.bootstrap/1` attaches. They
+    # accept no input but the auditor's password.
+    create :create_prototype_anchor do
+      description "D-237 setup: the credential-less agent_operator anchor at the fixed address."
+      accept []
+      change set_attribute(:email, @prototype_anchor_email)
+      change set_attribute(:display_name, "D-237 prototype operator")
+      change set_attribute(:role, :agent_operator)
+      change SdrAgent.Audit.Changes.SetTenant
+      change {AppendEvent, event_type: "user.created", category: :domain_change}
+    end
+
+    create :create_prototype_auditor do
+      description "D-237 setup: the optional prototype auditor, with a generated password."
+      accept []
+
+      argument :password, :string,
+        allow_nil?: false,
+        sensitive?: true,
+        constraints: [min_length: 32]
+
+      change set_attribute(:email, @prototype_auditor_email)
+      change set_attribute(:display_name, "D-237 prototype auditor")
+      change set_attribute(:role, :auditor)
+      change {Password.HashPasswordChange, strategy_name: :password}
+      change SdrAgent.Audit.Changes.SetTenant
+      change {AppendEvent, event_type: "user.created", category: :domain_change}
+    end
+
     update :change_role do
       description "ADM: change a user's role; the last active admin keeps the admin role."
       require_atomic? false
@@ -303,6 +343,10 @@ defmodule SdrAgent.Accounts.User do
 
     policy action(:bootstrap_admin) do
       authorize_if Checks.KernelContext
+    end
+
+    policy action([:create_prototype_anchor, :create_prototype_auditor]) do
+      authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :setup}
     end
 
     policy action(:change_password) do
