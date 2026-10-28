@@ -24,7 +24,13 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
     tenant's account, a lead on another tenant's account or with another
     tenant's contact, and a lead whose same-tenant contact and account do
     not match are refused with no row and no creation event; every created
-    row is in the operator's tenant.
+    row is in the operator's tenant;
+  - the wrappers' refusal contract (Codex e59b2e10): a malformed actor
+    envelope or an unknown or malformed tenant is a plain `Forbidden` with
+    no audit append and no raise; a well-formed actor of the binding's
+    tenant is denied exactly once per call; the authorized operator
+    appends no denial; a denial inside `SdrAgent.Audit.transaction/1`
+    survives the rollback, exactly once.
 
   Synthetic `.test` data in a sandboxed prototype binding. The database
   admits one tenant (`tenants.singleton` is unique), so a row of another
@@ -34,6 +40,7 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
   """
   use SdrAgent.PrototypeCase, async: false
 
+  alias SdrAgent.Actor
   alias SdrAgent.Sales
 
   setup do
@@ -147,6 +154,42 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
       contact: import_contact(path, contact_attrs(account, %{email: "sam@acme1.test"}), actor),
       lead: import_lead(path, %{account_id: account.id, contact_id: contact.id}, actor)
     ]
+  end
+
+  defp all_events do
+    %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM audit_events", [])
+    n
+  end
+
+  defp denials(tenant), do: events_of_type(tenant, "authz.denied")
+
+  # The three Sales wrapper calls as `actor`, unevaluated.
+  defp wrapper_calls(account, contact, actor) do
+    [
+      account: fn ->
+        Sales.import_prototype_account(%{@account | domain: "acme2.test"}, actor: actor)
+      end,
+      contact: fn ->
+        Sales.import_prototype_contact(contact_attrs(account, %{email: "sam@acme1.test"}),
+          actor: actor
+        )
+      end,
+      lead: fn ->
+        Sales.import_prototype_lead(%{account_id: account.id, contact_id: contact.id},
+          actor: actor
+        )
+      end
+    ]
+  end
+
+  # Each wrapper call's result, a raise captured as {:raised, module}.
+  defp wrapper_attempts(account, contact, actor),
+    do: Enum.map(wrapper_calls(account, contact, actor), fn {a, fun} -> {a, capture(fun)} end)
+
+  defp capture(fun) do
+    fun.()
+  rescue
+    error -> {:raised, error.__struct__}
   end
 
   describe "allow: the live operator in prototype runtime" do
@@ -334,6 +377,104 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
       assert all_refused?(results), "returned #{inspect(results)}"
       assert count("leads") == 0
       assert events_of_type(ctx.tenant, "sales.lead.created") == []
+    end
+  end
+
+  # Codex e59b2e10: the three wrappers' refusal contract. A malformed actor
+  # envelope or an unknown or malformed tenant is a plain Forbidden with no
+  # audit append and no raise; a well-formed actor of the binding's tenant
+  # is denied exactly once per call; the authorized operator appends no
+  # denial; a denial inside Audit.transaction survives the rollback, once.
+  describe "the import wrappers' refusal contract" do
+    test "malformed actor envelopes and unknown or malformed tenants: Forbidden, no append, no raise",
+         ctx do
+      %{account: account, contact: contact} = arranged = arrange!(ctx)
+      tid = ctx.tenant.id
+      user = &struct(SdrAgent.Accounts.User, Map.put(&1, :tenant_id, tid))
+      events_before = all_events()
+
+      actors = [
+        unknown_actor_type: %Actor{type: :not_a_type, id: "x", tenant_id: tid},
+        map_actor_id: %Actor{type: :agent_runtime, id: %{bad: :id}, tenant_id: tid},
+        invalid_utf8_actor_id: %Actor{type: :agent_runtime, id: <<0xFF, 0xFE>>, tenant_id: tid},
+        nul_actor_id: %Actor{type: :agent_runtime, id: "agent" <> <<0>>, tenant_id: tid},
+        user_id_not_uuid: user.(%{id: "not-a-uuid", role: :admin}),
+        user_unknown_role: user.(%{id: Ecto.UUID.generate(), role: :not_a_role}),
+        unknown_tenant_operator: %{ctx.actor | tenant_id: Ecto.UUID.generate()},
+        unknown_tenant_agent: Actor.system(:agent_runtime, Ecto.UUID.generate()),
+        malformed_tenant_operator: %{ctx.actor | tenant_id: "not-a-uuid"}
+      ]
+
+      results =
+        for {label, actor} <- actors,
+            {action, result} <- wrapper_attempts(account, contact, actor),
+            do: {label, action, result}
+
+      refused = Enum.reject(results, fn {_label, _action, result} -> forbidden?(result) end)
+      assert refused == [], "not a plain Forbidden: #{inspect(refused)}"
+      assert all_events() == events_before, "a malformed or unknown destination was appended"
+      assert written(ctx) == arranged.written
+    end
+
+    test "a well-formed actor of the binding's tenant is denied exactly once per call", ctx do
+      %{account: account, contact: contact} = arranged = arrange!(ctx)
+
+      resources = %{
+        account: "SdrAgent.Sales.Account",
+        contact: "SdrAgent.Sales.Contact",
+        lead: "SdrAgent.Sales.Lead"
+      }
+
+      for {label, actor} <- [
+            admin: ctx.admin,
+            seeder: system_actor(:seeder, ctx.tenant),
+            agent_runtime: system_actor(:agent_runtime, ctx.tenant),
+            forged_delegation: %{ctx.actor | id: Ecto.UUID.generate()}
+          ],
+          {action, fun} <- wrapper_calls(account, contact, actor) do
+        before = denials(ctx.tenant)
+        result = capture(fun)
+        assert forbidden?(result), "#{action} as #{label} returned #{inspect(result)}"
+        new = denials(ctx.tenant) -- before
+        assert length(new) == 1, "#{action} as #{label}: #{length(new)} new authz.denied"
+        [denied] = new
+
+        assert {denied.subject_resource, denied.action, denied.tenant_id} ==
+                 {resources[action], "import_prototype", ctx.tenant.id}
+
+        refute inspect(denied) =~ "acme"
+      end
+
+      assert written(ctx) == arranged.written
+    end
+
+    test "the authorized operator's three imports append no denial", ctx do
+      before = denials(ctx.tenant)
+      %{account: account, contact: contact} = arrange!(ctx)
+
+      lead =
+        Sales.import_prototype_lead(%{account_id: account.id, contact_id: contact.id},
+          actor: ctx.actor
+        )
+
+      assert match?({:ok, _}, lead), "import_prototype_lead/2 returned #{inspect(lead)}"
+      assert denials(ctx.tenant) == before
+    end
+
+    test "a denial inside Audit.transaction survives the rollback, exactly once", ctx do
+      before = denials(ctx.tenant)
+
+      result =
+        SdrAgent.Audit.transaction(fn ->
+          {:ok, account} = Sales.import_prototype_account(@account, actor: ctx.actor)
+          refused = Sales.import_prototype_contact(contact_attrs(account), actor: ctx.admin)
+          Repo.rollback({:refused, forbidden?(refused)})
+        end)
+
+      assert result == {:error, {:refused, true}}
+      assert {count("accounts"), count("contacts")} == {0, 0}
+      new = denials(ctx.tenant) -- before
+      assert [%{subject_resource: "SdrAgent.Sales.Contact"}] = new
     end
   end
 end
