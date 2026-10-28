@@ -810,8 +810,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   for code <- @s4_refusing do
     defp scenario(unquote(:"s4_#{code}")),
       do:
-        {%{}, %{cluster_marker: {:error, unquote(code)}},
-         refused(0, :cluster_identity_mismatch)}
+        {%{}, %{cluster_marker: {:error, unquote(code)}}, refused(0, :cluster_identity_mismatch)}
   end
 
   defp scenario(:s4_cluster_check_failed),
