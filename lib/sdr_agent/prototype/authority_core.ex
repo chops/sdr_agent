@@ -351,6 +351,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    @doc """
+    `true` when `value` is a binary matching the session-correlation
+    pattern that session entry and setup phase 2 apply (the same module
+    attribute, not a copy), `false` otherwise. Pure; for setup's argument
+    validation (setup contract r3 R1).
+    """
+    @spec valid_correlation?(term()) :: boolean()
+    def valid_correlation?(value) when is_binary(value), do: Regex.match?(@correlation, value)
+    def valid_correlation?(_value), do: false
+
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
     def bootstrap(opts) do
@@ -931,6 +941,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "The pinned public base-table inventory of the pinned migration set (F1)."
     @spec public_tables() :: [String.t()]
     def public_tables, do: @public_tables
+
+    @doc """
+    `:ok` when `public.schema_migrations` holds exactly the pinned migration
+    set, no more and no fewer (setup fresh mode, after its migration);
+    otherwise `{:error, :migration_failed}`, including a failed read. Not a
+    resumability check: rows are not examined (setup contract r2).
+    """
+    @spec check_migrated() :: :ok | {:error, :migration_failed}
+    def check_migrated,
+      do: if(migrated_exactly?(), do: :ok, else: {:error, :migration_failed})
 
     @doc "The pinned migration set, `[{version, name}]` in version order."
     @spec pinned_migrations() :: [{integer(), String.t()}]
