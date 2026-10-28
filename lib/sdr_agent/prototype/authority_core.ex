@@ -88,6 +88,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @funded_ceiling 50
     @window_starts_at "2026-10-28T02:38:32.000000Z"
     @worksheet_max_bytes 16_384
+    # Each counts-only evidence receipt: the worksheet's own bound (DECISION
+    # requested: IF-2 states no evidence size; 16 KiB proposed).
+    @evidence_max_bytes 16_384
     @worksheet_keys ~w(schema shared_total window_starts_at as_of routes previous_bindings)
     @route_keys ~w(route basis consumed evidence)
     @evidence_keys ~w(path sha256)
@@ -504,10 +507,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     4. Every evidence reference resolves under the root to its exact bytes.
        Otherwise `:budget_unbounded`.
 
-    Stage (D-237 S1 C1, Codex a6850b13): steps 1-3 are implemented. Step 4
-    waits for the reviewed shared private reader (S1b), so every evidence
-    reference is unresolved and refuses `:budget_unbounded` (fail closed):
-    no worksheet passes yet.
+    Step 4 reads each of the six references (five routes and
+    `previous_bindings`) once through S1b's reviewed private reader,
+    `SdrAgent.Prototype.BoundedJson.read_private/4` (Codex 983296fb): the
+    IF-2 path grammar, a 0700 real root, no group- or other-writable
+    directory, a 0600 regular leaf, one handle and the exact sha256. Any
+    refusal of the reader is `:budget_unbounded`; no evidence byte is
+    returned or logged.
     """
     @spec check_worksheet(binary(), String.t(), Path.t()) ::
             {:ok, %{sha256: String.t(), remaining: non_neg_integer()}}
@@ -614,10 +620,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         else: {:error, :budget_below_ceiling}
     end
 
-    # Step 4 waits for the reviewed shared private reader (S1b; Codex
-    # a6850b13 D4): until then no evidence reference resolves, so every
-    # otherwise-sufficient worksheet refuses (fail closed).
-    defp evidence_resolved(_worksheet, _evidence_root), do: red({:error, :budget_unbounded})
+    # Step 4: every reference resolves under the root to its exact bytes
+    # through the shared reader (Codex a6850b13 D4); the bytes are dropped.
+    defp evidence_resolved(worksheet, evidence_root) do
+      references = [
+        worksheet["previous_bindings"]["evidence"]
+        | Enum.map(worksheet["routes"], & &1["evidence"])
+      ]
+
+      # A duplicated reference (the same path twice) is unbounded (IF-2).
+      distinct? = Enum.uniq_by(references, & &1["path"]) == references
+
+      if distinct? and Enum.all?(references, &resolves?(&1, evidence_root)),
+        do: :ok,
+        else: {:error, :budget_unbounded}
+    end
+
+    defp resolves?(%{"path" => path, "sha256" => sha256}, root) do
+      match?({:ok, _bytes}, BoundedJson.read_private(root, path, sha256, @evidence_max_bytes))
+    end
 
     defp hex(digest), do: Base.encode16(digest, case: :lower)
 
