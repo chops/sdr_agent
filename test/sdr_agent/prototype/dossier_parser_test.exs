@@ -555,12 +555,16 @@ defmodule SdrAgent.Prototype.DossierParserTest do
       )
     end
 
-    test "a statement dated after the dossier was generated is refused" do
-      refused!(
-        parse(F.dossier([F.put(c(), ["facts", 0, "stated_on"], "2026-10-28")])),
-        "companies[0].facts[0].stated_on",
-        :future_date
-      )
+    # Corrected (Codex R3, 70679e0c): this test used to refuse a statement
+    # dated after generated_at, an extra ceiling IF-6 never accepted. Rule 6
+    # pins the ceiling to date(checked_at) in its own offset, which the
+    # manifest carries; that check is in qualification_inputs_test. The
+    # parser keeps only the date syntax.
+    test "a statement dated after the dossier was generated parses; the ceiling is its check date" do
+      dossier = F.dossier([F.put(c(), ["facts", 0, "stated_on"], "2026-10-28")])
+      assert dossier["generated_at"] == "2026-10-27T12:00:00-06:00"
+      result = parse(dossier)
+      assert match?({:ok, _}, result), "parse/1 returned #{inspect(result)}"
     end
 
     test "a malformed date is refused" do
