@@ -63,11 +63,23 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
       end
     end
 
-    # The in-action live-check site (Codex d8fc857a): declared, not yet
-    # instrumented. Every build runs the real check exactly once, here; a
-    # test-build `{__MODULE__, :live_wrap}` is not consulted until its own
-    # reviewed GREEN.
-    defp live_wrap(inner), do: inner.()
+    # The in-action live-check site (Codex d8fc857a, 3749bfb0), after the
+    # create's authorization pre-flight and inside the action's transaction.
+    # Test-seam builds only: a 1-arity function a test put under
+    # `{__MODULE__, :live_wrap}` in the calling process receives the real
+    # check and must call it exactly once, preserving its return, raise or
+    # throw; absent, the real check runs directly. Other builds always run it
+    # directly. Nothing is caught here.
+    if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
+      defp live_wrap(inner) do
+        case Process.get({__MODULE__, :live_wrap}) do
+          wrap when is_function(wrap, 1) -> wrap.(inner)
+          _absent -> inner.()
+        end
+      end
+    else
+      defp live_wrap(inner), do: inner.()
+    end
 
     defp bind_anchor(changeset, user_id, tenant_id) do
       case anchor_user(user_id, tenant_id) do
@@ -101,11 +113,23 @@ defmodule SdrAgent.Prototype.Changes.SeedAnchor do
       defp read_one(query) do
         case Process.get({__MODULE__, :read_fault}) do
           nil -> Ash.read_one(query)
-          # Declared, not yet instrumented (Codex d8fc857a): a real SQL abort
-          # at this read site. Until its own reviewed GREEN it is the real read.
-          {:abort, ref} when is_reference(ref) -> Ash.read_one(query)
+          # A real SQL abort at this read site, then the real read.
+          {:abort, ref} when is_reference(ref) -> abort_then_read(query, ref)
           fault -> fault
         end
+      end
+
+      # One real tagged SQL abort immediately before the real read at this site,
+      # then that real read (Codex d8fc857a, 3749bfb0): the transaction is
+      # aborted for real, nothing is fabricated or recovered. The tag is this
+      # site and the test's fresh reference.
+      defp abort_then_read(query, ref) do
+        _aborted =
+          SdrAgent.Repo.query("SELECT 1 / 0", [],
+            telemetry_options: [d237_s3_fault: {:anchor_read, ref}]
+          )
+
+        Ash.read_one(query)
       end
     else
       defp read_one(query), do: Ash.read_one(query)

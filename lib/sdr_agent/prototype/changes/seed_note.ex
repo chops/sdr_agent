@@ -106,11 +106,23 @@ defmodule SdrAgent.Prototype.Changes.SeedNote do
     defp read_one(query) do
       case Process.get({__MODULE__, :read_fault}) do
         nil -> Ash.read_one(query)
-        # Declared, not yet instrumented (Codex d8fc857a): a real SQL abort
-        # at this read site. Until its own reviewed GREEN it is the real read.
-        {:abort, ref} when is_reference(ref) -> Ash.read_one(query)
+        # A real SQL abort at this read site, then the real read.
+        {:abort, ref} when is_reference(ref) -> abort_then_read(query, ref)
         fault -> fault
       end
+    end
+
+    # One real tagged SQL abort immediately before the real read at this site,
+    # then that real read (Codex d8fc857a, 3749bfb0): the transaction is
+    # aborted for real, nothing is fabricated or recovered. The tag is this
+    # site and the test's fresh reference.
+    defp abort_then_read(query, ref) do
+      _aborted =
+        SdrAgent.Repo.query("SELECT 1 / 0", [],
+          telemetry_options: [d237_s3_fault: {:payload_read, ref}]
+        )
+
+      Ash.read_one(query)
     end
   else
     defp read_one(query), do: Ash.read_one(query)
