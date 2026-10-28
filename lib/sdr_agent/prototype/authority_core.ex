@@ -40,13 +40,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       environment input, and the facade's `policy_entry/0` and
       `funding_entry/0` stay runtime-gated.
 
-    Stage (D-237 S1): the four entry accessors are implemented (Codex
-    bd3eb9e1, constants only). Every other function is still a
-    non-permissive RED declaration returning `{:error, :not_implemented}`;
-    none fabricates success.
+    - `runtime/0` and `binding/0`: `:prototype` and the boot snapshot while
+      one is in effect, else `:ordinary` and
+      `{:error, :not_prototype_runtime}`. In a test-seam build
+      (`:prototype_test_seams`, config/test.exs alone) the snapshot is the
+      calling process's only (`SdrAgent.Prototype.Authority.TestSeam`); any
+      other build stays ordinary until `SdrAgent.Prototype.BootCheck.verify!/0`
+      fixes the VM runtime (increment G, not implemented).
+
+    Stage (D-237 S1): the four entry accessors (Codex bd3eb9e1, constants
+    only) and B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d)
+    are implemented. Every other
+    function is still a non-permissive RED declaration returning
+    `{:error, :not_implemented}`; none fabricates success.
     """
 
     alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Prototype.Binding
+
+    @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
 
     # Amendment item 1 (D-249: accepted interior text 54769 B), exact.
     @policy_entry %{
@@ -90,6 +102,36 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "Lowercase hex of the funding entry's `sdr-canonical-json/1` sha256 (the golden vector)."
     @spec funding_entry_sha256() :: String.t()
     def funding_entry_sha256, do: hex(Canonical.sha256(@funding_entry))
+
+    @doc "`:prototype` while a boot snapshot is in effect; otherwise `:ordinary`."
+    @spec runtime() :: SdrAgent.Prototype.runtime()
+    def runtime do
+      case current() do
+        {:prototype, %Binding{}} -> :prototype
+        _ordinary -> :ordinary
+      end
+    end
+
+    @doc "The boot snapshot, in prototype runtime only."
+    @spec binding() :: {:ok, Binding.t()} | {:error, :not_prototype_runtime}
+    def binding do
+      case current() do
+        {:prototype, %Binding{} = snapshot} -> {:ok, snapshot}
+        _ordinary -> {:error, :not_prototype_runtime}
+      end
+    end
+
+    # The runtime in effect. A test-seam build reads the calling process only
+    # (`SdrAgent.Prototype.Authority.TestSeam`); no global lookup. Any other
+    # build keeps its RED declaration until BootCheck fixes the VM runtime
+    # (increment G): ordinary, typed dynamic through `red/1`, never written.
+    if @test_seams do
+      @runtime_key {SdrAgent.Prototype, :runtime}
+
+      defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
+    else
+      defp current, do: red(:ordinary)
+    end
 
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, atom()}
@@ -162,12 +204,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
 
-      RED stage (D-237 S1): every function returns `{:error, :not_implemented}`.
+      Keys are `{SdrAgent.Prototype, atom}` in the calling process's
+      dictionary; `lookup/1` reads them.
+
+      Stage (D-237 S1 B1a): `enter_runtime/1` and `lookup/1` are
+      implemented, and `lookup/1` reads the calling process ONLY (the
+      `$callers` reading is B1b). `leave_runtime/0`, `put_live_identity/1`
+      and `clear/0` still return `{:error, :not_implemented}`.
       """
 
+      alias SdrAgent.Prototype.Binding
+
+      @runtime_key {SdrAgent.Prototype, :runtime}
+
       @doc "Enters prototype runtime with `snapshot` for the calling process."
-      @spec enter_runtime(SdrAgent.Prototype.Binding.t()) :: :ok | {:error, atom()}
-      def enter_runtime(_snapshot), do: red({:error, :not_implemented})
+      @spec enter_runtime(Binding.t()) :: :ok
+      def enter_runtime(%Binding{} = snapshot) do
+        Process.put(@runtime_key, {:prototype, snapshot})
+        :ok
+      end
 
       @doc "Returns the calling process to ordinary runtime."
       @spec leave_runtime() :: :ok | {:error, atom()}
@@ -180,6 +235,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @doc "Removes every seam key of the calling process."
       @spec clear() :: :ok | {:error, atom()}
       def clear, do: red({:error, :not_implemented})
+
+      @doc false
+      # The value of `key` in the calling process, or nil (B1a: no `$callers`).
+      @spec lookup(term()) :: term()
+      def lookup(key), do: Process.get(key)
 
       # RED stub result, typed dynamic() (see SdrAgent.Prototype.Authority).
       defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
