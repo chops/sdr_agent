@@ -131,6 +131,9 @@ defmodule SdrAgent.Prototype.BootCheckTest do
       # (role = agent_operator) = (hashed_password IS NULL) makes a credential
       # on the agent_operator anchor unrepresentable, so the anchor must also
       # change role to carry one. Not reachable through any action.
+      # Approved by Codex 026058ec for isolated runner scratch databases only.
+      # LIMITATION: this proves refusal of a WRONG-ROLE, password-bearing
+      # anchor; it cannot isolate the password from the role.
       tamper!(
         "UPDATE users SET role = 'admin', hashed_password = $1 WHERE id = $2",
         ["synthetic-test-hash-not-a-credential", Ecto.UUID.dump!(fx.anchor.id)]
@@ -204,6 +207,34 @@ defmodule SdrAgent.Prototype.BootCheckTest do
       assert verify(:off) == {:refused, :binding_not_exact}
       assert SdrAgent.Prototype.runtime() == :prototype
       assert SdrAgent.Prototype.binding() == {:ok, snapshot}
+    end
+
+    # Codex 026058ec: the boot-switch input (a test-build-only, process-local
+    # override) is independent of the fixed runtime it is verified against.
+    test "a changed boot-switch input refuses without rewriting the runtime; an explicit switch takes precedence" do
+      fx = bound!()
+      refusing = %{switch!(fx) | instance_id: Ecto.UUID.generate()}
+      assert PrototypeFixtures.put_boot_switch(refusing) == :ok
+
+      refused =
+        try do
+          BootCheck.verify!()
+        rescue
+          error in SdrAgent.Prototype.BootCheck.Refusal -> {:refused, error.code}
+        end
+
+      assert refused == {:refused, :instance_mismatch}
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+      assert verify(switch!(fx)) == :ok
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+    end
+
+    test "TestSeam.clear/0 removes the boot-switch override" do
+      fx = bound!()
+      assert PrototypeFixtures.put_boot_switch(switch!(fx)) == :ok
+      assert TestSeam.lookup({SdrAgent.Prototype, :boot_switch}) == switch!(fx)
+      assert TestSeam.clear() == :ok
+      assert TestSeam.lookup({SdrAgent.Prototype, :boot_switch}) == nil
     end
 
     test "a fixed ordinary runtime never promotes" do

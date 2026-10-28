@@ -63,6 +63,17 @@ defmodule SdrAgent.PrototypeFixtures do
   @spec put_live_identity(map() | :raise) :: :ok | {:error, term()}
   def put_live_identity(overrides), do: TestSeam.put_live_identity(overrides)
 
+  @doc """
+  Sets the calling process's boot-switch input (test-build-only
+  `SdrAgent.Prototype.Authority.TestSeam.put_boot_switch/1`, Codex 026058ec):
+  the switch `SdrAgent.Prototype.BootCheck.verify!/0` reads, independent of
+  the fixed runtime. Called dynamically, so this file compiles before the
+  seam exists.
+  """
+  @spec put_boot_switch(term()) :: :ok
+  def put_boot_switch(switch),
+    do: Function.capture(TestSeam, :put_boot_switch, 1).(switch)
+
   @doc "The switch value of a bound fixture."
   @spec switch(map()) :: %{policy_id: String.t(), instance_id: String.t()}
   def switch(%{snapshot: %{policy_id: policy_id, instance_id: instance_id}}),
