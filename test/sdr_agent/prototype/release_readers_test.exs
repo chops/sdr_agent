@@ -517,7 +517,7 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       test "with the original event's #{label} (labelled tamper)", ctx do
         tamper!(
           "UPDATE audit_events SET #{unquote(column)} = $2 WHERE id = $1",
-          [Ecto.UUID.dump!(ctx.event.id), Ecto.UUID.dump!(Ecto.UUID.generate())]
+          [Ecto.UUID.dump!(ctx.event.id), foreign_id(unquote(column))]
         )
 
         assert_fails_closed!(ctx, unquote(Atom.to_string(label)))
@@ -569,4 +569,10 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       end
     end
   end
+
+  # A foreign id for a labelled tamper of the original event's `column`, in
+  # that column's storage form: `subject_id` is a text column (the UUID
+  # string), `model_invocation_id` a uuid column (its 16-byte binary).
+  defp foreign_id("subject_id"), do: Ecto.UUID.generate()
+  defp foreign_id("model_invocation_id"), do: Ecto.UUID.dump!(Ecto.UUID.generate())
 end

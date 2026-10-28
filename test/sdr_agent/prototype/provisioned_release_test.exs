@@ -240,7 +240,7 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
       assert {release.wire_witness_link_id, release.projection_version, release.method,
               release.evidence_sha256} == {nil, nil, nil, nil}
 
-      assert output == ctx.invocation.parsed_output
+      assert output == SdrAgent.AgentsFixtures.completion().parsed_output
       assert run_status(ctx.run) == {:running, nil}
 
       args = basis_event!(ctx.fx, release).payload["arguments"]
