@@ -116,6 +116,58 @@ defmodule SdrAgent.Prototype.DelegationTest do
     end
   end
 
+  # Codex a95a89fb R1: a nested Audit.transaction is a plain nested
+  # Repo.transaction, not a savepoint, so the recovery path cannot run
+  # inside a caller's transaction. The entry refuses an already-open
+  # transaction early: a fixed code, no query, no write, and the caller's
+  # transaction stays usable.
+  describe "enter_session/2 inside an already-open transaction" do
+    @authority SdrAgent.Prototype.Authority
+
+    defp in_outer_transaction(fun) do
+      SdrAgent.Audit.transaction(fn ->
+        inner = fun.()
+        {inner, Repo.query("SELECT 1")}
+      end)
+    end
+
+    test "with a forced lookup miss on an existing session: refused early, the outer transaction usable" do
+      fx = bound!()
+      first = Prototype.enter_session(:codex_cli, "codex-session:nested-0001")
+      assert match?({:ok, _id}, first), "prerequisite: first session: #{inspect(first)}"
+      rows_before = delegations(fx.binding.id)
+      events_before = length(events_of_type(fx.tenant, "prototype.delegation.created"))
+
+      Process.put({@authority, :miss_session_lookup}, true)
+
+      outer =
+        in_outer_transaction(fn ->
+          Prototype.enter_session(:codex_cli, "codex-session:nested-0001")
+        end)
+
+      assert match?({:ok, {{:error, :binding_mismatch}, {:ok, %{rows: [[1]]}}}}, outer),
+             "nested entry: #{inspect(outer)}"
+
+      assert delegations(fx.binding.id) == rows_before
+      assert length(events_of_type(fx.tenant, "prototype.delegation.created")) == events_before
+    end
+
+    test "a new session inside an open transaction is refused early, writing nothing" do
+      fx = bound!()
+      rows_before = delegations(fx.binding.id)
+
+      outer =
+        in_outer_transaction(fn ->
+          Prototype.enter_session(:codex_cli, "codex-session:nested-0002")
+        end)
+
+      assert match?({:ok, {{:error, :binding_mismatch}, {:ok, %{rows: [[1]]}}}}, outer),
+             "nested new entry: #{inspect(outer)}"
+
+      assert delegations(fx.binding.id) == rows_before
+    end
+  end
+
   describe "the setup-only and task-entry actions" do
     test ":enter and :create_setup are refused for an operator, a user and an auditor" do
       fx = bound!(auditor: true, enter_runtime: false)
