@@ -25,6 +25,11 @@ defmodule SdrAgent.Audit.Payload do
       recorded purpose is fixed by the scope. Same fail-closed
       `payload_view` access as `:read_content`, under REC's own identity
       (S12 supplementary ruling S1–S3).
+    * `:store_prototype_input` — D-237: the prototype operator only, and only
+      inside the private scope the D-237 import and seed functions attach
+      (`SdrAgent.Audit.Checks.PrototypeInputScope`): the actor's tenant and
+      delegation, an approved purpose and the exact sha256s of the bytes
+      being stored. Same insert-if-absent body as `:store`, no AuditEvent.
 
   Append-only (trigger).
   """
@@ -77,6 +82,33 @@ defmodule SdrAgent.Audit.Payload do
     defaults [:read]
 
     create :store do
+      accept [:content, :content_type]
+      upsert? true
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
+      change SdrAgent.Audit.Changes.SetTenant
+
+      change fn changeset, _context ->
+        case Ash.Changeset.get_attribute(changeset, :content) do
+          content when is_binary(content) ->
+            changeset
+            |> Ash.Changeset.force_change_attribute(:sha256, :crypto.hash(:sha256, content))
+            |> Ash.Changeset.force_change_attribute(:byte_size, byte_size(content))
+
+          _ ->
+            changeset
+        end
+      end
+
+      change SdrAgent.Audit.Changes.TraceIds
+    end
+
+    # D-237 (interfaces r6 R4): the operator's scoped store, identical to
+    # `:store` (content-addressed, insert-if-absent, no AuditEvent; the
+    # referencing DossierEntry, DossierSource or SettingsRevision event
+    # carries the hash). Authorized only by `Checks.PrototypeInputScope`.
+    create :store_prototype_input do
       accept [:content, :content_type]
       upsert? true
       upsert_fields []
@@ -159,6 +191,10 @@ defmodule SdrAgent.Audit.Payload do
 
     policy action(:read_reconciliation_content) do
       authorize_if Checks.ReconciliationScope
+    end
+
+    policy action(:store_prototype_input) do
+      authorize_if Checks.PrototypeInputScope
     end
 
     policy action_type(:read) do

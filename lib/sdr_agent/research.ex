@@ -19,7 +19,9 @@ defmodule SdrAgent.Research do
     * `record_qualification/2` (AGT) and `override_qualification/2` (ADM,
       REV) — supersedes lineage, cited evidence;
     * reads (tenant-scoped) — `current_qualification/2`, `fetch/3`,
-      `list_records/2`.
+      `list_records/2`;
+    * D-237 (OPR, prototype runtime) — `record_dossier_entry/2` and
+      `record_dossier_source/2`, called only by the prototype dossier import.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -71,6 +73,31 @@ defmodule SdrAgent.Research do
 
   @doc "Lists `resource` records in the actor's tenant (`filter:`, `sort:` options)."
   def list_records(resource, opts), do: GuardedCall.list(resource, opts)
+
+  @doc """
+  OPR (D-237, interfaces r6 IF-6; supplement 1 R9): records one imported
+  dossier entry through `DossierEntry :import`, as called by
+  `SdrAgent.Prototype.DossierImport` (S3) inside its per-row transaction.
+  Only the resolved prototype operator passes; every other actor is
+  refused. The action's body is S3's.
+
+  RED stage (D-237 S1 item 4): returns `{:error, :not_implemented}`.
+  """
+  @spec record_dossier_entry(map(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def record_dossier_entry(_attrs, _opts), do: d237_red({:error, :not_implemented})
+
+  @doc """
+  OPR (D-237): records one imported dossier source through
+  `DossierSource :import`, as `record_dossier_entry/2` does.
+
+  RED stage (D-237 S1 item 4): returns `{:error, :not_implemented}`.
+  """
+  @spec record_dossier_source(map(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def record_dossier_source(_attrs, _opts), do: d237_red({:error, :not_implemented})
+
+  # RED stub result, typed dynamic() so callers compile (Elixir 1.20 infers
+  # literal returns). Read-only: nothing writes the key; removed in GREEN.
+  defp d237_red(default), do: :persistent_term.get({__MODULE__, :d237_red_stub}, default)
 
   defp subject(opts, attrs, key), do: Keyword.put(opts, :subject_id, Map.get(Map.new(attrs), key))
 end
