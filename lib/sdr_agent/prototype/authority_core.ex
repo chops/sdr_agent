@@ -24,8 +24,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     - `snapshot/1`: the `SdrAgent.Prototype.Binding` of a binding row;
     - `resolve_delegation/2`: resolver steps 3-7 of IF-1 for a boot snapshot
       and a delegation row (or nil);
-    - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0`,
-      `write_credential/1`, `check_fresh/0`, `check_resumable/0`,
+    - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0,1`
+      with `app_names/0`, `write_credential/1` (still a stub; the credential
+      is owner-held), `check_fresh/0`, `check_resumable/0` and
       `pinned_migrations/0`;
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
       evidence under a root;
@@ -630,37 +631,190 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def operator?(_actor), do: false
 
-    @doc "`:ok` when a Repo config targets exactly the prototype socket, port and database."
-    @spec check_repo_target(keyword()) :: :ok | {:error, :repo_target_mismatch}
-    def check_repo_target(_config), do: red({:error, :not_implemented})
+    # IF-2 phase 0: the one Repo target, sorted by key.
+    @repo_target [database: @database, port: 5541, socket_dir: "/private/tmp/d237-pg"]
+    # Every Repo option that selects a PostgreSQL target (Postgrex/Ecto).
+    @target_selectors [:database, :endpoints, :hostname, :port, :socket, :socket_dir, :url]
 
-    @doc "`:ok` when no Oban, endpoint or provider name is alive; otherwise `:app_running`."
+    @doc """
+    `:ok` when a Repo config (a keyword list) targets exactly the prototype
+    socket directory, port and database: each selector at most once, no
+    `:socket`, `:url` or `:endpoints`, and `:hostname` absent or
+    `"localhost"` (Postgrex gives `:socket_dir` precedence over it).
+    Anything else is `:repo_target_mismatch`.
+    """
+    @spec check_repo_target(term()) :: :ok | {:error, :repo_target_mismatch}
+    def check_repo_target(config) when is_list(config) do
+      if Keyword.keyword?(config) and exact_target?(config),
+        do: :ok,
+        else: {:error, :repo_target_mismatch}
+    end
+
+    def check_repo_target(_config), do: {:error, :repo_target_mismatch}
+
+    defp exact_target?(config) do
+      selectors = for {key, _value} = entry <- config, key in @target_selectors, do: entry
+      keys = Keyword.keys(selectors)
+
+      keys == Enum.uniq(keys) and
+        Enum.sort(Keyword.delete(selectors, :hostname)) == @repo_target and
+        Keyword.get(selectors, :hostname, "localhost") == "localhost"
+    end
+
+    # IF-2 phase 0: Oban, the endpoint and the model provider tree
+    # (`SdrAgent.AI.ModelProvider.ProfileSupervisor`'s children and the
+    # `ClaudeCLI.server/0` name).
+    @app_names [
+      {:oban, Oban},
+      {:process, SdrAgentWeb.Endpoint},
+      {:process, SdrAgent.AI.ModelProvider.ProfileSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.ServerSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.Coordinator},
+      {:process, SdrAgent.AI.ModelProvider.OperationSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.ClaudeCLI}
+    ]
+
+    @doc "`:ok` when none of `app_names/0` is alive; otherwise `:app_running`."
     @spec check_app_stopped() :: :ok | {:error, :app_running}
-    def check_app_stopped, do: red({:error, :not_implemented})
+    def check_app_stopped, do: check_app_stopped(@app_names)
 
-    @doc "As `check_app_stopped/0`, for an explicit list of `app_names/0`-shaped names."
-    @spec check_app_stopped([{:oban | :process, term()}]) :: :ok | {:error, :app_running}
-    def check_app_stopped(_names), do: red({:error, :not_implemented})
+    @doc """
+    As `check_app_stopped/0`, for an explicit list of `app_names/0`-shaped
+    names: an Oban instance is alive when `Oban.whereis/1` finds it, any
+    other name when it resolves to a live pid. A malformed entry counts as
+    alive (fail closed).
+    """
+    @spec check_app_stopped(term()) :: :ok | {:error, :app_running}
+    def check_app_stopped(names) when is_list(names) do
+      if Enum.any?(names, &alive?/1), do: {:error, :app_running}, else: :ok
+    end
+
+    def check_app_stopped(_names), do: {:error, :app_running}
 
     @doc "The IF-2 app-running names: Oban, the endpoint and the model provider tree."
-    @spec app_names() :: [{:oban | :process, atom()}] | {:error, atom()}
-    def app_names, do: red({:error, :not_implemented})
+    @spec app_names() :: [{:oban | :process, atom()}]
+    def app_names, do: @app_names
+
+    defp alive?({:oban, name}) when is_atom(name), do: is_pid(Oban.whereis(name))
+
+    defp alive?({:process, name}) when is_atom(name) do
+      case Process.whereis(name) do
+        nil -> false
+        pid when is_pid(pid) -> Process.alive?(pid)
+        _port -> true
+      end
+    end
+
+    defp alive?(_malformed), do: true
 
     @doc "Creates the auditor credential file exclusively (0600) and returns its password."
     @spec write_credential(Path.t()) :: {:ok, String.t()} | {:error, atom()}
     def write_credential(_path), do: red({:error, :not_implemented})
 
-    @doc "`:ok` when the database holds no tenant, user, binding, delegation, head or business row."
+    # The exact migration set setup runs (`priv/repo/migrations`, in
+    # version order); a new migration must be added here, or resume refuses.
+    @pinned_migrations [
+      {20_261_006_212_538, "initialize_extensions_1"},
+      {20_261_006_212_604, "add_authentication_resources_extensions_1"},
+      {20_261_006_212_605, "add_authentication_resources"},
+      {20_261_006_212_617, "add_oban"},
+      {20_261_007_021_151, "s3_audit_kernel"},
+      {20_261_007_030_213, "s11_anchoring_export"},
+      {20_261_007_033_707, "s11_security_fix"},
+      {20_261_007_042_000, "preserve_key_retirement"},
+      {20_261_007_043_305, "s5_domain"},
+      {20_261_007_051_155, "s7_operations"},
+      {20_261_007_142_841, "s8a_outreach"},
+      {20_261_007_150_632, "s8b_delivery"},
+      {20_261_007_155_131, "s9a_replies"},
+      {20_261_007_160_142, "s9b_reply_assessments"},
+      {20_261_007_175_954, "s12b_wire_witness"},
+      {20_261_012_181_602, "c9_model_call_grants"},
+      {20_261_012_182_415, "c9_run_usage_origin"},
+      {20_261_012_182_416, "c9_admission"},
+      {20_261_012_214_848, "r0_07a_result_release"},
+      {20_261_014_220_246, "c1_inbox_indexes"},
+      {20_261_015_074_454, "c2_02a_profile_switch"},
+      {20_261_015_164_737, "c2_02b2a_model_server_starts"},
+      {20_261_016_011_853, "c4_01a_run_settings"},
+      {20_261_016_041_646, "c2_02b2b_resolve"},
+      {20_261_016_052_435, "c2_02b2b_resolution_check"},
+      {20_261_021_101_539, "v4_mismatch_lineage"},
+      {20_261_026_033_738, "ash_functions_v7_extensions_1"},
+      {20_261_028_052_008, "d237_01_users"},
+      {20_261_028_052_100, "d237_02_actor_types"},
+      {20_261_028_052_135, "d237_03_prototype_database_bindings"},
+      {20_261_028_052_139, "d237_04_prototype_delegations"},
+      {20_261_028_052_257, "d237_05_release_decisions"},
+      {20_261_028_052_400, "d237_06_sources"},
+      {20_261_028_052_425, "d237_07_dossier"}
+    ]
+
+    # IF-2 phase 1: the tables the exactness precheck names; every other
+    # base table of the public schema is the business-table list.
+    @named_tables ~w(audit_chain_heads prototype_database_bindings prototype_delegations tenants users)
+
+    @doc """
+    `:ok` when no base table of the public schema other than
+    `schema_migrations` holds a row: the tenants, users, binding,
+    delegations and audit chain heads of IF-2, and every business table.
+    It reads row presence only, never row content. A missing named table
+    or a failed read is `:database_not_fresh`.
+    """
     @spec check_fresh() :: :ok | {:error, :database_not_fresh}
-    def check_fresh, do: red({:error, :not_implemented})
+    def check_fresh, do: if(rowless?(), do: :ok, else: {:error, :database_not_fresh})
 
-    @doc "`:ok` when the database holds exactly the pinned migrations and no row (bounded resume)."
+    @doc """
+    `:ok` for the bounded resume: `schema_migrations` holds exactly the
+    versions of `pinned_migrations/0`, no more and no fewer, and
+    `check_fresh/0`'s tables hold no row. Anything else, or a failed read,
+    is `:database_not_resumable`.
+    """
     @spec check_resumable() :: :ok | {:error, :database_not_resumable}
-    def check_resumable, do: red({:error, :not_implemented})
+    def check_resumable do
+      if migrated_exactly?() and rowless?(),
+        do: :ok,
+        else: {:error, :database_not_resumable}
+    end
 
-    @doc "The pinned migration set, `[{version, name}]` in order."
-    @spec pinned_migrations() :: [{integer(), String.t()}] | {:error, atom()}
-    def pinned_migrations, do: red({:error, :not_implemented})
+    defp rowless? do
+      with {:ok, %{rows: rows}} <-
+             Repo.query(
+               "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+                 "AND tablename <> 'schema_migrations' ORDER BY tablename",
+               []
+             ),
+           tables = Enum.map(rows, fn [table] -> table end),
+           [] <- @named_tables -- tables,
+           {:ok, %{rows: [[false]]}} <- Repo.query(any_row_sql(tables), []) do
+        true
+      else
+        _missing_or_populated -> false
+      end
+    end
+
+    # One statement: does any of `tables` hold a row (identifiers quoted).
+    defp any_row_sql(tables) do
+      "SELECT " <>
+        Enum.map_join(tables, " OR ", fn table ->
+          ~s[EXISTS (SELECT 1 FROM "public"."#{String.replace(table, ~s["], ~s[""])}")]
+        end)
+    end
+
+    defp migrated_exactly? do
+      case Repo.query("SELECT version FROM schema_migrations ORDER BY version", []) do
+        {:ok, %{rows: rows}} ->
+          Enum.map(rows, fn [version] -> version end) ==
+            Enum.map(@pinned_migrations, &elem(&1, 0))
+
+        {:error, _error} ->
+          false
+      end
+    end
+
+    @doc "The pinned migration set, `[{version, name}]` in version order."
+    @spec pinned_migrations() :: [{integer(), String.t()}]
+    def pinned_migrations, do: @pinned_migrations
 
     @doc """
     Checks the IF-2 budget worksheet `bytes` against its sha256 hex, with its
