@@ -74,15 +74,19 @@ defmodule SdrAgent.Prototype.DossierParser do
   indices (for example `companies[0].contact.evidence.email`) and a rule
   atom; no value is ever echoed.
 
-  GREEN-1 stage (D-237 S3; Codex a322d6d9): `eligibility/4`, `select/4`,
-  `eligible_rows/3` and `import_plan/4` are implemented. `read/2` and
-  `parse/1` still return `{:error, :not_implemented}`: they wait for S1's
-  `SdrAgent.Prototype.BoundedJson` (the byte, UTF-8, duplicate-key, depth,
-  key-set and text rules) and their own review.
+  `read/2` and `parse/1` rely on `SdrAgent.Prototype.BoundedJson` (S1) for the
+  byte, UTF-8, duplicate-key, depth, key-set and text rules.
   """
 
+  alias SdrAgent.Prototype.BoundedJson
+  alias SdrAgent.Prototype.DossierParser.Rules
   alias SdrAgent.Prototype.SpotcheckManifest
 
+  @max_bytes 262_144
+  # Every key of the schema, so a duplicate-key or depth refusal keeps its
+  # schema path (S1 BoundedJson `known_keys:`).
+  @known_keys ~w(schema schema_version generated_at sources_policy companies row_id name domain why_fit importable skip_reason sources facts contact source_id original_url final_url source_type retrieved_on retrieved_at fact_id kind topic stated_on text excerpt role email email_kind classification confidence conflict evidence basis attribution_excerpt artifact file sha256)
+  @max_depth 7
   @max_rows 3
   @window_bytes 300
   @floor ~D[2025-10-28]
@@ -106,13 +110,25 @@ defmodule SdrAgent.Prototype.DossierParser do
   @typedoc "A refusal: a fixed schema path and a rule atom; never a value."
   @type refusal :: {:error, {String.t(), atom()}}
 
-  @doc "Reads the dossier at `path` once, by its full sha256, and parses it."
-  @spec read(Path.t(), String.t()) :: {:ok, map()} | {:error, term()}
-  def read(_path, _sha256), do: red({:error, :not_implemented})
+  @doc "Reads the dossier at `path` once (S1 `BoundedJson.read_file/3`), by its full sha256, and parses it."
+  @spec read(Path.t(), String.t()) :: {:ok, map()} | refusal()
+  def read(path, sha256) when is_binary(path) and is_binary(sha256) do
+    with {:ok, bin} <- BoundedJson.read_file(path, sha256, @max_bytes), do: parse(bin)
+  end
 
   @doc "Parses and validates dossier bytes; see the moduledoc."
-  @spec parse(binary()) :: {:ok, map()} | {:error, term()}
-  def parse(_bin), do: red({:error, :not_implemented})
+  @spec parse(binary()) :: {:ok, map()} | refusal()
+  def parse(bin) when is_binary(bin) do
+    with {:ok, doc} <-
+           BoundedJson.decode(bin,
+             max_bytes: @max_bytes,
+             max_depth: @max_depth,
+             known_keys: @known_keys
+           ),
+         :ok <- Rules.validate(doc) do
+      {:ok, doc}
+    end
+  end
 
   @doc "`:eligible` or `{:not_importable, reason}` for `row_id`, or a refusal of the input."
   @spec eligibility(map(), map(), String.t(), Path.t()) ::
@@ -552,8 +568,537 @@ defmodule SdrAgent.Prototype.DossierParser do
   end
 
   defp company(index), do: "companies[#{index}]"
+end
 
-  # RED stub result, typed dynamic() so success clauses of callers compile
-  # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+defmodule SdrAgent.Prototype.DossierParser.Rules do
+  @moduledoc false
+  # The schema and cross-field rules of `sdr-agent.prototype-dossier` v1
+  # (interfaces r6 IF-6), applied to the decoded map, plus the value helpers
+  # (text, URL, host, date, time) shared with SpotcheckManifest and SeedDir.
+  # Every function returns :ok or {:error, {path, rule}}; no value is echoed.
+
+  alias SdrAgent.Prototype.BoundedJson
+  alias SdrAgent.Prototype.DossierParser
+
+  @schema "sdr-agent.prototype-dossier"
+  @top_keys ["schema", "schema_version", "generated_at", "sources_policy", "companies"]
+  @company_keys ~w(row_id name domain why_fit importable skip_reason sources facts contact)
+  @source_keys ~w(source_id original_url final_url source_type retrieved_on retrieved_at)
+  @fact_keys ~w(fact_id kind topic stated_on text source_id excerpt)
+  @contact_keys ~w(name role email email_kind classification confidence conflict evidence)
+  @evidence_keys ~w(name role email)
+  @claim_keys ~w(source_id basis attribution_excerpt excerpt artifact)
+  @artifact_keys ~w(file sha256)
+
+  @skip_reasons ~w(no_named_person role_mailbox email_unavailable link_unconfirmed role_unconfirmed source_conflict insufficient_source not_selected)
+  @source_types ~w(company_site person_authored attributed_third_party directory third_party)
+  @fact_kinds ~w(quote fact inference)
+  @topics ~w(size location industry)
+  @email_kinds ~w(personal_work role_mailbox unavailable)
+  @confidences ~w(high medium low)
+  @conflicts ~w(address_link_mismatch other_person_source other)
+  @basis_source %{
+    "company_published" => "company_site",
+    "person_authored" => "person_authored",
+    "attributed_post" => "attributed_third_party",
+    "third_party_report" => "third_party"
+  }
+
+  @row_id ~r/\A[a-z0-9][a-z0-9-]{0,31}\z/
+  @source_id ~r/\A s[0-9]{1,2}\z/x
+  @fact_id ~r/\A f[0-9]{1,2}\z/x
+  @artifact_file ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
+  @hex64 ~r/\A[0-9a-f]{64}\z/
+  @email_local ~r/\A[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]{1,64}\z/
+  @label "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+  @host ~r/\A(?=.{1,253}\z)#{@label}(?:\.#{@label})+\z/
+  @reserved_tlds ~w(localhost local internal invalid arpa onion alt)
+  @rfc2606_tlds ~w(test example)
+  @rfc2606_domains ~w(example.com example.net example.org)
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  @rfc3339 ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\z/
+  @date ~r/\A\d{4}-\d{2}-\d{2}\z/
+  @max_url_bytes 2048
+
+  ## The dossier
+
+  def validate(doc) do
+    with :ok <- keys(doc, @top_keys, []),
+         :ok <- equal(doc["schema"], @schema, "schema", :schema),
+         :ok <- version(doc["schema_version"]),
+         :ok <- time(doc["generated_at"], "generated_at"),
+         :ok <- text(doc["sources_policy"], "sources_policy", 1, 2000),
+         :ok <- list(doc["companies"], "companies", 1, 15) do
+      generated_on = local_date!(doc["generated_at"])
+      companies(doc["companies"], generated_on)
+    end
+  end
+
+  defp version(1), do: :ok
+  defp version(_other), do: {:error, {"schema_version", :schema_version}}
+
+  defp companies(companies, generated_on) do
+    companies
+    |> Enum.with_index()
+    |> Enum.reduce_while({MapSet.new(), MapSet.new()}, fn {company, i}, {ids, domains} ->
+      p = "companies[#{i}]"
+
+      with :ok <- company(company, i, generated_on),
+           :ok <- unique(company["row_id"], ids, "#{p}.row_id"),
+           :ok <- unique(company["domain"], domains, "#{p}.domain") do
+        {:cont, {MapSet.put(ids, company["row_id"]), MapSet.put(domains, company["domain"])}}
+      else
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:error, _} = error -> error
+      _sets -> :ok
+    end
+  end
+
+  defp company(c, i, generated_on) do
+    p = "companies[#{i}]"
+
+    with :ok <- keys(c, @company_keys, ["companies", i]),
+         :ok <- pattern(c["row_id"], @row_id, "#{p}.row_id"),
+         :ok <- text(c["name"], "#{p}.name", 1, 120),
+         :ok <- domain(c["domain"], "#{p}.domain"),
+         :ok <- text(c["why_fit"], "#{p}.why_fit", 1, 600, true),
+         :ok <- boolean(c["importable"], "#{p}.importable"),
+         :ok <- optional_enum(c["skip_reason"], @skip_reasons, "#{p}.skip_reason"),
+         {:ok, sources} <- sources(c["sources"], p, c["domain"]),
+         :ok <- facts(c["facts"], p, sources, generated_on),
+         :ok <- optional(c["contact"], &contact(&1, "#{p}.contact", c["domain"], sources)),
+         :ok <- flag(c, p) do
+      flagged(c, p)
+    end
+  end
+
+  defp flag(c, p) do
+    cond do
+      c["importable"] != (c["skip_reason"] == nil) ->
+        {:error, {"#{p}.skip_reason", :importable_flag}}
+
+      c["contact"] == nil and c["skip_reason"] != "no_named_person" ->
+        {:error, {"#{p}.contact", :contact_null}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Importable rule 1 for a flagged row; the rest needs the manifest.
+  defp flagged(%{"importable" => true} = c, p) do
+    case DossierParser.rule_contact(c) do
+      :ok -> :ok
+      reason -> {:error, {p, reason}}
+    end
+  end
+
+  defp flagged(_c, _p), do: :ok
+
+  defp sources(sources, p, domain) do
+    with :ok <- list(sources, "#{p}.sources", 1, 10) do
+      sources
+      |> Enum.with_index()
+      |> Enum.reduce_while({:ok, %{}}, &add_source(&1, &2, p, domain))
+    end
+  end
+
+  defp add_source({s, k}, {:ok, acc}, p, domain) do
+    sp = "#{p}.sources[#{k}]"
+
+    with :ok <- source(s, sp, domain),
+         :ok <- unique(s["source_id"], acc, "#{sp}.source_id") do
+      {:cont, {:ok, Map.put(acc, s["source_id"], s)}}
+    else
+      error -> {:halt, error}
+    end
+  end
+
+  defp source(s, sp, domain) do
+    with :ok <- keys(s, @source_keys, segments(sp)),
+         :ok <- pattern(s["source_id"], @source_id, "#{sp}.source_id"),
+         :ok <- url(s["original_url"], "#{sp}.original_url"),
+         :ok <- url(s["final_url"], "#{sp}.final_url"),
+         :ok <- enum(s["source_type"], @source_types, "#{sp}.source_type"),
+         :ok <- label(s, sp, domain),
+         :ok <- date(s["retrieved_on"], "#{sp}.retrieved_on") do
+      optional(s["retrieved_at"], &time(&1, "#{sp}.retrieved_at"))
+    end
+  end
+
+  # Ruling 5: only the host is mechanical. A company host carries only
+  # company_site; another host never does.
+  defp label(s, sp, domain) do
+    company_host? = company_host?(host!(s["final_url"]), domain)
+
+    if company_host? == (s["source_type"] == "company_site"),
+      do: :ok,
+      else: {:error, {"#{sp}.source_type", :mislabelled}}
+  end
+
+  defp facts(facts, p, sources, generated_on) do
+    with :ok <- list(facts, "#{p}.facts", 1, 10) do
+      facts
+      |> Enum.with_index()
+      |> Enum.reduce_while(MapSet.new(), &add_fact(&1, &2, p, sources, generated_on))
+      |> case do
+        {:error, _} = error -> error
+        _ids -> :ok
+      end
+    end
+  end
+
+  defp add_fact({f, j}, ids, p, sources, generated_on) do
+    fp = "#{p}.facts[#{j}]"
+
+    with :ok <- fact(f, fp, sources, generated_on),
+         :ok <- unique(f["fact_id"], ids, "#{fp}.fact_id") do
+      {:cont, MapSet.put(ids, f["fact_id"])}
+    else
+      error -> {:halt, error}
+    end
+  end
+
+  defp fact(f, fp, sources, generated_on) do
+    with :ok <- keys(f, @fact_keys, segments(fp)),
+         :ok <- pattern(f["fact_id"], @fact_id, "#{fp}.fact_id"),
+         :ok <- enum(f["kind"], @fact_kinds, "#{fp}.kind"),
+         :ok <- optional_enum(f["topic"], @topics, "#{fp}.topic"),
+         :ok <- optional(f["stated_on"], &not_after(&1, generated_on, "#{fp}.stated_on")),
+         :ok <- text(f["text"], "#{fp}.text", 1, 600, true),
+         :ok <- optional(f["source_id"], &known_source(&1, sources, "#{fp}.source_id")),
+         :ok <- optional(f["excerpt"], &text(&1, "#{fp}.excerpt", 1, 600, true)) do
+      fact_kind(f, fp)
+    end
+  end
+
+  defp fact_kind(%{"kind" => "inference"} = f, fp) do
+    if f["source_id"] == nil and f["excerpt"] == nil and f["topic"] == nil,
+      do: :ok,
+      else: {:error, {fp, :inference}}
+  end
+
+  defp fact_kind(f, fp) do
+    cond do
+      f["kind"] == "quote" and (f["excerpt"] == nil or f["excerpt"] != f["text"]) ->
+        {:error, {"#{fp}.excerpt", :quote_excerpt}}
+
+      f["excerpt"] != nil and f["source_id"] == nil ->
+        {:error, {"#{fp}.source_id", :null}}
+
+      f["topic"] != nil and f["excerpt"] == nil ->
+        {:error, {fp, :topic}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp contact(ct, cp, domain, sources) do
+    with :ok <- keys(ct, @contact_keys, segments(cp)),
+         :ok <- name(ct["name"], "#{cp}.name"),
+         :ok <- text(ct["role"], "#{cp}.role", 1, 120),
+         :ok <- optional(ct["email"], &email(&1, "#{cp}.email", domain)),
+         :ok <- enum(ct["email_kind"], @email_kinds, "#{cp}.email_kind"),
+         :ok <- enum(ct["classification"], ["unverified"], "#{cp}.classification"),
+         :ok <- enum(ct["confidence"], @confidences, "#{cp}.confidence"),
+         :ok <- optional_enum(ct["conflict"], @conflicts, "#{cp}.conflict"),
+         :ok <-
+           iff(ct["email"] == nil, ct["email_kind"] == "unavailable", "#{cp}.email", :email_kind) do
+      evidence(ct, "#{cp}.evidence", sources)
+    end
+  end
+
+  defp evidence(ct, ep, sources) do
+    ev = ct["evidence"]
+
+    with :ok <- keys(ev, @evidence_keys, segments(ep)),
+         :ok <- present(ev["name"], "#{ep}.name"),
+         :ok <- present(ev["role"], "#{ep}.role"),
+         :ok <- iff(ev["email"] == nil, ct["email"] == nil, "#{ep}.email", :evidence_email),
+         :ok <- claim(ev["name"], "#{ep}.name", "name", ct["name"], sources),
+         :ok <- claim(ev["role"], "#{ep}.role", "role", ct["name"], sources) do
+      optional(ev["email"], &claim(&1, "#{ep}.email", "email", ct["name"], sources))
+    end
+  end
+
+  defp claim(claim, cp, field, name, sources) do
+    with :ok <- keys(claim, @claim_keys, segments(cp)),
+         :ok <- present(claim["source_id"], "#{cp}.source_id"),
+         :ok <- known_source(claim["source_id"], sources, "#{cp}.source_id"),
+         :ok <- enum(claim["basis"], Map.keys(@basis_source), "#{cp}.basis"),
+         :ok <- basis(claim, field, sources, "#{cp}.basis"),
+         :ok <-
+           optional(
+             claim["attribution_excerpt"],
+             &text(&1, "#{cp}.attribution_excerpt", 1, 200, true)
+           ),
+         :ok <- attribution(claim, name, "#{cp}.attribution_excerpt"),
+         :ok <- optional(claim["excerpt"], &text(&1, "#{cp}.excerpt", 1, 300, true)),
+         :ok <- optional(claim["artifact"], &artifact(&1, "#{cp}.artifact")) do
+      if claim["excerpt"] == nil and claim["artifact"] == nil,
+        do: {:error, {cp, :claim_evidence}},
+        else: :ok
+    end
+  end
+
+  # A basis matches exactly one source type; no basis matches `directory`;
+  # third_party_report never supports the email.
+  defp basis(claim, field, sources, bp) do
+    source_type = sources[claim["source_id"]]["source_type"]
+
+    if Map.fetch!(@basis_source, claim["basis"]) == source_type and
+         not (field == "email" and claim["basis"] == "third_party_report"),
+       do: :ok,
+       else: {:error, {bp, :basis}}
+  end
+
+  defp attribution(%{"basis" => basis, "attribution_excerpt" => excerpt}, name, ap)
+       when basis in ["person_authored", "attributed_post"] do
+    if is_binary(excerpt) and :binary.match(excerpt, name) != :nomatch,
+      do: :ok,
+      else: {:error, {ap, :attribution}}
+  end
+
+  defp attribution(%{"attribution_excerpt" => nil}, _name, _ap), do: :ok
+  defp attribution(_claim, _name, ap), do: {:error, {ap, :attribution}}
+
+  defp artifact(a, ap) do
+    with :ok <- keys(a, @artifact_keys, segments(ap)),
+         :ok <- pattern(a["file"], @artifact_file, "#{ap}.file") do
+      pattern(a["sha256"], @hex64, "#{ap}.sha256")
+    end
+  end
+
+  defp name(value, np) do
+    with :ok <- text(value, np, 1, 120) do
+      tokens = String.split(value, " ")
+
+      if length(tokens) in 2..4 and Enum.all?(tokens, &(&1 != "")),
+        do: :ok,
+        else: {:error, {np, :name_tokens}}
+    end
+  end
+
+  defp email(value, ep, domain) do
+    with :ok <- text(value, ep, 3, 254) do
+      value |> String.split("@") |> email_parts(ep, domain)
+    end
+  end
+
+  defp email_parts([local, host], ep, domain) do
+    cond do
+      not Regex.match?(@email_local, local) or not Regex.match?(@host, String.downcase(host)) ->
+        {:error, {ep, :format}}
+
+      String.downcase(host) != domain ->
+        {:error, {ep, :email_host}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp email_parts(_parts, ep, _domain), do: {:error, {ep, :format}}
+
+  defp known_source(id, sources, sp) do
+    if is_binary(id) and Map.has_key?(sources, id), do: :ok, else: {:error, {sp, :unknown_source}}
+  end
+
+  defp not_after(value, generated_on, dp) do
+    with :ok <- date(value, dp) do
+      if Date.compare(Date.from_iso8601!(value), generated_on) == :gt,
+        do: {:error, {dp, :future_date}},
+        else: :ok
+    end
+  end
+
+  ## Shared value helpers (also used by SpotcheckManifest and SeedDir)
+
+  @doc false
+  def keys(map, keys, segs) when is_map(map), do: BoundedJson.exact_keys(map, keys, segs)
+
+  def keys(nil, _keys, segs), do: {:error, {path(segs), :null}}
+  def keys(_other, _keys, segs), do: {:error, {path(segs), :type}}
+
+  @doc false
+  def text(value, p, min, max, multiline \\ false)
+  def text(nil, p, _min, _max, _multiline), do: {:error, {p, :null}}
+
+  def text(value, p, min, max, multiline) when is_binary(value) do
+    case BoundedJson.check_text(value, min: min, max: max, multiline: multiline) do
+      :ok -> :ok
+      {:error, rule} -> {:error, {p, rule}}
+    end
+  end
+
+  def text(_value, p, _min, _max, _multiline), do: {:error, {p, :type}}
+
+  @doc false
+  def list(nil, p, _min, _max), do: {:error, {p, :null}}
+
+  def list(value, p, min, max) when is_list(value) do
+    if length(value) in min..max, do: :ok, else: {:error, {p, :count}}
+  end
+
+  def list(_value, p, _min, _max), do: {:error, {p, :type}}
+
+  @doc false
+  def enum(nil, _values, p), do: {:error, {p, :null}}
+  def enum(value, values, p), do: if(value in values, do: :ok, else: {:error, {p, :enum}})
+
+  defp optional_enum(nil, _values, _p), do: :ok
+  defp optional_enum(value, values, p), do: enum(value, values, p)
+
+  @doc false
+  def pattern(nil, _re, p), do: {:error, {p, :null}}
+
+  def pattern(value, re, p) when is_binary(value),
+    do: if(Regex.match?(re, value), do: :ok, else: {:error, {p, :format}})
+
+  def pattern(_value, _re, p), do: {:error, {p, :type}}
+
+  defp boolean(value, _p) when is_boolean(value), do: :ok
+  defp boolean(nil, p), do: {:error, {p, :null}}
+  defp boolean(_value, p), do: {:error, {p, :type}}
+
+  defp present(nil, p), do: {:error, {p, :null}}
+  defp present(_value, _p), do: :ok
+
+  defp optional(nil, _fun), do: :ok
+  defp optional(value, fun), do: fun.(value)
+
+  defp equal(value, value, _p, _rule), do: :ok
+  defp equal(_value, _expected, p, rule), do: {:error, {p, rule}}
+
+  defp iff(a, b, p, rule), do: if(a == b, do: :ok, else: {:error, {p, rule}})
+
+  defp unique(value, %MapSet{} = seen, p),
+    do: if(MapSet.member?(seen, value), do: {:error, {p, :duplicate}}, else: :ok)
+
+  defp unique(value, %{} = seen, p),
+    do: if(Map.has_key?(seen, value), do: {:error, {p, :duplicate}}, else: :ok)
+
+  @doc false
+  # An RFC 3339 time with an offset (Z or ±hh:mm).
+  def time(nil, p), do: {:error, {p, :null}}
+
+  def time(value, p) when is_binary(value) do
+    with true <- Regex.match?(@rfc3339, value),
+         {:ok, _dt, _offset} <- DateTime.from_iso8601(value) do
+      :ok
+    else
+      _ -> {:error, {p, :format}}
+    end
+  end
+
+  def time(_value, p), do: {:error, {p, :type}}
+
+  @doc false
+  def date(nil, p), do: {:error, {p, :null}}
+
+  def date(value, p) when is_binary(value) do
+    with true <- Regex.match?(@date, value), {:ok, _date} <- Date.from_iso8601(value) do
+      :ok
+    else
+      _ -> {:error, {p, :format}}
+    end
+  end
+
+  def date(_value, p), do: {:error, {p, :type}}
+
+  @doc false
+  def local_date!(<<date::binary-size(10), "T", _::binary>>), do: Date.from_iso8601!(date)
+
+  @doc false
+  # https only; no userinfo, port, query, fragment, IP literal or reserved host.
+  def url(nil, p), do: {:error, {p, :null}}
+
+  def url(value, p) when is_binary(value) do
+    if safe_url?(value), do: :ok, else: {:error, {p, :unsafe_url}}
+  end
+
+  def url(_value, p), do: {:error, {p, :type}}
+
+  defp safe_url?(value) do
+    with true <- byte_size(value) <= @max_url_bytes,
+         "https://" <> rest <- value,
+         [authority | _] <- String.split(rest, ["/"], parts: 2),
+         false <- String.contains?(authority, [":", "@", "[", "]"]),
+         {:ok, %URI{scheme: "https", host: host, userinfo: nil, query: nil, fragment: nil}} <-
+           URI.new(value),
+         true <- is_binary(host) and host == authority and host == String.downcase(host) do
+      public_host?(host)
+    else
+      _ -> false
+    end
+  end
+
+  defp domain(value, p) do
+    with :ok <- text(value, p, 1, 253) do
+      if value == String.downcase(value) and public_host?(value),
+        do: :ok,
+        else: {:error, {p, :format}}
+    end
+  end
+
+  @doc false
+  # A lower-case host name of at least two labels that is not an IP literal,
+  # not a special-use name, and not an RFC 2606 name outside the test build.
+  def public_host?(host) do
+    tld = host |> String.split(".") |> List.last()
+
+    Regex.match?(@host, host) and
+      :inet.parse_address(String.to_charlist(host)) == {:error, :einval} and
+      not String.match?(tld, ~r/\A[0-9]+\z/) and tld not in @reserved_tlds and
+      (not rfc2606?(host, tld) or rfc2606_admitted?())
+  end
+
+  defp rfc2606?(host, tld),
+    do:
+      tld in @rfc2606_tlds or
+        Enum.any?(@rfc2606_domains, &(host == &1 or String.ends_with?(host, "." <> &1)))
+
+  # The RFC 2606 names are the synthetic fixtures of the hermetic test build
+  # only (Codex S3 RED-1 ruling R3): fixed at compile time, never a runtime
+  # flag or caller option.
+  if @test_seams do
+    defp rfc2606_admitted?, do: true
+  else
+    defp rfc2606_admitted?, do: false
+  end
+
+  @doc false
+  def host!(url), do: url |> URI.parse() |> Map.fetch!(:host) |> String.downcase()
+
+  @doc false
+  def company_host?(host, domain), do: host == domain or String.ends_with?(host, "." <> domain)
+
+  @doc false
+  # A schema path string from its segments, in the BoundedJson format.
+  def path(segments) do
+    Enum.reduce(segments, "", fn
+      i, acc when is_integer(i) -> "#{acc}[#{i}]"
+      key, "" -> key
+      key, acc -> "#{acc}.#{key}"
+    end)
+  end
+
+  # The segments of a path string built by this module.
+  defp segments(p) do
+    p
+    |> String.split(".")
+    |> Enum.flat_map(fn part ->
+      case Regex.run(~r/\A([a-z_]+)((?:\[\d+\])*)\z/, part) do
+        [_, key, ""] ->
+          [key]
+
+        [_, key, idx] ->
+          [key | Regex.scan(~r/\d+/, idx) |> List.flatten() |> Enum.map(&String.to_integer/1)]
+      end
+    end)
+  end
 end
