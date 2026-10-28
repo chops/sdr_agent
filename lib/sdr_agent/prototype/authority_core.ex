@@ -286,8 +286,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     The live database name, its `pg_database` oid and the cluster's
     `system_identifier`, in one plain read; any failure is
     `{:error, :live_identity_unavailable}`. In a test-seam build the test
-    database's own name reads as `sdr_agent_prototype` (every other value is
-    the real one).
+    database's own name reads as `sdr_agent_prototype`, and then the
+    `TestSeam.put_live_identity/1` override of this process (or of its first
+    `$callers` entry that has one) applies: a map replaces those fields, and
+    `:raise` makes the identity unavailable. Without an override every other
+    value is the real one.
     """
     @spec live_identity() ::
             {:ok,
@@ -298,7 +301,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         {:ok, %{rows: [[name, oid, system_identifier]]}}
         when is_binary(name) and is_integer(oid) and oid > 0 and is_integer(system_identifier) ->
           {:ok,
-           test_alias(%{database: name, database_oid: oid, system_identifier: system_identifier})}
+           seam_identity(%{
+             database: name,
+             database_oid: oid,
+             system_identifier: system_identifier
+           })}
 
         _other ->
           {:error, :live_identity_unavailable}
@@ -315,6 +322,18 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         if name == test_database, do: %{identity | database: @database}, else: identity
       end
 
+      # The test database's name alias, then this process's (or a caller's)
+      # `TestSeam.put_live_identity/1` override: a map of fields, or `:raise`.
+      defp seam_identity(identity) do
+        aliased = test_alias(identity)
+
+        case SdrAgent.Prototype.Authority.TestSeam.lookup({SdrAgent.Prototype, :live_identity}) do
+          :raise -> raise ArgumentError, "test seam: live identity unavailable"
+          overrides when is_map(overrides) -> Map.merge(aliased, overrides)
+          _none -> aliased
+        end
+      end
+
       # A one-argument hook from the calling process's dictionary at a named
       # boundary (the rollback proof's late-failure point).
       defp seam(name, arg) do
@@ -326,7 +345,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         :ok
       end
     else
-      defp test_alias(identity), do: identity
+      defp seam_identity(identity), do: identity
       defp seam(_name, _arg), do: :ok
     end
 

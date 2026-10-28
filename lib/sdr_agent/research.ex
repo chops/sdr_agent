@@ -27,12 +27,13 @@ defmodule SdrAgent.Research do
     otp_app: :sdr_agent
 
   alias SdrAgent.Audit.GuardedCall
-  alias SdrAgent.Prototype.Checks.OperatorAction
   alias SdrAgent.Research.DossierEntry
   alias SdrAgent.Research.DossierSource
   alias SdrAgent.Research.EvidenceClaim
   alias SdrAgent.Research.Qualification
   alias SdrAgent.Research.ResearchArtifact
+
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   resources do
     resource SdrAgent.Research.ResearchArtifact
@@ -99,12 +100,22 @@ defmodule SdrAgent.Research do
   @spec record_dossier_source(map(), keyword()) :: {:ok, struct()} | {:error, term()}
   def record_dossier_source(attrs, opts), do: record_dossier(DossierSource, attrs, opts)
 
-  defp record_dossier(resource, attrs, opts) do
-    if OperatorAction.match?(Keyword.get(opts, :actor), nil, action: :import_dossier) do
-      GuardedCall.create(resource, :import, attrs, opts)
-    else
-      {:error, Ash.Error.Forbidden.exception([])}
+  if @prototype_compiled do
+    # Aliased inside the compiled branch only: the production branch never
+    # names the operator check (no unused alias under --warnings-as-errors).
+    alias SdrAgent.Prototype.Checks.OperatorAction
+
+    defp record_dossier(resource, attrs, opts) do
+      if OperatorAction.match?(Keyword.get(opts, :actor), nil, action: :import_dossier) do
+        GuardedCall.create(resource, :import, attrs, opts)
+      else
+        {:error, Ash.Error.Forbidden.exception([])}
+      end
     end
+  else
+    # No prototype authority in this build (production): no actor is the
+    # prototype operator, so every import is refused before any changeset.
+    defp record_dossier(_resource, _attrs, _opts), do: {:error, Ash.Error.Forbidden.exception([])}
   end
 
   defp subject(opts, attrs, key), do: Keyword.put(opts, :subject_id, Map.get(Map.new(attrs), key))
