@@ -270,6 +270,115 @@ defmodule SdrAgent.Prototype.AnchorAuthTest do
     defp summarize(other), do: other
   end
 
+  # Codex f3036a14 queue 1, role immutability (RED, test-only). The SQL
+  # CHECK `users_agent_operator_password` stays as defence in depth, but its
+  # any-error result is not the planned resource-level refusal. With valid,
+  # otherwise-authorized inputs in ordinary runtime, each prohibited path
+  # must be refused by the User resource itself: exactly one
+  # `Ash.Error.Changes.InvalidAttribute` on `:role` with the fixed message
+  # below, inside `Ash.Error.Invalid`, and no row change. The existing
+  # CHECK-level test above is unchanged and is not relabelled as this proof.
+  describe "role immutability: the resource-level refusal" do
+    @immutable "agent_operator is reserved for the D-237 anchor and immutable"
+
+    defp immutable_refusal?(
+           {:error,
+            %Ash.Error.Invalid{
+              errors: [%Ash.Error.Changes.InvalidAttribute{field: :role, message: @immutable}]
+            }}
+         ),
+         do: true
+
+    defp immutable_refusal?(_result), do: false
+
+    # The error class and each error's field, message and DB constraint.
+    defp refusal_shape({:error, %error_class{errors: errors}}),
+      do: {error_class, Enum.map(errors, &error_shape/1)}
+
+    defp refusal_shape({:ok, %User{} = user}), do: {:ok, user.role}
+    defp refusal_shape(other), do: other
+
+    defp error_shape(%{field: field, message: message} = error),
+      do: {field, message, Keyword.get(Map.get(error, :private_vars) || [], :constraint)}
+
+    defp error_shape(%error{}), do: error
+
+    defp user_row(id) do
+      %{rows: [row]} =
+        Repo.query!("SELECT role, status, hashed_password FROM users WHERE id = $1", [
+          Ecto.UUID.dump!(id)
+        ])
+
+      row
+    end
+
+    defp users_count do
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM users", [])
+      n
+    end
+
+    test "every to/from-agent_operator path is refused by the resource, with no row change" do
+      fx = bound!(enter_runtime: false)
+      assert SdrAgent.Prototype.runtime() != :prototype
+      admin = human(:admin, fx.tenant)
+      reviewer = new_human(:reviewer, fx.tenant)
+      pw = %{password: "test-password-1234", password_confirmation: "test-password-1234"}
+
+      anchor_before = user_row(fx.anchor.id)
+      reviewer_before = user_row(reviewer.id)
+      count_before = users_count()
+
+      results = [
+        change_role_from_anchor: Accounts.change_role(fx.anchor, :reviewer, actor: admin),
+        change_role_to_anchor: Accounts.change_role(reviewer, :agent_operator, actor: admin),
+        create_user_as_anchor:
+          Accounts.create_user(
+            Map.merge(pw, %{
+              email: "machine@example.test",
+              display_name: "Machine",
+              role: :agent_operator
+            }),
+            actor: admin
+          ),
+        seed_as_anchor:
+          Accounts.seed_user(
+            Map.merge(pw, %{
+              id: Ecto.UUID.generate(),
+              email: "machine-seed@example.test",
+              display_name: "Machine seed",
+              role: :agent_operator
+            }),
+            actor: system_actor(:seeder, fx.tenant)
+          ),
+        set_password_on_anchor: Accounts.set_password(fx.anchor, pw, actor: admin)
+      ]
+
+      offenders =
+        for {path, result} <- results,
+            not immutable_refusal?(result),
+            do: {path, refusal_shape(result)}
+
+      assert offenders == [],
+             "not the resource-level immutability refusal: #{inspect(offenders)}"
+
+      assert user_row(fx.anchor.id) == anchor_before
+      assert user_row(reviewer.id) == reviewer_before
+      assert users_count() == count_before
+    end
+
+    test "ordinary-to-ordinary role changes still succeed (control)" do
+      fx = bound!(enter_runtime: false)
+      admin = human(:admin, fx.tenant)
+      reviewer = new_human(:reviewer, fx.tenant)
+
+      assert {:ok, %User{role: :auditor} = changed} =
+               Accounts.change_role(reviewer, :auditor, actor: admin)
+
+      assert {:ok, %User{role: :reviewer}} =
+               Accounts.change_role(changed, :reviewer, actor: admin)
+    end
+  end
+
   describe "preserved controls in prototype runtime" do
     test "the bound auditor still signs in, and its session token resolves" do
       fx = bound!(enter_runtime: false, auditor: true)
