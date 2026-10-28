@@ -53,8 +53,9 @@ defmodule SdrAgent.Prototype.DossierParser do
      (`:link_unconfirmed`);
   6. the role claim: the name and the role verbatim, and `verified` with
      `person_role_current` (`:role_unconfirmed`);
-  7. the name claim `verified`; a verified quote or fact with an excerpt on a
-     `company_site` source (`:insufficient_source`);
+  7. the name claim `verified`; a retained `company_site` source: one with a
+     verified quote or fact excerpt, the same rule that builds the plan's
+     sources (`:insufficient_source`);
   8. no `stated_on` after the date of its check (the date in `checked_at`'s
      own offset; `:future_date` at the fact's `stated_on`), then one verified
      `size` fact marked `company_size_stated` and one verified `location`
@@ -67,6 +68,13 @@ defmodule SdrAgent.Prototype.DossierParser do
   check refuses the input even on an unflagged row. The ceiling is only
   `date(checked_at)`; `parse/1` checks the date syntax of `stated_on` and
   never compares it with `generated_at`.
+
+  **Website (supplement 2 C1).** `website_url` is the exact `final_url` of the
+  first `company_site` source, in dossier source order, that the plan retains
+  (rule 7 guarantees one). A source with claims or unconfirmed excerpts only
+  is never a candidate, nor is any other class; there is no dummy source and
+  no fallback. It is a deterministic evidence-route choice, not a claim that
+  the URL is the canonical homepage or that the source is trusted.
 
   **Source content (R1).** A source's content is its verified excerpt strings,
   verbatim, in dossier fact order, joined by exactly two LF bytes: no kind or
@@ -382,17 +390,9 @@ defmodule SdrAgent.Prototype.DossierParser do
     do: if(verified?(results["claim:name"]), do: :ok, else: :insufficient_source)
 
   defp rule_usable(row, results) do
-    company_sites =
-      for s <- row["sources"],
-          s["source_type"] == "company_site",
-          into: MapSet.new(),
-          do: s["source_id"]
-
     usable? =
-      Enum.any?(row["facts"], fn f ->
-        f["kind"] in ["quote", "fact"] and f["excerpt"] not in [nil, ""] and
-          MapSet.member?(company_sites, f["source_id"]) and
-          verified?(results["fact:#{f["fact_id"]}"])
+      Enum.any?(row["sources"], fn s ->
+        s["source_type"] == "company_site" and verified_facts(row, results, s["source_id"]) != []
       end)
 
     if usable?, do: :ok, else: :insufficient_source
@@ -476,16 +476,14 @@ defmodule SdrAgent.Prototype.DossierParser do
   defp plan(row, results) do
     contact = row["contact"]
     [first | rest] = String.split(contact["name"])
+    sources = plan_sources(row, results)
 
     %{
       row_id: row["row_id"],
       account: %{
         name: row["name"],
         domain: row["domain"],
-        website_url:
-          Enum.find_value(row["sources"], fn s ->
-            if s["source_type"] == "company_site", do: s["final_url"]
-          end)
+        website_url: website_url(sources)
       },
       contact: %{
         first_name: first,
@@ -499,9 +497,16 @@ defmodule SdrAgent.Prototype.DossierParser do
         contact_confidence: Map.fetch!(@confidences, contact["confidence"])
       },
       claims: Enum.map(@claim_fields, &claim_record(row, &1, results)),
-      sources: plan_sources(row, results),
+      sources: sources,
       notes: notes(row, results)
     }
+  end
+
+  # Supplement 2 C1: the first retained company-site source in dossier order.
+  defp website_url(sources) do
+    Enum.find_value(sources, fn source ->
+      if source.source_type == "company_site", do: source.final_url
+    end)
   end
 
   defp claim_record(row, field, results) do
@@ -549,11 +554,14 @@ defmodule SdrAgent.Prototype.DossierParser do
     end
   end
 
-  defp verified_facts(row, results, source_id) do
-    Enum.filter(row["facts"], fn f ->
-      f["source_id"] == source_id and f["kind"] in ["quote", "fact"] and f["excerpt"] != nil and
-        verified?(results["fact:#{f["fact_id"]}"])
-    end)
+  defp verified_facts(row, results, source_id),
+    do: Enum.filter(row["facts"], &(&1["source_id"] == source_id and retained?(&1, results)))
+
+  # The one retained-fact rule (rule 7, the plan's sources, the website and
+  # the notes' unconfirmed facts): a verified quote or fact with an excerpt.
+  defp retained?(fact, results) do
+    fact["kind"] in ["quote", "fact"] and fact["excerpt"] not in [nil, ""] and
+      verified?(results["fact:#{fact["fact_id"]}"])
   end
 
   @doc "The content bytes of one source (R1): its verified excerpt strings, verbatim, joined by two LF bytes."
@@ -565,9 +573,7 @@ defmodule SdrAgent.Prototype.DossierParser do
       "why_fit" => row["why_fit"],
       "inferences" => for(f <- row["facts"], f["kind"] == "inference", do: f["text"]),
       "unconfirmed" =>
-        for f <- row["facts"],
-            f["kind"] != "inference",
-            not (f["excerpt"] != nil and verified?(results["fact:#{f["fact_id"]}"])) do
+        for f <- row["facts"], f["kind"] != "inference", not retained?(f, results) do
           %{"fact_id" => f["fact_id"], "kind" => f["kind"], "text" => f["text"]}
         end
     }
