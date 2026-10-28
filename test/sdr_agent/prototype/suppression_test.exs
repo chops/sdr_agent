@@ -60,7 +60,11 @@ defmodule SdrAgent.Prototype.SuppressionTest do
     variant = "  " <> String.upcase(to_string(ctx.contact.email)) <> " "
     capture_hook!(:before_capture, fn _op -> suppress!(ctx, :email, variant) end)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
+    no_capture!(ctx, delivery)
+    assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
     no_capture!(ctx, delivery)
   end
 
@@ -73,7 +77,11 @@ defmodule SdrAgent.Prototype.SuppressionTest do
       suppress!(ctx, :domain, String.upcase(domain(ctx.contact.email)))
     end)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_recipient_suppressed"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
+    no_capture!(ctx, delivery)
+    assert capture_refusal(ctx, delivery) =~ "prototype_recipient_suppressed"
     no_capture!(ctx, delivery)
   end
 
@@ -91,8 +99,25 @@ defmodule SdrAgent.Prototype.SuppressionTest do
       tamper!("ALTER TABLE suppressions RENAME TO suppressions_unavailable")
     end)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_suppression_unchecked"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
     no_capture!(ctx, delivery)
+    refusal = capture_refusal(ctx, delivery)
+    assert refusal =~ "prototype_suppression_unchecked"
+    no_capture!(ctx, delivery)
+
+    # Fixed text only: no raw SQL, table name or recipient (Codex e9688dca).
+    for raw <- ["SELECT", "suppressions_unavailable", to_string(ctx.contact.email)] do
+      refute refusal =~ raw, "the refusal carries raw detail"
+    end
+
+    # The connection is still usable and the fixture is restored.
+    tamper!("ALTER TABLE suppressions_unavailable RENAME TO suppressions")
+    restored = Outreach.matching_suppressions(to_string(ctx.contact.email), actor: ctx.admin)
+
+    assert match?({:ok, []}, restored),
+           "the suppression source is not restored: #{inspect(restored)}"
   end
 
   test "ordinary runtime: an already-claimed delivery is left to its outcome (control, unchanged)" do

@@ -337,7 +337,11 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     delivery = delivery_of!(ctx, approval)
     enter_window!(fixture)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_approval_not_delegated"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
+    no_capture!(ctx, delivery)
+    assert capture_refusal(ctx, delivery) =~ "prototype_approval_not_delegated"
     no_capture!(ctx, delivery)
   end
 
@@ -350,7 +354,11 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
       :ok = PrototypeFixtures.put_live_identity(%{system_identifier: 1})
     end)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_binding_mismatch"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
+    no_capture!(ctx, delivery)
+    assert capture_refusal(ctx, delivery) =~ "prototype_binding_mismatch"
     no_capture!(ctx, delivery)
   end
 
@@ -362,9 +370,8 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     dlv = Actor.system(:delivery_worker, ctx.tenant.id)
     {:ok, payload} = Audit.put_payload("synthetic message", "message/rfc822", actor: dlv)
 
-    # The refusal fails closed by raising (the capture adapter and the
-    # delivery worker pass an action error on as a FunctionClauseError that
-    # carries no detail), so the direct call raises the named refusal too.
+    # The refusal fails closed by raising, so the direct call raises the
+    # named refusal (the worker path is covered by failed_closed!/1).
     refused =
       raised(fn ->
         Outreach.record_receipt(
@@ -501,7 +508,11 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     delivery = delivery_of!(ctx, approval)
     capture_hook!(:before_capture, fn _op -> Clock.freeze(window_end()) end)
 
-    assert raised(fn -> deliver!() end) =~ "prototype_outside_window"
+    # The worker fails closed (its error boundary sanitizes the Ash error);
+    # the capture boundary names the code on a direct record.
+    failed_closed!(fn -> deliver!() end)
+    no_capture!(ctx, delivery)
+    assert capture_refusal(ctx, delivery) =~ "prototype_outside_window"
     no_capture!(ctx, delivery)
   end
 

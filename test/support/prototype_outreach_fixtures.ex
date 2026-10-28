@@ -168,6 +168,60 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   end
 
   @doc """
+  Runs `drain` (an inline delivery drain) that must fail closed. The worker
+  error boundary (`SdrAgent.Workers.ErrorBoundary`) turns an Ash error into
+  a sanitized job error, so a refused capture either raises a non-Ash
+  failure or drains with no success and at least one failure.
+  """
+  def failed_closed!(drain) do
+    outcome =
+      try do
+        {:returned, drain.()}
+      rescue
+        _error -> :raised
+      end
+
+    case outcome do
+      :raised ->
+        :ok
+
+      {:returned, %{success: 0} = counts} ->
+        assert Map.get(counts, :failure, 0) + Map.get(counts, :discard, 0) > 0,
+               "the delivery did not fail: #{inspect(counts)}"
+
+      other ->
+        flunk("the delivery did not fail closed: #{inspect(other)}")
+    end
+  end
+
+  @doc """
+  The refusal text of a direct `captured` receipt record for `delivery`, as
+  the delivery worker (DLV), with its stored operation fields: the full
+  inspection of the raised or returned error, or `"recorded"` when the
+  receipt was recorded.
+  """
+  def capture_refusal(ctx, delivery) do
+    operation = OutreachFixtures.outreach!(ctx, delivery)
+
+    attrs = %{
+      delivery_operation_id: operation.id,
+      idempotency_key: operation.idempotency_key,
+      kind: :captured,
+      provider: :capture,
+      provider_message_id:
+        SdrAgent.Outreach.Delivery.CaptureAdapter.provider_message_id(operation.idempotency_key),
+      rendered_sha256: operation.rendered_sha256
+    }
+
+    case Outreach.record_receipt(attrs, actor: Actor.system(:delivery_worker, ctx.tenant.id)) do
+      {:ok, _receipt} -> "recorded"
+      {:error, error} -> inspect(error, limit: :infinity, printable_limit: :infinity)
+    end
+  rescue
+    error -> inspect(error, limit: :infinity, printable_limit: :infinity)
+  end
+
+  @doc """
   A private scratch root owned by the calling test: a directory created
   exclusively (`File.mkdir/1`, mode 0700) under the system temp dir, named
   `<prefix>-<128 random bits>`. An existing path is never adopted (the
