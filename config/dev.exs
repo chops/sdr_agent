@@ -94,6 +94,11 @@ config :swoosh, :api_client, false
 # authorized only for the seeder in :dev/:test; absent elsewhere = refused).
 config :sdr_agent, seeding_allowed?: true
 
+# D-237 (ADR-0005 D-237 amendment item 2 "Development build only"): compiles
+# the prototype authority. Only this file and config/test.exs set it; the
+# production build holds the refusal stubs of SdrAgent.Prototype only.
+config :sdr_agent, prototype_authority_compiled: true
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_dev",

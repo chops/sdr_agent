@@ -23,6 +23,15 @@ defmodule SdrAgent.Prototype.ProdNoPathTest do
     assert Application.get_env(:sdr_agent, @flag) == true
   end
 
+  test "only config/test.exs sets the test-seam flag" do
+    seams = "prototype_test_seams: true"
+    assert "config/test.exs" |> File.read!() |> String.contains?(seams)
+
+    for file <- ~w(config/config.exs config/dev.exs config/prod.exs config/runtime.exs) do
+      refute file |> File.read!() |> String.contains?(seams), "#{file} sets the test-seam flag"
+    end
+  end
+
   defp with_env(vars, fun) do
     previous = Map.new(vars, fn {k, _} -> {k, System.get_env(k)} end)
 
