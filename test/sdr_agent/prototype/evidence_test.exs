@@ -52,7 +52,7 @@ defmodule SdrAgent.Prototype.EvidenceTest do
              }
     end
 
-    test "the account: name, domain and the first company-site final URL; no size, industry or geography" do
+    test "the account: name, domain and the first retained company-site final URL; no size, industry or geography" do
       row =
         F.company(1)
         |> Map.update!("sources", fn [team, about] ->
@@ -77,6 +77,49 @@ defmodule SdrAgent.Prototype.EvidenceTest do
                contact_classification: :unverified,
                contact_confidence: :high
              }
+    end
+  end
+
+  # Supplement 2 C1 (Codex 15e4e0f8): the website is the first company-site
+  # source, in dossier order, that the plan retains as a source. The plan
+  # level only; the import and scoped-read route is DossierRouteTest.
+  describe "website choice" do
+    test "a claim-only first company-site source is no candidate; the later retained one is" do
+      # F.company/1: s1 (team) carries only the contact claims; s2 (about) the facts.
+      plan = plan!([F.company(1)], "row-1")
+
+      assert plan.account.website_url == "https://www.acme1.test/about"
+      assert [%{source_id: "s2", final_url: "https://www.acme1.test/about"}] = plan.sources
+    end
+
+    test "the first retained company-site source in dossier order wins" do
+      both = F.put(F.company(1), ["facts", 2, "source_id"], "s1")
+      reversed = Map.update!(both, "sources", &Enum.reverse/1)
+
+      assert plan!([both], "row-1").account.website_url == "https://acme1.test/team"
+      assert plan!([reversed], "row-1").account.website_url == "https://www.acme1.test/about"
+    end
+
+    test "a retained third-party source listed first is never a candidate" do
+      row =
+        F.company(1)
+        |> Map.update!(
+          "sources",
+          &[F.source("s3", "https://news.test/acme1", "third_party") | &1]
+        )
+        |> F.put(["facts", 2, "source_id"], "s3")
+
+      plan = plan!([row], "row-1")
+
+      assert Enum.map(plan.sources, &{&1.source_id, &1.source_type}) ==
+               [{"s3", "third_party"}, {"s2", "company_site"}]
+
+      assert plan.account.website_url == "https://www.acme1.test/about"
+    end
+
+    test "verified excerpts only off the company site: :insufficient_source, never a nil website" do
+      row = F.put(F.company(1), ["sources", 1, "source_type"], "third_party")
+      assert plan([row], "row-1", & &1) == {:error, {"companies[0]", :insufficient_source}}
     end
   end
 

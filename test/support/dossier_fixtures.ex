@@ -412,4 +412,68 @@ defmodule SdrAgent.DossierFixtures do
       _raw -> seed_contents()["offering_profile.json"]
     end
   end
+
+  @doc """
+  The `SdrAgent.Prototype.SeedDir.read/2` output for `contents` (name =>
+  decoded map), built without the parser so seed-write tests reach the seed
+  actions directly.
+  """
+  def seed_read(contents \\ seed_contents()) do
+    bytes = Map.new(contents, fn {name, doc} -> {name, encode(doc)} end)
+    provenance = provenance(bytes, contents["offering_profile.json"])
+    provenance_bytes = encode(provenance)
+
+    %{
+      offering_profile: contents["offering_profile.json"],
+      writing_guide: contents["writing_guide.json"],
+      campaign: contents["campaign.json"],
+      provenance: provenance,
+      provenance_bytes: provenance_bytes,
+      sha256: %{
+        offering_profile: sha256(bytes["offering_profile.json"]),
+        writing_guide: sha256(bytes["writing_guide.json"]),
+        campaign: sha256(bytes["campaign.json"]),
+        provenance: sha256(provenance_bytes)
+      }
+    }
+  end
+
+  @doc """
+  The import rows of `row_ids` through the real route (supplement 2 §1):
+  the encoded dossier and manifest bytes → `SdrAgent.Prototype.DossierParser.parse/1`
+  and `SdrAgent.Prototype.SpotcheckManifest.parse/3` →
+  `SdrAgent.Prototype.DossierImport.prepare/5`. Returns `{:ok, rows}` or
+  the first refusal as is; no plan is built by hand.
+  """
+  def route_rows(companies, row_ids) do
+    dossier = dossier(companies)
+    bytes = encode(dossier)
+    sha = sha256(bytes)
+    manifest_bytes = encode(manifest({dossier, sha}))
+
+    with {:ok, parsed} <- SdrAgent.Prototype.DossierParser.parse(bytes),
+         {:ok, parsed_manifest} <-
+           SdrAgent.Prototype.SpotcheckManifest.parse(manifest_bytes, parsed, sha) do
+      SdrAgent.Prototype.DossierImport.prepare(
+        parsed,
+        sha,
+        parsed_manifest,
+        row_ids,
+        scratch_dir!()
+      )
+    end
+  end
+
+  @doc "`route_rows/2`, asserting success."
+  def route_rows!(companies, row_ids) do
+    result = route_rows(companies, row_ids)
+
+    ExUnit.Assertions.assert(
+      match?({:ok, [_ | _]}, result),
+      "the import route returned #{inspect(result)}"
+    )
+
+    {:ok, rows} = result
+    rows
+  end
 end
