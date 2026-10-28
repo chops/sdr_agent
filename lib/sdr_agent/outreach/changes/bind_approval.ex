@@ -11,6 +11,10 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
       approval"), the live resolved prototype operator whose `approver_id`
       (set by the scoped `ActorUser`) is the binding's anchor, an active
       `agent_operator` user of the operator's tenant;
+    * a prototype operator approves only inside the compiled funding
+      window `[starts_at, expires_at)` (`SdrAgent.Prototype.funding_entry/0`)
+      at the decision instant, otherwise `prototype_outside_window`; the
+      human path has no window;
     * the draft is `pending_review` and its *current* revision is the
       `draft_revision_id` argument with exactly the `content_sha256` (hex)
       argument — otherwise the verdict is stale and refused;
@@ -76,8 +80,8 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     arg = &Ash.Changeset.get_argument(changeset, &1)
 
     cond do
-      not active_approver?(changeset, actor) ->
-        {:approver_id, "must be an active operator"}
+      refusal = approver_refusal(changeset, actor) ->
+        refusal
 
       is_nil(draft) ->
         {:draft_id, "does not exist"}
@@ -96,22 +100,38 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
     end
   end
 
-  # A human approver is an active user (unchanged); a prototype operator is
-  # re-resolved live and needs the binding's active anchor as `approver_id`.
-  defp active_approver?(_changeset, %{status: :active}), do: true
+  @inactive {:approver_id, "must be an active operator"}
+
+  # A human approver is an active user (unchanged). A prototype operator is
+  # re-resolved live, needs the binding's active anchor as `approver_id`, and
+  # approves only inside the funding window (start inclusive, end exclusive)
+  # at the decision instant under the draft lock; the human path has no
+  # window. Only a build with the prototype authority has an operator clause.
+  defp approver_refusal(_changeset, %{status: :active}), do: nil
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
-    defp active_approver?(changeset, %SdrAgent.Actor{type: :prototype_operator} = actor) do
+    @outside_window {:approver_id,
+                     "prototype_outside_window: delegated approval is outside the funding window"}
+
+    defp approver_refusal(changeset, %SdrAgent.Actor{type: :prototype_operator} = actor) do
+      cond do
+        not active_operator?(changeset, actor) -> @inactive
+        outside_window?() -> @outside_window
+        true -> nil
+      end
+    end
+  end
+
+  defp approver_refusal(_changeset, _actor), do: @inactive
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp active_operator?(changeset, actor) do
       anchor_id = Ash.Changeset.get_attribute(changeset, :approver_id)
 
       is_binary(anchor_id) and SdrAgent.Prototype.operator?(actor) and
         binding_anchor?(anchor_id) and active_anchor?(anchor_id, actor.tenant_id)
     end
-  end
 
-  defp active_approver?(_changeset, _actor), do: false
-
-  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp binding_anchor?(anchor_id),
       do: match?({:ok, %{operator_user_id: ^anchor_id}}, SdrAgent.Prototype.binding())
 
@@ -122,6 +142,17 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
         |> Ash.read_one!(authorize?: false)
 
       match?(%{status: :active, role: :agent_operator}, anchor)
+    end
+
+    defp outside_window? do
+      case SdrAgent.Prototype.funding_entry() do
+        {:ok, %{starts_at: %DateTime{} = starts_at, expires_at: %DateTime{} = expires_at}} ->
+          now = SdrAgent.Clock.utc_now()
+          DateTime.compare(now, starts_at) == :lt or DateTime.compare(now, expires_at) != :lt
+
+        _no_window ->
+          true
+      end
     end
   end
 
