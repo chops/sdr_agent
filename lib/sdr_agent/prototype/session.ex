@@ -19,8 +19,9 @@ defmodule SdrAgent.Prototype.Session do
   code of `SdrAgent.Prototype.SafeLog.reasons(:setup)`; `refuse/1` prints
   that code through `SafeLog.say/2` and exits with status 2.
 
-  RED stage (D-237 S1): `oban_insert_only_opts/0` is the contract; `enter/1`
-  returns `{:error, :not_implemented}`.
+  Stage (D-237 S1 G): `enter/1` runs the boot check, then the session
+  entry, in that order; the insert-only Oban of `enqueue?: true` is not yet
+  started here (the enqueuing commands come with their own increment).
   """
 
   @doc "The insert-only Oban options of an enqueuing task (ruling 1)."
@@ -31,9 +32,37 @@ defmodule SdrAgent.Prototype.Session do
 
   @doc "Enters a task process; see the moduledoc."
   @spec enter(keyword()) :: {:ok, map()} | {:error, atom()}
-  def enter(_opts), do: red({:error, :not_implemented})
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    def enter(opts) when is_list(opts) do
+      with :ok <- boot(),
+           {:ok, agent} <- agent(Keyword.get(opts, :agent)),
+           {:ok, correlation} <- correlation(Keyword.get(opts, :session_correlation)),
+           {:ok, delegation_id} <- SdrAgent.Prototype.enter_session(agent, correlation),
+           {:ok, actor} <- SdrAgent.Prototype.operator_actor(delegation_id),
+           {:ok, binding} <- SdrAgent.Prototype.binding() do
+        {:ok, %{actor: actor, delegation_id: delegation_id, binding: binding}}
+      end
+    end
 
-  # RED stub result, typed dynamic() so success clauses of callers compile
-  # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+    defp agent("claude_code"), do: {:ok, :claude_code}
+    defp agent("codex_cli"), do: {:ok, :codex_cli}
+    defp agent(_other), do: {:error, :invalid_agent}
+
+    defp correlation(value) when is_binary(value) and value != "", do: {:ok, value}
+    defp correlation(_unset), do: {:error, :session_unset}
+  else
+    # No prototype authority in this build: the boot check runs, and the
+    # entry then refuses.
+    def enter(opts) when is_list(opts) do
+      with :ok <- boot(), do: {:error, :not_prototype_runtime}
+    end
+  end
+
+  # The boot check first, before any other read (IF-2 task kind); its refusal
+  # is the fixed boot code.
+  defp boot do
+    SdrAgent.Prototype.BootCheck.verify!()
+  rescue
+    error in SdrAgent.Prototype.BootCheck.Refusal -> {:error, error.code}
+  end
 end

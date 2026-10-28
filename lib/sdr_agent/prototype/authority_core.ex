@@ -164,17 +164,55 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    # The runtime in effect. A test-seam build reads the calling process only
-    # (`SdrAgent.Prototype.Authority.TestSeam`); no global lookup. Any other
-    # build keeps its RED declaration until BootCheck fixes the VM runtime
-    # (increment G): ordinary, typed dynamic through `red/1`, never written.
-    if @test_seams do
-      @runtime_key {SdrAgent.Prototype, :runtime}
+    @runtime_key {SdrAgent.Prototype, :runtime}
 
+    # The fixed runtime: nil (unfixed), :ordinary or {:prototype, snapshot}.
+    # A test-seam build reads the calling process (then its $callers) through
+    # `SdrAgent.Prototype.Authority.TestSeam`; any other build reads the VM
+    # value that `SdrAgent.Prototype.BootCheck.verify!/1` fixed once.
+    if @test_seams do
       defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
+      defp store(:ordinary), do: SdrAgent.Prototype.Authority.TestSeam.leave_runtime()
+
+      defp store({:prototype, snapshot}),
+        do: SdrAgent.Prototype.Authority.TestSeam.enter_runtime(snapshot)
+
+      defp serial(fun), do: fun.()
     else
-      defp current, do: red(:ordinary)
+      defp current, do: :persistent_term.get(@runtime_key, nil)
+
+      defp store(fixed) do
+        :persistent_term.put(@runtime_key, fixed)
+        :ok
+      end
+
+      # persistent_term is not compare-and-set: the first fix is serialized on
+      # one VM-local lock (Codex 23b4603a G1).
+      # A fixed resource id, a per-process requester (Codex 026058ec); the
+      # read, compare and write all run inside; a failed lock refuses.
+      defp serial(fun) do
+        case :global.trans({{SdrAgent.Prototype.BootCheck, :runtime_fix}, self()}, fun, [node()]) do
+          :aborted -> {:error, :binding_not_exact}
+          result -> result
+        end
+      end
     end
+
+    @doc """
+    The write-once runtime transition (G1, Codex 23b4603a), for
+    `SdrAgent.Prototype.BootCheck.verify!/1` only: unfixed takes the checked
+    result; the identical fixed result is idempotent; any other transition
+    (ordinary → prototype, prototype → another prototype, prototype →
+    ordinary) is `{:error, :binding_not_exact}` and changes nothing.
+    """
+    @spec fix_runtime({:ok, :ordinary | {:prototype, Binding.t()}}) ::
+            :ok | {:error, :binding_not_exact}
+    def fix_runtime({:ok, wanted}) when wanted == :ordinary or elem(wanted, 0) == :prototype,
+      do: serial(fn -> transition(current(), wanted) end)
+
+    defp transition(nil, wanted), do: store(wanted)
+    defp transition(same, same), do: :ok
+    defp transition(_fixed, _other), do: {:error, :binding_not_exact}
 
     @doc """
     Creates or replays this agent session's delegation (IF-3), from the boot
@@ -792,6 +830,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         (`database`, `database_oid`, `system_identifier`) or makes its read
         raise (`:raise`), for the calling process; by default the test
         database reads as `sdr_agent_prototype`.
+      - `put_boot_switch/1` sets the calling process's boot-switch input:
+        the switch `SdrAgent.Prototype.BootCheck.verify!/0` reads in a test
+        build, independent of the fixed runtime (Codex 026058ec); an
+        explicit `verify!(switch: ...)` takes precedence. Process-local
+        only (never read from `$callers`).
       - `leave_runtime/0` returns the process to ordinary runtime;
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
@@ -810,6 +853,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
       @runtime_key {SdrAgent.Prototype, :runtime}
       @identity_key {SdrAgent.Prototype, :live_identity}
+      @boot_switch_key {SdrAgent.Prototype, :boot_switch}
 
       @doc "Enters prototype runtime with `snapshot` for the calling process."
       @spec enter_runtime(Binding.t()) :: :ok
@@ -836,14 +880,26 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         :ok
       end
 
+      @doc "Sets the calling process's boot-switch input (`:off` or a switch map)."
+      @spec put_boot_switch(term()) :: :ok
+      def put_boot_switch(switch) do
+        Process.put(@boot_switch_key, switch)
+        :ok
+      end
+
+      @doc "The calling process's own boot-switch input, or nil (process-local)."
+      @spec boot_switch() :: term()
+      def boot_switch, do: Process.get(@boot_switch_key)
+
       @doc """
-      Removes the seam's two keys (runtime and live identity) from the
-      calling process only; no caller or other process is touched.
+      Removes the seam's keys (runtime, live identity and boot switch) from
+      the calling process only; no caller or other process is touched.
       """
       @spec clear() :: :ok
       def clear do
         Process.delete(@runtime_key)
         Process.delete(@identity_key)
+        Process.delete(@boot_switch_key)
         :ok
       end
 
