@@ -9,7 +9,8 @@ defmodule SdrAgent.Prototype.SafeLog do
   - `attach/0` installs the primary logger filter
     `:sdr_prototype_content_free` (after `ExceptionFilter`) and the file
     sink. It is the first statement of every `sdr.prototype.*` task and runs
-    in `Application.start/2` when the switch is set.
+    in `Application.start/2` when the switch is set. `attach(file: nil)`
+    installs the filter alone; `detach/0` removes it (tests).
   - The filter keeps only events of a code in `codes/0` whose refs have
     exactly that code's keys and value types, rebuilt from the code and the
     validated refs with the fixed message `"prototype: <code>"`. Every
@@ -36,13 +37,15 @@ defmodule SdrAgent.Prototype.SafeLog do
   otherwise, and a malformed one at `:warning`. `say/2` prints a malformed
   one as the same fixed line, `"prototype: log content withheld"` (ruling 3).
 
-  Staged GREEN (D-237 S1b, Codex b069e93f): `filter/2`, `event/2` and
-  `say/2` are implemented; `attach/0,1` and `detach/0` still return
-  `{:error, :not_implemented}`.
+  Staged GREEN (D-237 S1b, Codex b069e93f): `filter/2`, `event/2`,
+  `say/2`, `attach(file: nil)` and `detach/0` are implemented. The file
+  sink (S-d) is held: `attach/0` and every other `attach/1` form refuse
+  `{:error, :not_implemented}` without changing the logger.
   """
 
   require Logger
 
+  @filter_id :sdr_prototype_content_free
   @withheld "prototype: log content withheld"
   @levels [:emergency, :alert, :critical, :error, :warning, :notice, :info, :debug]
   @max_file 1_024
@@ -356,19 +359,63 @@ defmodule SdrAgent.Prototype.SafeLog do
   defp lower_hex?(part),
     do: part |> :binary.bin_to_list() |> Enum.all?(&(&1 in ?0..?9 or &1 in ?a..?f))
 
-  @doc "Installs the content-free primary filter and the file sink."
-  @spec attach() :: :ok | {:error, :not_implemented}
+  @doc """
+  Installs the content-free primary filter and the file sink. Held (S-d,
+  the file sink, Codex b069e93f): it refuses `{:error, :not_implemented}`
+  and changes nothing.
+  """
+  @spec attach() :: :ok | {:error, atom()}
   def attach, do: red({:error, :not_implemented})
 
-  @doc "As `attach/0`; `file:` names the sink file (`nil`: no file sink)."
-  @spec attach(keyword()) :: :ok | {:error, :not_implemented}
-  def attach(_opts), do: red({:error, :not_implemented})
+  @doc """
+  `attach(file: nil)` installs the primary filter `:sdr_prototype_content_free`
+  with no file sink, with `SdrAgent.Logger.ExceptionFilter` before it.
+  `:logger` applies primary filters in list order and puts a newly added
+  one first, so SafeLog's filter is added (unless already installed
+  exactly) and then ExceptionFilter is re-attached. Idempotent: each is
+  installed once, and SafeLog's filter is never removed on the way, so a
+  repeated attach leaves no unfiltered window. A failure returns
+  `{:error, :attach_failed}` and leaves SafeLog's filter in place if it was
+  installed (closed). Any other option list refuses
+  `{:error, :not_implemented}` without changing the logger (S-d is held).
+  """
+  @spec attach(keyword()) :: :ok | {:error, atom()}
+  def attach(file: nil) do
+    with :ok <- ensure_filter(),
+         :ok <- SdrAgent.Logger.ExceptionFilter.attach() do
+      :ok
+    else
+      _failure -> {:error, :attach_failed}
+    end
+  end
 
-  @doc "Removes the filter and the file sink (tests only)."
-  @spec detach() :: :ok | {:error, :not_implemented}
-  def detach, do: red({:error, :not_implemented})
+  def attach(_opts), do: {:error, :not_implemented}
 
-  # RED stub result, typed dynamic() so success clauses of callers compile
-  # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
+  defp ensure_filter do
+    ours = {&__MODULE__.filter/2, []}
+
+    case List.keyfind(:logger.get_primary_config().filters, @filter_id, 0) do
+      nil -> :logger.add_primary_filter(@filter_id, ours)
+      {@filter_id, ^ours} -> :ok
+      {@filter_id, _other} -> {:error, :foreign_filter}
+    end
+  end
+
+  @doc """
+  Removes SafeLog's primary filter alone (tests): `SdrAgent.Logger.ExceptionFilter`
+  and every handler are left as they are. `:ok` also when it is not installed.
+  """
+  @spec detach() :: :ok | {:error, term()}
+  def detach do
+    case :logger.remove_primary_filter(@filter_id) do
+      :ok -> :ok
+      {:error, {:not_found, @filter_id}} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Held stub result of attach/0 (S-d), typed dynamic() so callers'
+  # success clauses compile against it (Elixir 1.20 infers literal
+  # returns); read-only, nothing sets the key.
   defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end
