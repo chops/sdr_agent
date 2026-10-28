@@ -98,8 +98,9 @@ defmodule SdrAgent.Prototype.FacadeTest do
 
     test "assurance/0 is the IF-5 block" do
       fx = bound!()
-      {:ok, entry} = Prototype.policy_entry()
-      digest = Base.encode16(SdrAgent.Audit.Canonical.sha256(entry), case: :lower)
+      # The digest of the literal policy entry, independent of policy_entry/0,
+      # so this case never stops on another function's result.
+      digest = Base.encode16(SdrAgent.Audit.Canonical.sha256(@policy_entry), case: :lower)
 
       assert Prototype.assurance() ==
                {:ok,
