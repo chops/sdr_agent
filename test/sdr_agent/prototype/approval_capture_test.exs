@@ -19,8 +19,9 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
   - Non-HTML carriers: receipt event, approval event and the signed export
     payload carry the block; the captured message bytes never do.
   - The window `[2026-10-28T02:38:32Z, 2026-11-07T07:00:00Z)`: the
-    inclusive start and the EXCLUSIVE end for delegated approval and
-    capture; revocation still works after the end.
+    inclusive start and the EXCLUSIVE end for delegated approval (at the
+    raw `Approval :approve`) and capture; after the end the human path is
+    unchanged: `:revoke` stays human-only and a human revokes and approves.
 
   Synthetic `.test` data only.
   """
@@ -201,6 +202,26 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     assert events_of(ctx.tenant, "outreach.approval.granted") == []
   end
 
+  # A documented limit of the singleton schema (tenants are check-constrained
+  # to one row, so no initialized foreign tenant exists): the reachable
+  # row control is a draft id that is not in the operator's tenant. Negative
+  # synthetic tampering, not a domain-write success path.
+  test "a draft id outside the operator's tenant is refused as nonexistent, nothing written (control)" do
+    ctx = prototype_drafted!()
+    {_draft, input} = reviewed(ctx, ctx.draft)
+    absent = %{id: Ecto.UUID.generate()}
+
+    result = Outreach.approve(absent, input, actor: ctx.operator)
+
+    assert match?({:error, %Ash.Error.Invalid{}}, result),
+           "an approval for an absent draft: #{inspect(result, limit: 5)}"
+
+    assert inspect(result) =~ "does not exist"
+    assert approvals!(ctx, ctx.draft) == []
+    assert draft!(ctx, ctx.draft).status == :pending_review
+    assert events_of(ctx.tenant, "outreach.approval.granted") == []
+  end
+
   # ------------------------------------------------------------------ capture
 
   test "a NEW captured receipt carries the block; a duplicate capture gives one receipt" do
@@ -332,28 +353,70 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
 
   # ------------------------------------------------------------------ the window
 
-  test "delegated approval: the window start is inclusive and its end exclusive; revoke works after it" do
-    ctx = prototype_drafted!()
-    us = fn at, n -> DateTime.add(at, n, :microsecond) end
+  # The window is the compiled funding entry's [starts_at, expires_at),
+  # applied at the operator's raw Approval :approve (Codex S4 B1 bounded PASS
+  # must-fix); the human path and the human-only :revoke are unchanged.
 
-    Clock.freeze(us.(window_start(), -1))
-    assert {:error, error} = operator_approve(ctx, ctx.draft)
-    assert inspect(error) =~ "prototype_outside_window"
+  defp funding! do
+    result = Prototype.funding_entry()
+
+    assert match?({:ok, %{starts_at: %DateTime{}, expires_at: %DateTime{}}}, result),
+           "no funding entry: #{inspect(result)}"
+
+    {:ok, entry} = result
+    entry
+  end
+
+  defp refused_outside_window!(ctx, at) do
+    Clock.freeze(at)
+    result = operator_approve(ctx, ctx.draft)
+
+    assert match?({:error, %Ash.Error.Invalid{}}, result),
+           "the operator approved at #{DateTime.to_iso8601(at)}: #{inspect(result, limit: 5)}"
+
+    assert inspect(result) =~ "prototype_outside_window"
+    assert approvals!(ctx, ctx.draft) == []
+    assert draft!(ctx, ctx.draft).status == :pending_review
+    assert events_of(ctx.tenant, "outreach.approval.granted") == []
+  end
+
+  test "the operator's raw :approve is refused before the window start and from its exclusive end, nothing written" do
+    ctx = prototype_drafted!()
+    funding = funding!()
+    assert {funding.starts_at, funding.expires_at} == {window_start(), window_end()}
+
+    refused_outside_window!(ctx, DateTime.add(funding.starts_at, -1, :microsecond))
+    refused_outside_window!(ctx, funding.expires_at)
+    refused_outside_window!(ctx, DateTime.add(funding.expires_at, 3600, :second))
+  end
+
+  test "the operator approves at the inclusive window start and one microsecond before its end (control)" do
+    ctx = prototype_drafted!()
 
     Clock.freeze(window_start())
     assert {:ok, first} = operator_approve(ctx, ctx.draft)
-    assert {:ok, _} = Outreach.revoke(first, actor: ctx.operator)
+    assert {:ok, _} = Outreach.revoke(first, actor: ctx.admin)
 
-    Clock.freeze(window_end())
-    assert {:error, error} = operator_approve(ctx, ctx.draft)
-    assert inspect(error) =~ "prototype_outside_window"
-
-    Clock.freeze(us.(window_end(), -1))
+    Clock.freeze(DateTime.add(window_end(), -1, :microsecond))
     assert {:ok, last} = operator_approve(ctx, ctx.draft)
+    assert last.status == :granted
+  end
 
+  test "after the window the human path is unchanged: :revoke stays human-only, a human revokes and approves (control)" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     Clock.freeze(DateTime.add(window_end(), 3600, :second))
-    assert {:ok, revoked} = Outreach.revoke(last, actor: ctx.operator)
+
+    operator_revoke = Outreach.revoke(approval, actor: ctx.operator)
+
+    assert match?({:error, %Ash.Error.Forbidden{}}, operator_revoke),
+           "the operator revoked: #{inspect(operator_revoke, limit: 5)}"
+
+    assert {:ok, revoked} = Outreach.revoke(approval, actor: ctx.admin)
     assert revoked.status == :revoked
+
+    {draft, input} = reviewed(ctx, ctx.draft)
+    assert {:ok, %{status: :granted}} = Outreach.approve(draft, input, actor: ctx.admin)
   end
 
   test "capture: at the exclusive window end no captured receipt is recorded" do
