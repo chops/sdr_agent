@@ -179,6 +179,23 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
      [:unsupported_scope]},
     {:module_create, [{@attach, @attach <> "Module.create(Helper, quote(do: :ok), __ENV__)\n"}],
      [:unsupported_scope]},
+    # Codex r2 review R1b: the same forms reached by a resolved remote call.
+    {:module_create_via_alias,
+     [
+       {@manifest_alias, @manifest_alias <> "alias Module, as: Builder\n"},
+       {@attach, @attach <> "_ = Builder.create(Helper, quote(do: :ok), __ENV__)\n"}
+     ], [:unsupported_scope]},
+    {:module_create_fully_qualified,
+     [{@attach, @attach <> "_ = Elixir.Module.create(Helper, quote(do: :ok), __ENV__)\n"}],
+     [:unsupported_scope]},
+    {:kernel_defmodule_remote,
+     [{@last_helper, @last_helper <> "Kernel.defmodule Helper do\n@moduledoc false\nend\n"}],
+     [:unsupported_scope]},
+    {:kernel_use_remote, [{@manifest_alias, @manifest_alias <> "Kernel.use(GenServer)\n"}],
+     [:unsupported_scope]},
+    {:special_forms_alias_remote,
+     [{@attach, @attach <> "Kernel.SpecialForms.alias(String, as: Log)\n"}],
+     [:unsupported_scope]},
     {:local_macro, [{@last_helper, @last_helper <> "defmacrop quiet, do: :ok\n"}],
      [:unsupported_scope]},
     {:other_use, [{"use Mix.Task\n", "use Mix.Task\nuse GenServer\n"}], [:unsupported_scope]},

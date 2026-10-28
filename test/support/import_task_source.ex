@@ -17,8 +17,17 @@ defmodule SdrAgent.ImportTaskSource do
     `Module.create`, no `defmacro`/`defmacrop`, no `use` other than
     `use Mix.Task`, no `@before_compile`, `@after_compile`,
     `@after_verify`, `@on_definition` or `@on_load`, no `require` with
-    options (`require ..., as:` is an alias), and exactly one `def run/1`
-    clause, a top-level statement of the module;
+    options (`require ..., as:` is an alias), and at most one `def run/1`
+    clause, a top-level statement of the module (none is the closed
+    `:no_run`, not a refusal);
+  - those definition, scope and code-generation forms are supported only in
+    their literal local syntax: after alias resolution, no call to
+    `Module.create`, to `Kernel.def`, `defp`, `defmacro`, `defmacrop`,
+    `defmodule`, `defprotocol`, `defimpl`, `defdelegate`, `use` or `@`, or to
+    any `Kernel.SpecialForms` function (so `alias Module, as: Builder` then
+    `Builder.create(...)`, `Elixir.Module.create(...)`,
+    `Kernel.defmodule ...` and `Kernel.SpecialForms.alias(...)` are
+    refused; Codex task-harness r2 review R1b);
   - aliases (`alias A.B`, `alias A.B, as: C`, `alias A.{B, C}`) are
     top-level statements of the module only, all before any statement
     other than `use`, `require`, `import`, `alias` or a literal
@@ -100,6 +109,18 @@ defmodule SdrAgent.ImportTaskSource do
   @dispatch [{Kernel, :apply}, {:erlang, :apply}, {Function, :capture}]
   @injection [:before_compile, :after_compile, :after_verify, :on_definition, :on_load]
   @nested [:defmodule, :defprotocol, :defimpl, :defmacro, :defmacrop]
+  @kernel_forms [
+    :def,
+    :defp,
+    :defmacro,
+    :defmacrop,
+    :defmodule,
+    :defprotocol,
+    :defimpl,
+    :defdelegate,
+    :use,
+    :@
+  ]
 
   # The roots of every Elixir module the rules name: an alias may not bind
   # one of these names (it would reinterpret a ruled call).
@@ -116,16 +137,17 @@ defmodule SdrAgent.ImportTaskSource do
     with {:ok, body} <- task_body(Code.string_to_quoted!(source)),
          statements = statements(body),
          :ok <- supported(body, statements),
-         {:ok, aliases} <- top_aliases(statements) do
-      body |> module_violations(statements, aliases) |> Enum.uniq() |> Enum.sort()
+         {:ok, aliases} <- top_aliases(statements),
+         calls = calls(body, aliases),
+         :ok <- no_remote_forms(calls) do
+      body |> module_violations(statements, aliases, calls) |> Enum.uniq() |> Enum.sort()
     else
       :none -> [:no_module]
       :unsupported -> [:unsupported_scope]
     end
   end
 
-  defp module_violations(body, statements, aliases) do
-    calls = calls(body, aliases)
+  defp module_violations(body, statements, aliases, calls) do
     run = run_body(statements)
     run_calls = if run, do: calls(run, aliases), else: []
 
@@ -200,7 +222,6 @@ defmodule SdrAgent.ImportTaskSource do
   end
 
   defp unsupported?({form, _, args}) when form in @nested and is_list(args), do: true
-  defp unsupported?({{:., _, [{:__aliases__, _, [:Module]}, :create]}, _, _args}), do: true
   defp unsupported?({:use, _, [{:__aliases__, _, [:Mix, :Task]}]}), do: false
   defp unsupported?({:use, _, args}) when is_list(args), do: true
   defp unsupported?({:require, _, [_module, _options | _]}), do: true
@@ -209,6 +230,16 @@ defmodule SdrAgent.ImportTaskSource do
     do: true
 
   defp unsupported?(_node), do: false
+
+  # After alias resolution (Codex R1b): a remote definition, scope or
+  # code-generation form is refused, whatever name reached it.
+  defp no_remote_forms(calls),
+    do: if(Enum.any?(calls, &remote_form?/1), do: :unsupported, else: :ok)
+
+  defp remote_form?({Module, :create, _args, _line}), do: true
+  defp remote_form?({Kernel, fun, _args, _line}), do: fun in @kernel_forms
+  defp remote_form?({Kernel.SpecialForms, _fun, _args, _line}), do: true
+  defp remote_form?(_call), do: false
 
   defp alias?({:alias, _, args}) when is_list(args), do: true
   defp alias?(_node), do: false
