@@ -267,6 +267,59 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
       refused!(SpotcheckManifest.artifact(wide_dir, ref), "artifact", :artifact_invalid)
     end
 
+    test "the basename grammar is enforced by artifact/2 itself (ruling R4)", ctx do
+      # A sibling artifact one level up, so a traversal would find real bytes.
+      outer = F.scratch_dir!()
+      inner = Path.join(outer, "inner")
+      File.mkdir!(inner)
+      File.chmod!(inner, 0o700)
+      up = F.artifact!(outer, "up.txt", ctx.bytes)
+      nested_dir = Path.join(ctx.dir, "sub")
+      File.mkdir!(nested_dir)
+      File.chmod!(nested_dir, 0o700)
+      F.write!(nested_dir, "s1-team.txt", ctx.bytes)
+
+      for file <- [
+            "../up.txt",
+            Path.join(outer, "up.txt"),
+            "sub/s1-team.txt",
+            "sub\\s1-team.txt",
+            ".s1-team.txt",
+            "S1-TEAM.txt",
+            "",
+            String.duplicate("a", 65)
+          ] do
+        refused!(
+          SpotcheckManifest.artifact(inner, %{"file" => file, "sha256" => up["sha256"]}),
+          "artifact",
+          :artifact_invalid
+        )
+
+        refused!(
+          SpotcheckManifest.artifact(ctx.dir, %{ctx.ref | "file" => file}),
+          "artifact",
+          :artifact_invalid
+        )
+      end
+    end
+
+    test "a symlinked artifacts root is refused (ruling R4)", ctx do
+      link = Path.join(F.scratch_dir!(), "root-link")
+      File.ln_s!(ctx.dir, link)
+      refused!(SpotcheckManifest.artifact(link, ctx.ref), "artifact", :artifact_invalid)
+    end
+
+    test "a malformed reference is refused, not raised", ctx do
+      for ref <- [
+            %{},
+            %{"file" => "s1-team.txt"},
+            %{"file" => 1, "sha256" => ctx.ref["sha256"]},
+            nil
+          ] do
+        refused!(SpotcheckManifest.artifact(ctx.dir, ref), "artifact", :artifact_invalid)
+      end
+    end
+
     test "a selected row whose claim names an invalid artifact is refused", ctx do
       row =
         F.put(F.company(1), ["contact", "evidence", "email", "artifact"], %{

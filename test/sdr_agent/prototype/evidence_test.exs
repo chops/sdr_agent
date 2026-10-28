@@ -1,7 +1,7 @@
 defmodule SdrAgent.Prototype.EvidenceTest do
   @moduledoc """
   IF-6 mapping and evidence partition of one eligible row
-  (`SdrAgent.Prototype.DossierParser.import_plan/3`; interfaces r6
+  (`SdrAgent.Prototype.DossierParser.import_plan/4`; interfaces r6
   "Mapping", "Tables", "Evidence"; plan r7 section 6 "Evidence"): only
   verified excerpts reach a source's content, one source per content, and
   inference, `why_fit` and unconfirmed facts go to the notes only; the
@@ -19,12 +19,12 @@ defmodule SdrAgent.Prototype.EvidenceTest do
     dossier = F.dossier(rows)
     sha = F.sha256(F.encode(dossier))
     manifest = F.parsed_manifest(edit.(F.manifest({dossier, sha})))
-    DossierParser.import_plan(dossier, manifest, row_id)
+    DossierParser.import_plan(dossier, manifest, row_id, F.scratch_dir!())
   end
 
   defp plan!(rows, row_id, edit \\ & &1) do
     result = plan(rows, row_id, edit)
-    assert match?({:ok, %{}}, result), "import_plan/3 returned #{inspect(result)}"
+    assert match?({:ok, %{}}, result), "import_plan/4 returned #{inspect(result)}"
     {:ok, plan} = result
     plan
   end
@@ -142,9 +142,11 @@ defmodule SdrAgent.Prototype.EvidenceTest do
              ]
 
       assert source.content ==
-               "[quote f1] Acme 1 has a team of 24 people.\n\n" <>
-                 "[fact f2] Our whole team works from Denver, Colorado."
+               "Acme 1 has a team of 24 people.\n\n" <>
+                 "Our whole team works from Denver, Colorado."
 
+      # R1: the bytes are the excerpts only; kind and fact id stay outside them.
+      refute source.content =~ ~r/\[(quote|fact) f\d/
       refute source.content =~ "freight brokers"
       refute source.content =~ "outbound help"
     end
@@ -187,7 +189,7 @@ defmodule SdrAgent.Prototype.EvidenceTest do
       plan = plan!([row], "row-1")
       by_id = Map.new(plan.sources, &{&1.source_id, &1})
 
-      assert by_id["s1"].content == "[fact f3] We build routing software for freight brokers."
+      assert by_id["s1"].content == "We build routing software for freight brokers."
       refute by_id["s2"].content =~ "freight brokers"
     end
   end

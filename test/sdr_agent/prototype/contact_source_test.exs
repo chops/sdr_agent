@@ -261,6 +261,97 @@ defmodule SdrAgent.Prototype.ContactSourceTest do
     end
   end
 
+  describe "any invalid flagged row refuses the input, whichever rows are selected (R2)" do
+    # row-1 is valid and selected; row-2 is flagged importable but fails.
+    defp refused_everywhere!(rows, edit, dir, expected) do
+      {dossier, manifest} = inputs(rows, edit)
+
+      assert DossierParser.select(dossier, manifest, ["row-1"], dir) == expected,
+             "select/4 picked row-1 past an invalid flagged row-2"
+
+      assert DossierParser.eligible_rows(dossier, manifest, dir) == expected,
+             "eligible_rows/3 listed rows past an invalid flagged row-2"
+
+      assert DossierParser.import_plan(dossier, manifest, "row-1", dir) == expected,
+             "import_plan/4 planned row-1 past an invalid flagged row-2"
+
+      assert DossierParser.eligibility(dossier, manifest, "row-1", dir) == expected,
+             "eligibility/4 passed row-1 past an invalid flagged row-2"
+    end
+
+    test "another flagged row without its person_address_linked mark" do
+      unmarked = edit_result("row-2", "claim:email", &Map.put(&1, "relation", nil))
+
+      refused_everywhere!(
+        [F.company(1), F.company(2)],
+        unmarked,
+        F.scratch_dir!(),
+        {:error, {"companies[1]", :link_unconfirmed}}
+      )
+    end
+
+    test "another flagged row missing its role result" do
+      missing = fn manifest ->
+        F.update(manifest, ["results"], fn results ->
+          Enum.reject(results, &(&1["row_id"] == "row-2" and &1["item"] == "claim:role"))
+        end)
+      end
+
+      refused_everywhere!(
+        [F.company(1), F.company(2)],
+        missing,
+        F.scratch_dir!(),
+        {:error, {"companies[1]", :role_unconfirmed}}
+      )
+    end
+
+    test "another flagged row that was never spot-checked" do
+      {dossier, _} = inputs([F.company(1), F.company(2)])
+      sha = F.sha256(F.encode(dossier))
+      only_row_1 = fn _manifest -> F.manifest({dossier, sha}, rows: ["row-1"]) end
+
+      refused_everywhere!(
+        [F.company(1), F.company(2)],
+        only_row_1,
+        F.scratch_dir!(),
+        {:error, {"companies[1]", :link_unconfirmed}}
+      )
+    end
+
+    test "another flagged row naming an invalid artifact" do
+      dir = F.scratch_dir!()
+      ref = F.artifact!(dir, "row-2-team.txt", "Riley Testperson: riley@acme2.test")
+      bad = %{ref | "sha256" => F.sha256("other bytes")}
+      row_2 = F.put(F.company(2), ["contact", "evidence", "email", "artifact"], bad)
+
+      refused_everywhere!(
+        [F.company(1), row_2],
+        & &1,
+        dir,
+        {:error, {"companies[1].contact.evidence.email.artifact", :artifact_invalid}}
+      )
+    end
+
+    test "an unflagged company-only row stays representable beside a valid selection" do
+      company_only =
+        F.company(2, %{
+          "importable" => false,
+          "skip_reason" => "no_named_person",
+          "contact" => nil
+        })
+
+      {dossier, manifest} = inputs([F.company(1), company_only])
+      dir = F.scratch_dir!()
+
+      assert match?(
+               {:ok, [%{"row_id" => "row-1"}]},
+               DossierParser.select(dossier, manifest, ["row-1"], dir)
+             )
+
+      assert DossierParser.eligible_rows(dossier, manifest, dir) == {:ok, ["row-1"]}
+    end
+  end
+
   describe "selection" do
     test "more than 3 rows, an unknown row or a repeated row is refused before writes" do
       rows = for i <- 1..4, do: F.company(i)

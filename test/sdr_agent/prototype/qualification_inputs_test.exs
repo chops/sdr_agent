@@ -52,6 +52,12 @@ defmodule SdrAgent.Prototype.QualificationInputsTest do
                {:error, {"companies[0].facts[0].stated_on", :future_date}}
     end
 
+    test "a positive offset across midnight: the check date is the local date, not UTC's" do
+      # 01:00 at +05:00 is still 2026-10-26 in UTC; the check date is the 27th.
+      early = edit_result("fact:f1", &Map.put(&1, "checked_at", "2026-10-27T01:00:00+05:00"))
+      assert match?({:ok, [_]}, select(dated(0, "2026-10-27"), early))
+    end
+
     test "a null stated_on is insufficient_source" do
       assert select(dated(0, nil)) == {:error, {"companies[0]", :insufficient_source}}
       assert select(dated(1, nil)) == {:error, {"companies[0]", :insufficient_source}}

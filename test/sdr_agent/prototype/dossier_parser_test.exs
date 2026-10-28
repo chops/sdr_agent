@@ -294,7 +294,22 @@ defmodule SdrAgent.Prototype.DossierParserTest do
             "https://intranet.local/team",
             "https://wiki.internal/team",
             "ftp://acme1.test/team",
-            "acme1.test/team"
+            "acme1.test/team",
+            # Ruling R3: an explicit default port, case and trailing-dot
+            # variants, single-label and encoded hosts, backslashes.
+            "https://acme1.test:443/team",
+            "https://acme1.test./team",
+            "https://LOCALHOST/team",
+            "https://Intranet.LOCAL/team",
+            "https://wiki.internal./team",
+            "https://intranet/team",
+            "https://acme%31.test/team",
+            "https://acme1.test\\@#{@marker}.test/team",
+            "https://svc.arpa/team",
+            "https://hidden.onion/team",
+            "https://name.alt/team",
+            "https://x.invalid/team",
+            "https://127.1/team"
           ] do
         refused!(
           parse(F.dossier([F.put(c(), ["sources", 0, "original_url"], url)])),
@@ -310,6 +325,25 @@ defmodule SdrAgent.Prototype.DossierParserTest do
         "companies[0].sources[1].final_url",
         :unsafe_url
       )
+    end
+
+    test "a company domain must be a lower-case public host (ruling R3)" do
+      for domain <-
+            ~w(Acme1.test acme1.test. localhost acme.local acme.internal acme1 192.0.2.1 acme_1.test) do
+        refused!(
+          parse(F.dossier([Map.put(c(), "domain", domain)])),
+          "companies[0].domain",
+          :format
+        )
+      end
+    end
+
+    test "the RFC 2606 test names are admitted only by the compile-time test build (source check)" do
+      # Not proof of the production build: the production-artifact test is.
+      source = File.read!("lib/sdr_agent/prototype/dossier_parser.ex")
+      assert source =~ "Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)"
+      assert source =~ ~r/if @test_seams do/
+      refute source =~ ~r/allow_reserved|System\.get_env|Application\.get_env/
     end
 
     test "a redirected source keeps distinct original and final URLs" do

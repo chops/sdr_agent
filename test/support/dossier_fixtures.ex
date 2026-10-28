@@ -233,12 +233,23 @@ defmodule SdrAgent.DossierFixtures do
   @doc "The lowercase sha256 hex of `bin`."
   def sha256(bin), do: :crypto.hash(:sha256, bin) |> Base.encode16(case: :lower)
 
-  @doc "A fresh, uniquely named scratch directory with `mode`."
+  @doc """
+  A fresh scratch directory with `mode`, owned by the calling test: its name
+  carries 128 random bits (unique across VMs), it is created exclusively
+  (`File.mkdir/1` refuses an existing path, so nothing residual is ever
+  adopted, chmod-ed or written), and only that created root is removed when
+  the test exits. Call it from the test process (a test or its `setup`).
+  """
   def scratch_dir!(mode \\ 0o700) do
-    dir =
-      Path.join(System.tmp_dir!(), "d237-s3-test-#{System.unique_integer([:positive])}")
+    name = "d237-s3-test-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    dir = Path.join(System.tmp_dir!(), name)
 
-    File.mkdir_p!(dir)
+    case File.mkdir(dir) do
+      :ok -> :ok
+      {:error, reason} -> raise "scratch root not created exclusively: #{inspect(reason)}"
+    end
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(dir) end)
     File.chmod!(dir, mode)
     dir
   end

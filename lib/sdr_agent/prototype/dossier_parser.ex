@@ -16,9 +16,22 @@ defmodule SdrAgent.Prototype.DossierParser do
     retained artifacts; `select/4` refuses a selection of more than 3 rows,
     an unknown or repeated row, or any row that is not eligible, before any
     write; `eligible_rows/3` lists the eligible rows (empty: "none qualify").
-  - `import_plan/3` maps one eligible row to the values the import writes:
+  - `import_plan/4` maps one eligible row to the values the import writes:
     the account, the person contact, the three claim records, the sources
-    with verified excerpts only, and the targeting notes.
+    with verified excerpts only (their content: the verbatim excerpts joined
+    by two LF bytes, no labels), and the targeting notes.
+  - Every public import entry (`eligibility/4`, `select/4`, `eligible_rows/3`,
+    `import_plan/4`) first validates EVERY flagged row against the manifest
+    and the artifacts: any flagged row failing the importable rule refuses
+    the input, whichever rows are selected (Codex S3 RED-1 ruling R2).
+  - Reserved hosts (ruling R3): https only; no userinfo, explicit port
+    (`:443` included), query, fragment, IP literal, single-label,
+    trailing-dot, upper-case, encoded or special-use host (`localhost`,
+    `.local`, `.internal`, `.invalid`, `.arpa`, `.onion`, `.alt`). The
+    RFC 2606 names (`.test`, `.example`, `example.com/.net/.org`) are
+    refused too, except in the hermetic test build
+    (`:claude_cli_test_seams`, compile time), where the synthetic fixtures
+    use them; no runtime flag or caller option admits them.
 
   Every refusal is `{:error, {path, rule}}` with a fixed schema path with
   indices (for example `companies[0].contact.evidence.email`) and a rule
@@ -51,8 +64,9 @@ defmodule SdrAgent.Prototype.DossierParser do
   def eligible_rows(_dossier, _manifest, _artifacts_dir), do: red({:error, :not_implemented})
 
   @doc "The import values of one eligible row; see the moduledoc."
-  @spec import_plan(map(), map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def import_plan(_dossier, _manifest, _row_id), do: red({:error, :not_implemented})
+  @spec import_plan(map(), map(), String.t(), Path.t()) :: {:ok, map()} | {:error, term()}
+  def import_plan(_dossier, _manifest, _row_id, _artifacts_dir),
+    do: red({:error, :not_implemented})
 
   # RED stub result, typed dynamic() so success clauses of callers compile
   # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
