@@ -34,6 +34,8 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
 
   defp results(manifest, fun), do: Map.update!(manifest, "results", fun)
 
+  defp raw(bin, ctx), do: SpotcheckManifest.parse(bin, ctx.dossier, ctx.sha)
+
   defp index(manifest, row_id, item),
     do: Enum.find_index(manifest["results"], &(&1["row_id"] == row_id and &1["item"] == item))
 
@@ -59,10 +61,71 @@ defmodule SdrAgent.Prototype.SpotcheckTest do
                SpotcheckManifest.read(path, F.sha256(bin), {ctx.dossier, ctx.sha})
              )
 
-      assert match?(
-               {:error, {_, _}},
-               SpotcheckManifest.read(path, F.sha256("x"), {ctx.dossier, ctx.sha})
-             )
+      refused!(
+        SpotcheckManifest.read(path, F.sha256("x"), {ctx.dossier, ctx.sha}),
+        "(file)",
+        :digest_mismatch
+      )
+    end
+  end
+
+  # S1 BoundedJson's reviewed contract through the manifest routes (Codex
+  # R1): exact paths and rules, never a value.
+  describe "the shared decoder and file bounds" do
+    test "a repeated key at the root or inside a result", ctx do
+      bin = F.encode(ctx.manifest)
+
+      top =
+        String.replace(bin, ~s("schema_version":1), ~s("schema_version":1,"schema_version":1),
+          global: false
+        )
+
+      assert top != bin
+      refused!(raw(top, ctx), "(root)", :duplicate_key)
+
+      nested =
+        String.replace(
+          bin,
+          ~s("result":"verified"),
+          ~s("result":"verified","result":"#{@marker}"),
+          global: false
+        )
+
+      assert nested != bin
+      refused!(raw(nested, ctx), "results[0]", :duplicate_key)
+    end
+
+    test "invalid UTF-8", ctx do
+      bin =
+        String.replace(F.encode(ctx.manifest), "research-test", <<"research-", 0xFF, 0xFE>>,
+          global: false
+        )
+
+      refused!(raw(bin, ctx), "(root)", :invalid_utf8)
+    end
+
+    test "depth 3 (a result's fields) parses; a container below it is refused", ctx do
+      assert match?({:ok, _}, raw(F.encode(ctx.manifest), ctx))
+
+      deeper =
+        results(ctx.manifest, fn [first | rest] -> [%{first | "relation" => [nil]} | rest] end)
+
+      refused!(parse(deeper, ctx), "results[0].relation", :too_deep)
+    end
+
+    test "more than 64 KiB: refused by parse/3 and by read/3", ctx do
+      bin = F.encode(ctx.manifest)
+      big = bin <> String.duplicate(" ", 65_536 - byte_size(bin) + 1)
+      refused!(raw(big, ctx), "(root)", :too_large)
+
+      dir = F.scratch_dir!()
+      path = F.write!(dir, "spotcheck.json", big)
+
+      refused!(
+        SpotcheckManifest.read(path, F.sha256(big), {ctx.dossier, ctx.sha}),
+        "(file)",
+        :too_large
+      )
     end
   end
 

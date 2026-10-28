@@ -23,15 +23,6 @@ defmodule SdrAgent.Prototype.DossierParserTest do
     refute inspect(result) =~ @marker, "the refusal echoed a value"
   end
 
-  # A refusal whose rule belongs to the shared BoundedJson layer (S1): the
-  # shape is {path, rule} and no value is echoed.
-  defp bounded_refusal!(result) do
-    assert match?({:error, {path, rule}} when is_binary(path) and is_atom(rule), result),
-           "expected a value-free {path, rule} refusal, got #{inspect(result)}"
-
-    refute inspect(result) =~ @marker, "the refusal echoed a value"
-  end
-
   defp c(i \\ 1, overrides \\ %{}), do: F.company(i, overrides)
 
   describe "a valid dossier" do
@@ -158,7 +149,7 @@ defmodule SdrAgent.Prototype.DossierParserTest do
           global: false
         )
 
-      bounded_refusal!(DossierParser.parse(top))
+      refused!(DossierParser.parse(top), "(root)", :duplicate_key)
 
       nested =
         String.replace(
@@ -169,7 +160,7 @@ defmodule SdrAgent.Prototype.DossierParserTest do
         )
 
       assert nested != bin
-      bounded_refusal!(DossierParser.parse(nested))
+      refused!(DossierParser.parse(nested), "companies[0].contact", :duplicate_key)
     end
 
     test "invalid UTF-8 is refused" do
@@ -178,7 +169,7 @@ defmodule SdrAgent.Prototype.DossierParserTest do
           global: false
         )
 
-      bounded_refusal!(DossierParser.parse(bin))
+      refused!(DossierParser.parse(bin), "(root)", :invalid_utf8)
     end
 
     test "a nested container deeper than the schema's depth 7 is refused" do
@@ -191,7 +182,11 @@ defmodule SdrAgent.Prototype.DossierParserTest do
       deeper =
         F.put(deep, ["contact", "evidence", "email", "artifact", "sha256"], [artifact["sha256"]])
 
-      bounded_refusal!(parse(F.dossier([deeper])))
+      refused!(
+        parse(F.dossier([deeper])),
+        "companies[0].contact.evidence.email.artifact.sha256",
+        :too_deep
+      )
     end
   end
 
@@ -202,11 +197,11 @@ defmodule SdrAgent.Prototype.DossierParserTest do
       path = F.write!(dir, "dossier.json", bin)
 
       assert match?({:ok, %{"companies" => [_]}}, DossierParser.read(path, F.sha256(bin)))
-      bounded_refusal!(DossierParser.read(path, F.sha256(bin <> " ")))
+      refused!(DossierParser.read(path, F.sha256(bin <> " ")), "(file)", :digest_mismatch)
 
       big = bin <> String.duplicate(" ", 262_144 - byte_size(bin) + 1)
       big_path = F.write!(dir, "big.json", big)
-      bounded_refusal!(DossierParser.read(big_path, F.sha256(big)))
+      refused!(DossierParser.read(big_path, F.sha256(big)), "(file)", :too_large)
     end
   end
 

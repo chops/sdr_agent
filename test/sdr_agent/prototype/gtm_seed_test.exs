@@ -27,19 +27,6 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
     refute inspect(result) =~ @marker, "the refusal echoed a value"
   end
 
-  # A refusal from the shared BoundedJson layer, located at `file`.
-  defp file_refusal!(result, file) do
-    assert match?({:error, {path, rule}} when is_binary(path) and is_atom(rule), result),
-           "expected a value-free {path, rule} refusal, got #{inspect(result)}"
-
-    {:error, {path, _rule}} = result
-
-    assert String.starts_with?(path, file),
-           "the refusal is not located at #{file}: #{inspect(path)}"
-
-    refute inspect(result) =~ @marker, "the refusal echoed a value"
-  end
-
   defp provenance_entry_index(name \\ "provenance.json", ref, seed) do
     {dir, _hashes} = seed
     entries = Path.join(dir, name) |> File.read!() |> Jason.decode!() |> Map.fetch!("entries")
@@ -104,7 +91,7 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
       other = F.scratch_dir!()
       File.rename!(Path.join(dir, "writing_guide.json"), Path.join(other, "writing_guide.json"))
       File.ln_s!(Path.join(other, "writing_guide.json"), Path.join(dir, "writing_guide.json"))
-      file_refusal!(SeedDir.read(dir, hashes), "writing_guide.json")
+      refused!(SeedDir.read(dir, hashes), "writing_guide.json", :not_regular)
     end
 
     test "any of the four digests other than its argument is refused" do
@@ -112,28 +99,46 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
 
       for key <- [:offering_profile, :writing_guide, :campaign, :provenance] do
         file = "#{key}.json"
-        file_refusal!(SeedDir.read(dir, Map.put(hashes, key, F.sha256(@marker))), file)
+
+        refused!(
+          SeedDir.read(dir, Map.put(hashes, key, F.sha256(@marker))),
+          file,
+          :digest_mismatch
+        )
       end
     end
 
     test "a non-JSON file, a repeated JSON key or more than 64 KiB is refused" do
-      file_refusal!(
+      refused!(
         read(F.write_seed_dir!(Map.put(contents(), "campaign.json", "not json " <> @marker))),
-        "campaign.json"
+        "campaign.json",
+        :invalid_json
       )
 
       guide = ~s({"text":"Sign as the GTMscape team.","text":"#{@marker}"})
 
-      file_refusal!(
+      refused!(
         read(F.write_seed_dir!(Map.put(contents(), "writing_guide.json", guide))),
-        "writing_guide.json"
+        "writing_guide.json",
+        :duplicate_key
       )
 
       big = ~s({"text":"Sign as the GTMscape team.#{String.duplicate("a", 65_536)}"})
 
-      file_refusal!(
+      refused!(
         read(F.write_seed_dir!(Map.put(contents(), "writing_guide.json", big))),
-        "writing_guide.json"
+        "writing_guide.json",
+        :too_large
+      )
+    end
+
+    test "invalid UTF-8 is refused at the file" do
+      guide = ~s({"text":"Sign as the GTMscape team. ) <> <<0xFF, 0xFE>> <> ~s("})
+
+      refused!(
+        read(F.write_seed_dir!(Map.put(contents(), "writing_guide.json", guide))),
+        "writing_guide.json",
+        :invalid_utf8
       )
     end
 
@@ -144,7 +149,11 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
           &F.put(&1, ["icp", "criteria", "industries"], [["B2B software"]])
         )
 
-      file_refusal!(read(F.write_seed_dir!(deeper_campaign)), "campaign.json")
+      refused!(
+        read(F.write_seed_dir!(deeper_campaign)),
+        "campaign.json:icp.criteria.industries[0]",
+        :too_deep
+      )
 
       deeper_profile =
         with_file(
@@ -152,7 +161,11 @@ defmodule SdrAgent.Prototype.GtmSeedTest do
           &F.put(&1, ["items", 0, "text"], ["Routes synthetic loads."])
         )
 
-      file_refusal!(read(F.write_seed_dir!(deeper_profile)), "offering_profile.json")
+      refused!(
+        read(F.write_seed_dir!(deeper_profile)),
+        "offering_profile.json:items[0].text",
+        :too_deep
+      )
     end
   end
 
