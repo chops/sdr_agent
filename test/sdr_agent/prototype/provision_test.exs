@@ -108,6 +108,64 @@ defmodule SdrAgent.Prototype.ProvisionTest do
       end
     end
 
+    # Coverage of the f0a824e caller boundaries (Codex 47825d4a): recorded
+    # as coverage, not as RED.
+    test "coverage: one evidence path shared by two otherwise valid references is budget_unbounded" do
+      root = scratch_dir!()
+      base = worksheet(root)
+      [first, second | rest] = base["routes"]
+      assert first["evidence"]["path"] == "prototype_binding.receipt", "fixture construction"
+      assert match?({:ok, %{remaining: 60}}, check(root, base)), "fixture: the valid worksheet"
+
+      two_routes = %{
+        base
+        | "routes" => [first, %{second | "evidence" => first["evidence"]} | rest]
+      }
+
+      route_and_previous = %{
+        base
+        | "previous_bindings" => %{base["previous_bindings"] | "evidence" => first["evidence"]}
+      }
+
+      for {name, map} <- [two_routes: two_routes, route_and_previous: route_and_previous] do
+        result = check(root, map)
+        assert result == {:error, :budget_unbounded}, "#{name}: #{inspect(result)}"
+      end
+    end
+
+    test "coverage: distinct evidence paths with identical bytes are allowed" do
+      root = scratch_dir!()
+      base = worksheet(root)
+      refs = [base["previous_bindings"]["evidence"] | Enum.map(base["routes"], & &1["evidence"])]
+
+      assert length(Enum.uniq_by(refs, & &1["path"])) == 6, "fixture: six distinct paths"
+      assert length(Enum.uniq_by(refs, & &1["sha256"])) == 1, "fixture: one shared digest"
+      assert match?({:ok, %{remaining: 60}}, check(root, base))
+    end
+
+    test "coverage: an evidence file of exactly 16384 bytes resolves; 16385 bytes is budget_unbounded" do
+      root = scratch_dir!()
+      base = worksheet(root)
+      [first | rest] = base["routes"]
+
+      sized =
+        for {name, size} <- [at_bound: 16_384, over_bound: 16_385], into: %{} do
+          evidence = evidence!(root, "#{name}.receipt", String.duplicate("a", size))
+          stat = File.stat!(Path.join(root, evidence["path"]))
+          assert stat.size == size, "fixture: #{name} size #{stat.size}"
+          assert Bitwise.band(stat.mode, 0o777) == 0o600, "fixture: #{name} mode"
+          {name, evidence}
+        end
+
+      at_bound =
+        check(root, %{base | "routes" => [%{first | "evidence" => sized.at_bound} | rest]})
+
+      assert match?({:ok, %{remaining: 60}}, at_bound), "16384 bytes: #{inspect(at_bound)}"
+
+      over = check(root, %{base | "routes" => [%{first | "evidence" => sized.over_bound} | rest]})
+      assert over == {:error, :budget_unbounded}, "16385 bytes: #{inspect(over)}"
+    end
+
     test "evidence that does not resolve to the recorded bytes is budget_unbounded" do
       root = scratch_dir!()
       base = worksheet(root)
