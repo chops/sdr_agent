@@ -244,6 +244,19 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @prototype_codes
       end
 
+      # D-237 RED-b2c deny-only declaration (Codex 3122b0d4): the caller-built
+      # d237-basis/1 and its digest, untrusted input, redacted from any
+      # inspection. ReleaseDecision refuses them on every decision; no
+      # decision records them yet (the released_unverified decision itself is
+      # still refused inside the gate's own context).
+      argument :basis, :map do
+        sensitive? true
+      end
+
+      argument :basis_sha256, :string do
+        sensitive? true
+      end
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision

@@ -11,7 +11,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        `:released_unverified` and `:prototype_authority_refused` are refused
        outside it; `:released_unverified` is refused outside the prototype
        gate's own Prelocked context and, until its closed basis is recorded,
-       inside it too; `prototype_authority_refused` carries exactly one
+       inside it too; a caller-built `basis` or `basis_sha256` is refused on
+       every other decision (RED-b2c deny-only); `prototype_authority_refused`
+       carries exactly one
        `prototype_refusal` code (refused on any other reason); the
        `:reconciled` classification only with the code
        `witness_mode_mismatch`.
@@ -200,9 +202,23 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
     with :ok <- runtime_partition(disposition, reason),
          :ok <- unverified(disposition, mode),
+         :ok <- no_basis(disposition, changeset),
          :ok <- refusal_code(reason, code) do
       reconciled(classification, {reason, code})
     end
+  end
+
+  # D-237 RED-b2c deny-only (Codex 3122b0d4): a caller-built basis is never
+  # recorded on any other decision. Value-free: the refusal names the field
+  # only. (A released_unverified decision is still refused above.)
+  defp no_basis(disposition, changeset) do
+    supplied? =
+      not is_nil(Ash.Changeset.get_argument(changeset, :basis)) or
+        not is_nil(Ash.Changeset.get_argument(changeset, :basis_sha256))
+
+    if supplied? and disposition != :released_unverified,
+      do: {:error, :basis, "is recorded only for a released_unverified decision"},
+      else: :ok
   end
 
   if @prototype_compiled do
