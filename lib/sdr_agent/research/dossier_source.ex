@@ -14,11 +14,11 @@ defmodule SdrAgent.Research.DossierSource do
   the payload hash is a composite `(tenant_id, sha256)` foreign key to
   `payloads`. UNIQUE `(entry_id, source_id)`.
 
-  APPEND-ONLY (trigger). The schema is frozen by S1 (D-237 freeze); the
-  `:import` shell (its name, empty accept list, server-derived tenant, trace
-  ids and the `OperatorAction(:import_dossier)` policy) is S1's and refuses
-  every call until S3 delivers its body
-  (`SdrAgent.Research.Changes.ImportPending`). Reads here: the audit kernel.
+  APPEND-ONLY (trigger). The schema is frozen by S1 (D-237 freeze). The
+  `:import` shell (its name, server-derived tenant, trace ids and the
+  `OperatorAction(:import_dossier)` policy) is S1's; its body (the accepted
+  inputs and the `research.dossier_source.imported` event) is S3's. Reads
+  here: the audit kernel.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -84,15 +84,31 @@ defmodule SdrAgent.Research.DossierSource do
   actions do
     defaults [:read]
 
-    # D-237 shell (S1; Codex d4196c02): the name, an explicit empty accept
-    # list, the server-derived tenant and trace ids, and the operator policy.
-    # S3 replaces the pending refusal with the body (accepted inputs,
-    # arguments, validated changes, audit, replay and cap).
+    # D-237: S1's shell (the name, the server-derived tenant and trace ids,
+    # the operator policy; Codex d4196c02) with S3's body: the accepted
+    # inputs and the audit event. The content Payload is stored first by
+    # SdrAgent.Prototype.DossierImport through the scoped
+    # :store_prototype_input, in the same row transaction.
     create :import do
-      accept []
+      description "OPR (D-237): record one imported verified-excerpt source inside its row transaction."
+
+      accept [
+        :entry_id,
+        :lead_id,
+        :source_id,
+        :original_url,
+        :final_url,
+        :source_type,
+        :retrieved_on,
+        :checked_at,
+        :content_sha256
+      ]
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
-      change SdrAgent.Research.Changes.ImportPending
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "research.dossier_source.imported", category: :domain_change}
     end
   end
 
