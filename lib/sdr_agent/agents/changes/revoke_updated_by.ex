@@ -4,18 +4,29 @@ defmodule SdrAgent.Agents.Changes.RevokeUpdatedBy do
   user, exactly as `relate_actor(:updated_by)` does for a belongs-to; for
   the D-237 prototype operator (D3: revoke is the operator's), the
   binding's anchor from the boot snapshot (closure note r1 "Policies").
-  Any other actor, or no actor, is an error (the policies refuse them
-  first). In a build without the prototype authority there is no operator
-  branch.
+  Any other actor, or no actor, is an error raised in a `before_action`,
+  i.e. after authorization, so the policies' `Forbidden` (and its audit)
+  comes first, as with `relate_actor`. In a build without the prototype
+  authority there is no operator branch.
   """
   use Ash.Resource.Change
+
+  @compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @impl true
   def change(changeset, _opts, %{actor: %SdrAgent.Accounts.User{id: id}}),
     do: Ash.Changeset.force_change_attribute(changeset, :updated_by_id, id)
 
-  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
-    def change(changeset, _opts, %{actor: %SdrAgent.Actor{type: :prototype_operator}}) do
+  if @compiled do
+    def change(changeset, _opts, %{actor: %SdrAgent.Actor{type: :prototype_operator}}),
+      do: Ash.Changeset.before_action(changeset, &anchor_updater/1)
+  end
+
+  def change(changeset, _opts, _context),
+    do: Ash.Changeset.before_action(changeset, &no_updater/1)
+
+  if @compiled do
+    defp anchor_updater(changeset) do
       case SdrAgent.Prototype.binding() do
         {:ok, snapshot} ->
           Ash.Changeset.force_change_attribute(
@@ -29,8 +40,6 @@ defmodule SdrAgent.Agents.Changes.RevokeUpdatedBy do
       end
     end
   end
-
-  def change(changeset, _opts, _context), do: no_updater(changeset)
 
   defp no_updater(changeset),
     do:

@@ -2089,6 +2089,7 @@ defmodule SdrAgent.Agents do
       if Base.encode16(:crypto.hash(:sha256, bytes), case: :lower) == digest do
         fn -> replay_or_mint(bytes, digest, root, actor) end
         |> SdrAgent.Audit.transaction()
+        |> provision_result()
       else
         {:error, :worksheet_invalid}
       end
@@ -2141,6 +2142,13 @@ defmodule SdrAgent.Agents do
     end
 
     defp refusal(error), do: error
+
+    # Ash rolls the enclosing transaction back with the failed changeset;
+    # its errors carry the action's closed refusal reason.
+    defp provision_result({:error, %Ash.Changeset{errors: errors}}),
+      do: {:error, refusal(Ash.Error.to_error_class(errors))}
+
+    defp provision_result(result), do: result
   else
     # No prototype authority in this build (production): every caller is
     # refused before any input is read.

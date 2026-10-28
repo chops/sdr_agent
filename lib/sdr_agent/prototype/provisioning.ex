@@ -77,7 +77,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "The entry's allocation set, as `GrantBundle` creates it."
     @spec allocations() :: [map()]
     def allocations do
-      Enum.map(Authority.funding_entry().allocations, &Map.take(&1, allocation_fields()))
+      blank = Map.new(allocation_fields(), &{&1, nil})
+
+      Enum.map(
+        Authority.funding_entry().allocations,
+        &Map.merge(blank, Map.take(&1, allocation_fields()))
+      )
     end
 
     @doc "Locks the singleton binding row; `:ok` only if it is still exactly `snapshot`."
