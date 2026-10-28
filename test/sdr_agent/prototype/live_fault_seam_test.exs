@@ -42,6 +42,10 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   @seam TestSeam
   @stages [:binding_read, :identity_read, :delegation_read]
   @mismatch {:error, :binding_mismatch}
+  @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
+                  "(pg_control_system()).system_identifier FROM pg_database d " <>
+                  "WHERE d.datname = current_database()"
+  @read_sources ["prototype_database_bindings", "prototype_delegations"]
   @counts [
     {"prototype_database_bindings", "SELECT count(*) FROM prototype_database_bindings"},
     {"prototype_delegations", "SELECT count(*) FROM prototype_delegations"},
@@ -350,17 +354,19 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
       seam!()
       keys = seam_keys()
 
+      # The inner scope's second read is real: a claimed inner scope never
+      # falls through to the outer one.
       result =
         fault(:binding_read, :raise, fn ->
           inner =
             fault(:binding_read, :returned_error, fn ->
-              {Prototype.check_live(), hits(:binding_read)}
+              {Prototype.check_live(), Prototype.check_live(), hits(:binding_read)}
             end)
 
           {inner, hits(:binding_read), Prototype.check_live(), hits(:binding_read)}
         end)
 
-      assert result == {{@mismatch, 1}, 0, @mismatch, 1}
+      assert result == {{@mismatch, :ok, 1}, 0, @mismatch, 1}
       assert {Prototype.check_live(), hits(:binding_read), seam_keys()} == {:ok, 0, keys}
     end
 
@@ -477,7 +483,7 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   defp ok_value(_stage, _fx), do: :ok
 
   defp read_label(:binding_read), do: {:read, "prototype_database_bindings"}
-  defp read_label(:identity_read), do: :raw
+  defp read_label(:identity_read), do: :identity
   defp read_label(:delegation_read), do: {:read, "prototype_delegations"}
 
   # The real reads a stage's call issues before reaching that stage
@@ -623,18 +629,13 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
     end
   end
 
-  defp statement(query, source) do
-    cond do
-      Regex.match?(~r/\b(INSERT\s+INTO|UPDATE\s+\S+\s+SET|DELETE\s+FROM)\b/i, query) ->
-        {:write, source}
-
-      is_binary(source) ->
-        {:read, source}
-
-      true ->
-        :raw
-    end
-  end
+  # A closed oracle (Codex 2026-10-28 R3): only the exact identity query and
+  # a SELECT on one of the two live-read tables are recognized; every other
+  # statement (any write form included) is `:unknown`, so an exact list
+  # assertion fails on it.
+  defp statement(@identity_sql, nil), do: :identity
+  defp statement("SELECT " <> _rest, source) when source in @read_sources, do: {:read, source}
+  defp statement(_query, _source), do: :unknown
 
   defp with_queries(fun) do
     id = {__MODULE__, make_ref()}
