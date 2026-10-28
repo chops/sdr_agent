@@ -177,6 +177,110 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     @doc """
+    Creates or replays this agent session's delegation (IF-3), from the boot
+    snapshot only, in this order: the snapshot (else
+    `:not_prototype_runtime`), an exactly supported agent (`:invalid_agent`),
+    a bounded correlation (`:invalid_correlation`) and the live check
+    (`:binding_mismatch`, on every call, replays included). Then, in one
+    `SdrAgent.Audit.transaction/1`, a replay of (binding, agent,
+    correlation) returns the existing id with no row or event; otherwise
+    `PrototypeDelegation :enter` creates exactly one row and one event, as
+    the kernel with the `:task_entry` marker, with binding, tenant and
+    anchor forced from the snapshot.
+
+    A concurrent creator's unique violation on that identity is re-read
+    only AFTER the failed transaction (or savepoint) has rolled back, never
+    inside the aborted transaction; any other failure is
+    `:binding_mismatch`, never a replay.
+    """
+    @spec enter_session(term(), term()) ::
+            {:ok, Ecto.UUID.t()} | {:error, SdrAgent.Prototype.enter_error()}
+    def enter_session(agent, correlation) do
+      with {:ok, snapshot} <- binding(),
+           {:ok, agent} <- setup_agent(agent),
+           {:ok, correlation} <- setup_correlation(correlation),
+           :ok <- check_live() do
+        enter(snapshot, agent, correlation)
+      end
+    end
+
+    defp enter(snapshot, agent, correlation) do
+      fn -> replay_or_create(snapshot, agent, correlation) end
+      |> Audit.transaction()
+      |> case do
+        {:ok, id} ->
+          {:ok, id}
+
+        {:error, failure} ->
+          # The transaction (or savepoint) has rolled back: only now may a
+          # unique conflict on the session identity be re-read.
+          if session_conflict?(failure),
+            do: reread_session(snapshot, agent, correlation),
+            else: {:error, :binding_mismatch}
+      end
+    end
+
+    defp replay_or_create(snapshot, agent, correlation) do
+      case seam_lookup(find_session(snapshot.id, agent, correlation)) do
+        {:ok, %PrototypeDelegation{id: id}} -> id
+        {:ok, nil} -> create_session(snapshot, agent, correlation)
+        _error -> Repo.rollback(:binding_mismatch)
+      end
+    end
+
+    defp create_session(snapshot, agent, correlation) do
+      seam(:before_session_create, snapshot)
+
+      PrototypeDelegation
+      |> Ash.Changeset.for_create(
+        :enter,
+        %{agent: agent, session_correlation: correlation},
+        actor: Actor.system(:kernel, snapshot.tenant_id),
+        context: KernelMarker.context(:task_entry)
+      )
+      |> Ash.create()
+      |> case do
+        {:ok, delegation} -> delegation.id
+        {:error, error} -> Repo.rollback(error)
+      end
+    end
+
+    defp reread_session(snapshot, agent, correlation) do
+      case find_session(snapshot.id, agent, correlation) do
+        {:ok, %PrototypeDelegation{id: id}} -> {:ok, id}
+        _none_or_error -> {:error, :binding_mismatch}
+      end
+    end
+
+    # Exactly the identity's unique violation (AshPostgres reports it as
+    # InvalidAttribute with the constraint name), whether Ash rolled the
+    # transaction back with its changeset or returned the error class.
+    @session_identity_index "prototype_delegations_unique_session_index"
+
+    defp session_conflict?(%Ash.Changeset{errors: errors}), do: unique_session?(errors)
+    defp session_conflict?(%Ash.Error.Invalid{errors: errors}), do: unique_session?(errors)
+    defp session_conflict?(_other), do: false
+
+    defp unique_session?(errors) do
+      Enum.any?(List.wrap(errors), fn
+        %Ash.Error.Changes.InvalidAttribute{private_vars: vars} when is_list(vars) ->
+          vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
+
+        _other ->
+          false
+      end)
+    end
+
+    defp find_session(binding_id, agent, correlation) do
+      PrototypeDelegation
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.filter(
+        binding_id == ^binding_id and agent == ^agent and session_correlation == ^correlation
+      )
+      |> Ash.read_one()
+    end
+
+    @doc """
     The IF-5 assurance block, in prototype runtime only: the constant label,
     the boot snapshot's policy id, instance and dataset class, and the
     compiled policy entry's digest. It confers no authority.
@@ -348,9 +452,20 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
         :ok
       end
+
+      # The unique-race proof: when the calling process sets
+      # `{SdrAgent.Prototype.Authority, :miss_session_lookup}` to true, the
+      # in-transaction session lookup reports none (a competitor that
+      # committed after the lookup). The post-rollback re-read is unaffected.
+      defp seam_lookup(result) do
+        if Process.get({__MODULE__, :miss_session_lookup}) == true,
+          do: {:ok, nil},
+          else: result
+      end
     else
       defp seam_identity(identity), do: identity
       defp seam(_name, _arg), do: :ok
+      defp seam_lookup(result), do: result
     end
 
     @doc """

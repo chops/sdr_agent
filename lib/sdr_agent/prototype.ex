@@ -81,7 +81,7 @@ defmodule SdrAgent.Prototype do
     @doc "Creates or replays this agent session's delegation; returns its id."
     @spec enter_session(:claude_code | :codex_cli, String.t()) ::
             {:ok, Ecto.UUID.t()} | {:error, enter_error()}
-    def enter_session(_agent, _session_correlation), do: pending()
+    defdelegate enter_session(agent, session_correlation), to: Authority
 
     @doc "Resolves the operator actor of `delegation_id` against the live binding."
     @spec operator_actor(Ecto.UUID.t()) :: {:ok, SdrAgent.Actor.t()} | {:error, resolve_error()}
@@ -106,19 +106,6 @@ defmodule SdrAgent.Prototype do
         :ordinary -> {:error, :not_prototype_runtime}
       end
     end
-
-    # Ordinary runtime refuses; prototype runtime is not implemented yet
-    # (later increments), so nothing succeeds here.
-    defp pending do
-      case Authority.runtime() do
-        :ordinary -> {:error, :not_prototype_runtime}
-        :prototype -> red({:error, :not_implemented})
-      end
-    end
-
-    # RED stub result, typed dynamic() so success clauses of callers compile
-    # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   else
     @doc "The VM's runtime: always `:ordinary` in this build."
     @spec runtime() :: runtime()
