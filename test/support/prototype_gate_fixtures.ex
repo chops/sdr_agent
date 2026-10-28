@@ -436,25 +436,29 @@ defmodule SdrAgent.PrototypeGateFixtures do
   @doc """
   A value-free summary of a result for assertion messages (Codex 3122b0d4
   R5: no basis, output or raw error dumps): the result's tag and, for an
-  error, each error's module and field. Never a value or a message.
+  error, each error's module and field. Never a value or a message. A
+  closed atom reason is kept as is; any other non-struct leaf is the fixed
+  `:term` (Codex 79819840: no BadMapError from a technical reason).
   """
   def summary({:ok, %{__struct__: module}}), do: {:ok, module}
   def summary({:ok, _value}), do: {:ok, :value}
+  def summary({:error, reason}) when is_atom(reason), do: {:error, reason}
 
   def summary({:error, error}) do
     errors =
       case error do
-        %{errors: errors} when is_list(errors) -> errors
+        %{__struct__: _module, errors: errors} when is_list(errors) -> errors
         error -> [error]
       end
 
-    {:error, Enum.map(errors, &{error_module(&1), Map.get(&1, :field)})}
+    {:error, Enum.map(errors, &leaf/1)}
   end
 
   def summary({tag, %{__struct__: module}, _rest}) when is_atom(tag), do: {tag, module}
   def summary(other) when is_atom(other), do: other
   def summary(_other), do: :other
 
-  defp error_module(%{__struct__: module}), do: module
-  defp error_module(_term), do: :term
+  defp leaf(%{__struct__: module} = error), do: {module, Map.get(error, :field)}
+  defp leaf(reason) when is_atom(reason), do: reason
+  defp leaf(_term), do: :term
 end

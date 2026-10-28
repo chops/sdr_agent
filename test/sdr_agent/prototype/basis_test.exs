@@ -9,8 +9,11 @@ defmodule SdrAgent.Prototype.BasisTest do
 
   The guard is exercised directly with synthetic maps (the grammar of real
   bases keeps them far smaller; this is the guard's own boundary, not a real
-  basis). The module does not exist yet: the export is asserted first, so a
-  missing API is STRUCTURAL, never a semantic RED. No database, no real data.
+  basis). The export is asserted first. At RED-b2c the module is a deny-only
+  declaration (Codex 79819840 R3: `encode/1` refuses everything), so the
+  within-bound cases genuinely fail and the two over-bound cases pass only
+  because everything is refused: no credit for them until the within-bound
+  cases pass. No database, no real data.
   """
   use ExUnit.Case, async: true
 

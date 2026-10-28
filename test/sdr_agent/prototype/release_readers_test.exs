@@ -431,28 +431,56 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       assert verify.(outer) == {:error, :scope_invalid}
     end
 
-    # R4: an actual SQL failure in the caller's transaction is a technical
-    # error, never one of the closed refusals, and the function never runs.
-    # (No typed DB identity is assumed: Codex 6d1ead6d.)
-    test "after the caller's transaction aborted, run/3 is a technical error, not a refusal",
+    # R4, the pinned mechanism (Codex 79819840 R2): run/3's FIRST statement
+    # is one raw state probe of the current transaction (`Repo.query/2`,
+    # before any Ash read, which could instead throw to the owner). On an
+    # aborted transaction it returns that probe's typed error UNCHANGED, at
+    # once: no Ash read, no function call, no scope and no further statement;
+    # the owner then rolls back. No catch, no savepoint. The probe's error
+    # type exists at that raw layer (Codex 6d1ead6d); nothing is read from a
+    # lossy Ash error.
+    test "after the caller's transaction aborted, run/3 returns the probe's typed error and stops",
          ctx do
       run = scope_api!(:run, 3)
 
-      result =
-        SdrAgent.Audit.transaction(fn ->
-          {:error, _aborted} = SdrAgent.Repo.query("SELECT 1/0")
+      {result, sql} =
+        SdrAgent.GateFixtures.capture(fn ->
+          SdrAgent.Audit.transaction(fn ->
+            aborted = SdrAgent.Repo.query("SELECT 1/0")
 
-          inside =
-            run.(ctx.invocation, ctx.fx.agent, fn scope -> send(self(), {:called, scope}) end)
+            inside =
+              run.(ctx.invocation, ctx.fx.agent, fn scope -> send(self(), {:called, scope}) end)
 
-          SdrAgent.Repo.rollback({:inside, inside})
+            SdrAgent.Repo.rollback({:inside, aborted, inside})
+          end)
         end)
 
-      assert {:error, {:inside, inside}} = result
-      assert match?({:error, _}, inside), inspect(G.summary(inside))
-      {:error, reason} = inside
-      refute reason in [:not_found, :not_released, :basis_invalid, :binding_mismatch]
+      assert {:error, {:inside, aborted, inside}} = result
+      assert match?({:error, %Postgrex.Error{postgres: %{code: :division_by_zero}}}, aborted)
+
+      assert match?(
+               {:error, %Postgrex.Error{postgres: %{code: :in_failed_sql_transaction}}},
+               inside
+             ),
+             inspect(G.summary(inside))
+
       refute_received {:called, _scope}
+
+      # After the failed statement: exactly one non-control statement (the
+      # probe) comes first, and no transaction-control statement (a recovery
+      # or savepoint command) precedes it; at most the owner's rollback
+      # follows it.
+      after_abort = sql |> Enum.drop_while(&(not String.contains?(&1, "1/0"))) |> Enum.drop(1)
+      control? = &(&1 =~ ~r/\A\s*(begin|commit|rollback|savepoint|release)/i)
+
+      assert match?([first | _] when is_binary(first), after_abort) and
+               not control?.(hd(after_abort)),
+             "the probe is not the first statement after the abort: #{length(after_abort)}"
+
+      assert Enum.count(after_abort, &(not control?.(&1))) == 1,
+             "statements after the abort: #{Enum.count(after_abort, &(not control?.(&1)))}"
+
+      assert Enum.count(after_abort, control?) <= 1
     end
 
     test "the caller's row policy holds: another tenant's actor gets not_found", ctx do
