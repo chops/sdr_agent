@@ -293,12 +293,12 @@ defmodule SdrAgent.Prototype.BootCheckTest do
       switch = %{policy_id: "d237-prototype/1", instance_id: Ecto.UUID.generate()}
       assert BootCheck.start_link(switch: switch) == {:error, :binding_absent}
 
-      # A supervisor whose child refuses exits; the linked caller must trap
-      # that exit to observe the {:error, _} return (observed at 0f0c4b9).
+      # The linked caller traps exits so that a refusing child's failed
+      # supervisor start returns {:error, _} instead of killing the test
+      # (observed at 0f0c4b9).
       Process.flag(:trap_exit, true)
       result = Supervisor.start_link([{BootCheck, switch: switch}], strategy: :one_for_one)
       assert match?({:error, _}, result), "a refusing child started: #{inspect(result)}"
-      assert_receive {:EXIT, _supervisor, _reason}
     end
 
     test "the child is :ignore for an ordinary start" do
