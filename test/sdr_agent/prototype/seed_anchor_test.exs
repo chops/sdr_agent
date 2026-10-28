@@ -9,7 +9,9 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
     `operator_user_id`, validated as that binding's `agent_operator` user in
     its tenant. A caller-supplied creator is not an input; the event actor
     stays the delegation; number 1 only; ordinary `:create_revision` is
-    unchanged; the operator never reads settings content.
+    unchanged; the operator never reads settings content. The anchor check
+    itself is reached with the policy intact: an anchor row whose role or
+    tenant changed underneath is refused on `created_by_id`.
   - The note is a closed machine reference: exactly
     `"d237 seed provenance sha256:"` plus 64 lowercase hex naming the
     provenance Payload actually stored in the operator's tenant. It is kept
@@ -73,6 +75,11 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
 
   defp note_refused?(_result), do: false
 
+  defp anchor_refused?({:error, %Ash.Error.Invalid{errors: errors}}),
+    do: Enum.any?(errors, &(Map.get(&1, :field) == :created_by_id))
+
+  defp anchor_refused?(_result), do: false
+
   test "the seed revision's creator is the binding's anchor; the event actor is the delegation",
        ctx do
     result = seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
@@ -132,10 +139,12 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
     assert revisions() == 0
   end
 
-  test "a binding whose anchor is not an agent_operator user is refused", ctx do
+  # Codex 969bf261: this refusal comes from the live binding check (the
+  # policy), not from SeedAnchor; it is no anchor-body proof. The isolated
+  # anchor checks are in "the anchor check" below.
+  test "a boot snapshot naming another user as the anchor is refused at the live check", ctx do
     # Enter prototype runtime with a snapshot naming another user as the
-    # anchor: the live binding row no longer matches, and the anchor check
-    # refuses before any write.
+    # anchor: the live binding row no longer matches the snapshot.
     admin = admin_outside_runtime!(ctx)
     snapshot = %{ctx.fixture.snapshot | operator_user_id: admin.id}
     :ok = SdrAgent.PrototypeFixtures.enter_runtime(snapshot)
@@ -170,6 +179,36 @@ defmodule SdrAgent.Prototype.SeedAnchorTest do
 
     assert {:error, %Ash.Error.Forbidden{}} =
              seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
+  end
+
+  # Codex 969bf261: SeedAnchor itself, reached with the live binding,
+  # delegation and policy intact. The operator resolver checks the
+  # delegation's binding, tenant and anchor id, not the anchor User row, so a
+  # real anchor row changed underneath (AuditCase.tamper!/2, one statement)
+  # passes the policy and reaches the anchor check, which must refuse.
+  describe "the anchor check" do
+    test "an anchor whose role is no longer agent_operator is refused, writing nothing", ctx do
+      tamper!("UPDATE users SET role = 'admin', hashed_password = $1 WHERE id = $2", [
+        "not-a-real-hash",
+        Ecto.UUID.dump!(ctx.fixture.binding.operator_user_id)
+      ])
+
+      result = seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
+      assert anchor_refused?(result), "returned #{inspect(result)}"
+      assert revisions() == 0
+      assert events_of_type(ctx.tenant, "settings.revision.created") == []
+    end
+
+    test "an anchor row of another tenant is refused, writing nothing", ctx do
+      tamper!("UPDATE users SET tenant_id = $1 WHERE id = $2", [
+        Ecto.UUID.dump!(Ecto.UUID.generate()),
+        Ecto.UUID.dump!(ctx.fixture.binding.operator_user_id)
+      ])
+
+      result = seed_revision(ctx.actor, %{kind: :writing_guide, content: guide(), note: ctx.note})
+      assert anchor_refused?(result), "returned #{inspect(result)}"
+      assert revisions() == 0
+    end
   end
 
   # Codex b8d624fe D1: the typed machine-reference contract of the note.
