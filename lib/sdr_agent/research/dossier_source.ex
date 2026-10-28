@@ -15,7 +15,10 @@ defmodule SdrAgent.Research.DossierSource do
   `payloads`. UNIQUE `(entry_id, source_id)`.
 
   APPEND-ONLY (trigger). The schema is frozen by S1 (D-237 freeze); the
-  import action and its policies are S3's. Reads here: the audit kernel.
+  `:import` shell (its name, empty accept list, server-derived tenant, trace
+  ids and the `OperatorAction(:import_dossier)` policy) is S1's and refuses
+  every call until S3 delivers its body
+  (`SdrAgent.Research.Changes.ImportPending`). Reads here: the audit kernel.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -80,11 +83,26 @@ defmodule SdrAgent.Research.DossierSource do
 
   actions do
     defaults [:read]
+
+    # D-237 shell (S1; Codex d4196c02): the name, an explicit empty accept
+    # list, the server-derived tenant and trace ids, and the operator policy.
+    # S3 replaces the pending refusal with the body (accepted inputs,
+    # arguments, validated changes, audit, replay and cap).
+    create :import do
+      accept []
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change SdrAgent.Research.Changes.ImportPending
+    end
   end
 
   policies do
     policy action_type(:read) do
       authorize_if Checks.KernelContext
+    end
+
+    policy action(:import) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :import_dossier}
     end
   end
 

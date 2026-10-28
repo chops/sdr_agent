@@ -22,8 +22,11 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
   An `Actor` struct alone, or a caller-supplied hash set alone, is never
   authority. No public domain function accepts a caller-built scope.
 
-  RED stage (D-237 S1 item 4): DENY-ONLY. `match?/3` refuses every request;
-  `context/1`, `fetch/1` and `purposes/0` are the contract.
+  The scope's tenant must also equal the changeset's own server-derived
+  `tenant_id` (set from the actor by `SetTenant`), and `fetch/1` validates
+  every member at consumption. It is compiled with a positive branch only
+  with the prototype authority (`:prototype_authority_compiled`); the
+  production build refuses every request.
   """
   use Ash.Policy.SimpleCheck
 
@@ -34,8 +37,30 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
   def describe(_opts),
     do: "the resolved prototype operator stores exactly the bytes of its import or seed scope"
 
-  @impl true
-  def match?(_actor, _authorizer, _opts), do: red(false)
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    @impl true
+    def match?(
+          %SdrAgent.Actor{type: :prototype_operator, id: id, tenant_id: tenant_id} = actor,
+          %{subject: %Ash.Changeset{context: context} = changeset},
+          _opts
+        )
+        when is_binary(id) and is_binary(tenant_id) and is_map(context) do
+      with {:ok, %{tenant_id: ^tenant_id, delegation_id: ^id, sha256s: sha256s}} <-
+             fetch(context),
+           ^tenant_id <- Ash.Changeset.get_attribute(changeset, :tenant_id),
+           content when is_binary(content) <- Ash.Changeset.get_attribute(changeset, :content),
+           true <- :crypto.hash(:sha256, content) in sha256s do
+        SdrAgent.Prototype.Authority.operator?(actor)
+      else
+        _refused -> false
+      end
+    end
+
+    def match?(_actor, _authorizer, _opts), do: false
+  else
+    @impl true
+    def match?(_actor, _authorizer, _opts), do: false
+  end
 
   @doc "The approved purposes of a prototype input."
   @spec purposes() :: [atom()]
@@ -71,15 +96,22 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
 
   def context(_other), do: raise(ArgumentError, "not a prototype input scope")
 
-  @doc "The well-formed scope in `context`, if any."
+  @doc """
+  The well-formed scope in `context`, if any: binary tenant and delegation,
+  an approved purpose and a non-empty list of 32-byte hashes only. A forged
+  or malformed scope (any other shape or member) is `:error`; it never
+  raises.
+  """
   @spec fetch(term()) :: {:ok, map()} | :error
   def fetch(context) when is_map(context) do
     case Map.get(context, @marker) do
       %{tenant_id: tenant_id, delegation_id: delegation_id, purpose: purpose, sha256s: sha256s} =
           scope
       when is_binary(tenant_id) and is_binary(delegation_id) and purpose in @purposes and
-             is_list(sha256s) ->
-        {:ok, scope}
+             is_list(sha256s) and sha256s != [] ->
+        if Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)),
+          do: {:ok, scope},
+          else: :error
 
       _other ->
         :error
@@ -87,7 +119,4 @@ defmodule SdrAgent.Audit.Checks.PrototypeInputScope do
   end
 
   def fetch(_context), do: :error
-
-  # RED stub result, typed dynamic(); nothing sets the key (ruling e).
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end

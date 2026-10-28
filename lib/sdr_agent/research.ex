@@ -27,6 +27,9 @@ defmodule SdrAgent.Research do
     otp_app: :sdr_agent
 
   alias SdrAgent.Audit.GuardedCall
+  alias SdrAgent.Prototype.Checks.OperatorAction
+  alias SdrAgent.Research.DossierEntry
+  alias SdrAgent.Research.DossierSource
   alias SdrAgent.Research.EvidenceClaim
   alias SdrAgent.Research.Qualification
   alias SdrAgent.Research.ResearchArtifact
@@ -78,26 +81,31 @@ defmodule SdrAgent.Research do
   OPR (D-237, interfaces r6 IF-6; supplement 1 R9): records one imported
   dossier entry through `DossierEntry :import`, as called by
   `SdrAgent.Prototype.DossierImport` (S3) inside its per-row transaction.
-  Only the resolved prototype operator passes; every other actor is
-  refused. The action's body is S3's.
-
-  RED stage (D-237 S1 item 4): returns `{:error, :not_implemented}`.
+  Only the resolved prototype operator passes
+  (`SdrAgent.Prototype.Checks.OperatorAction`, `:import_dossier`, the live
+  resolver on every call); every other actor is refused with `Forbidden`
+  before any changeset is built. The action, its body and its policies are
+  S3's; until it exists the operator's call fails, never falling back to a
+  raw write.
   """
   @spec record_dossier_entry(map(), keyword()) :: {:ok, struct()} | {:error, term()}
-  def record_dossier_entry(_attrs, _opts), do: d237_red({:error, :not_implemented})
+  def record_dossier_entry(attrs, opts), do: record_dossier(DossierEntry, attrs, opts)
 
   @doc """
   OPR (D-237): records one imported dossier source through
-  `DossierSource :import`, as `record_dossier_entry/2` does.
-
-  RED stage (D-237 S1 item 4): returns `{:error, :not_implemented}`.
+  `DossierSource :import`, under the same operator gate as
+  `record_dossier_entry/2`.
   """
   @spec record_dossier_source(map(), keyword()) :: {:ok, struct()} | {:error, term()}
-  def record_dossier_source(_attrs, _opts), do: d237_red({:error, :not_implemented})
+  def record_dossier_source(attrs, opts), do: record_dossier(DossierSource, attrs, opts)
 
-  # RED stub result, typed dynamic() so callers compile (Elixir 1.20 infers
-  # literal returns). Read-only: nothing writes the key; removed in GREEN.
-  defp d237_red(default), do: :persistent_term.get({__MODULE__, :d237_red_stub}, default)
+  defp record_dossier(resource, attrs, opts) do
+    if OperatorAction.match?(Keyword.get(opts, :actor), nil, action: :import_dossier) do
+      GuardedCall.create(resource, :import, attrs, opts)
+    else
+      {:error, Ash.Error.Forbidden.exception([])}
+    end
+  end
 
   defp subject(opts, attrs, key), do: Keyword.put(opts, :subject_id, Map.get(Map.new(attrs), key))
 end
