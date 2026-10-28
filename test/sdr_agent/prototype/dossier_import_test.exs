@@ -31,11 +31,19 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     n
   end
 
-  # A result, or any raise captured as {:raised, module}.
+  # A result, or any raise captured as {:raised, module, frames}: the
+  # exception module and the first three stack frames as {module, function,
+  # arity, line}, never a value, so a failure names where it was raised.
   defp capture(fun) do
     fun.()
   rescue
-    error -> {:raised, error.__struct__}
+    error -> {:raised, error.__struct__, frames(__STACKTRACE__)}
+  end
+
+  defp frames(stacktrace) do
+    for {module, function, arity, location} <- Enum.take(stacktrace, 3),
+        do:
+          {module, function, if(is_list(arity), do: length(arity), else: arity), location[:line]}
   end
 
   defp import!(rows, actor) do
