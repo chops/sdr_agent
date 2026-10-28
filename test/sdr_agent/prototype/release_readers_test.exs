@@ -471,7 +471,7 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       # rollback, and nothing else (`StateProbeOracleTest` holds this
       # oracle's positive and negative controls).
       assert G.probe_then_owner_rollback?(sql),
-             "captured after the abort: #{inspect(G.after_abort(sql))}"
+             "after the abort: #{inspect(G.after_abort_shape(sql))}"
     end
 
     test "the caller's row policy holds: another tenant's actor gets not_found", ctx do

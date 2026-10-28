@@ -453,9 +453,54 @@ defmodule SdrAgent.PrototypeGateFixtures do
     match?([^abort, @state_probe, "rollback"], Enum.drop_while(sql, &(&1 != abort)))
   end
 
-  @doc "The captured statements after the first `abort` (for value-free messages)."
-  def after_abort(sql, abort \\ "SELECT 1/0"),
-    do: sql |> Enum.drop_while(&(&1 != abort)) |> Enum.drop(1)
+  @doc """
+  A value-free shape of the statements after the first `abort` for failure
+  messages (Codex 4809c027: never print raw SQL): each statement as the
+  closed category `:probe`, `:rollback` or `:other`, in order.
+  """
+  def after_abort_shape(sql, abort \\ "SELECT 1/0") do
+    sql
+    |> Enum.drop_while(&(&1 != abort))
+    |> Enum.drop(1)
+    |> Enum.map(fn
+      @state_probe -> :probe
+      "rollback" -> :rollback
+      _other -> :other
+    end)
+  end
+
+  @doc """
+  TF-1 RED (plan r2 section 5): in prototype runtime, through real APIs
+  only, a synthetic `.test` lead assigned with `SdrAgent.SDR.assign_lead/2`
+  (its Oban job bound to the run's Operation by `oban_job_id`), the
+  Operation and the run started, and one completed ClaudeCLI call:
+  `%{run:, operation:, job:, invocation:}`. The ICP, sequence and campaign
+  are created as the bound admin (no new user inside prototype runtime).
+  """
+  def assigned!(fx) do
+    campaign = SdrAgent.SalesFixtures.active_campaign!(fx.tenant)
+    lead = SdrAgent.SalesFixtures.lead!(fx.tenant)
+
+    assigned = SdrAgent.SDR.assign_lead(lead, campaign_id: campaign.id, actor: fx.admin)
+    assert match?({:ok, %{run: _, operation: _, job: _}}, assigned), "prerequisite: assign"
+    {:ok, %{run: run, operation: operation, job: job}} = assigned
+
+    {:ok, operation} = SdrAgent.Operations.start_operation(operation, actor: fx.agent)
+    {:ok, run} = Agents.start_run(run, actor: fx.agent)
+    %{run: run, operation: operation, job: job, invocation: completed!(fx, run)}
+  end
+
+  @doc """
+  Makes the assignment's job not live through Oban's own API
+  (`Oban.cancel_job/1`) and freezes the clock past the sweeper's grace, so
+  `SdrAgent.SDR.StaleRunSweeper.sweep/1` judges the run abandoned.
+  """
+  def abandon!(assigned) do
+    :ok = Oban.cancel_job(assigned.job.id)
+    run = Ash.get!(SdrAgent.Agents.AgentRun, assigned.run.id, authorize?: false)
+    stale = SdrAgent.SDR.StaleRunSweeper.stale_after_seconds() + 1
+    SdrAgent.Clock.freeze(DateTime.add(run.started_at, stale, :second))
+  end
 
   @doc """
   A value-free summary of a result for assertion messages (Codex 3122b0d4

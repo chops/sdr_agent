@@ -51,7 +51,7 @@ defmodule SdrAgent.Prototype.StateProbeOracleTest do
            "the probe did not see the aborted transaction"
 
     assert G.probe_then_owner_rollback?(sql),
-           "captured after the abort: #{inspect(G.after_abort(sql))}"
+           "after the abort: #{inspect(G.after_abort_shape(sql))}"
   end
 
   for {label, statements} <- [
@@ -64,7 +64,7 @@ defmodule SdrAgent.Prototype.StateProbeOracleTest do
       {sql, _aborted, _results} = captured(unquote(statements))
 
       refute G.probe_then_owner_rollback?(sql),
-             "accepted: #{inspect(G.after_abort(sql))}"
+             "accepted: #{inspect(G.after_abort_shape(sql))}"
     end
   end
 end

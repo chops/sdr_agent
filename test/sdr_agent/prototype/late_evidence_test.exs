@@ -16,7 +16,9 @@ defmodule SdrAgent.Prototype.LateEvidenceTest do
       again. It never continues with a stale cause and never escalates.
     * A repeat that again sees changed evidence returns
       `{:error, :recheck_failed}` with nothing written: no third attempt.
-      Through the facade, Recovery then decides, and never releases.
+      Through the facade it is returned unchanged (TF-1, Codex eff38bd0 and
+      cc688175: no Recovery fallback in prototype runtime), and nothing is
+      decided.
 
   The invocation was reserved and completed before prototype runtime
   (`PrototypeGateFixtures.pre_runtime!/1`), so it records no prototype
@@ -151,15 +153,21 @@ defmodule SdrAgent.Prototype.LateEvidenceTest do
     assert reloaded(ctx.run).status == :running
   end
 
-  test "through the facade, a recheck failure goes to Recovery, which never releases", ctx do
+  # TF-1 (Codex eff38bd0, cc688175): an explicit contract correction of the
+  # former "goes to Recovery" expectation, not a weakening: the facade
+  # returns recheck_failed unchanged and nothing is decided.
+  test "through the facade, a recheck failure is returned unchanged; nothing decided", ctx do
     late_critical!(ctx, [1, 2, 3])
     result = ResultGate.gate(ctx.invocation, G.gate(ctx.run))
 
-    assert match?({:withheld, %{reason: :gate_interrupted}, _run}, result),
-           "gate after #{calls()} before_head call(s): #{inspect(result)}"
+    assert result == {:error, :recheck_failed},
+           "gate after #{calls()} before_head call(s): #{inspect(G.summary(result))}"
 
     assert calls() == 2
+    assert G.release(ctx.invocation) == nil
+    assert withheld_events(ctx.fx) == []
     assert events_of_type(ctx.fx.tenant, "model.result.released_unverified") == []
+    assert reloaded(ctx.run).status == :running
   end
 
   test "each attempt locks run, Operation, invocation and cause before the head; none after",
