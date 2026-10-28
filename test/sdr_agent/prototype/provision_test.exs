@@ -199,7 +199,9 @@ defmodule SdrAgent.Prototype.ProvisionTest do
     end
 
     test "an identical replay returns the same grant; no second grant is created", ctx do
-      {:ok, grant} = provision(ctx)
+      first = provision(ctx)
+      assert match?({:ok, _}, first), "provision: #{inspect(first)}"
+      {:ok, grant} = first
       assert match?({:ok, %{id: id}} when id == grant.id, provision(ctx))
 
       %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM model_call_grants", [])
@@ -207,13 +209,22 @@ defmodule SdrAgent.Prototype.ProvisionTest do
     end
 
     test "a non-operator cannot provision", ctx do
-      assert match?({:error, _}, provision(ctx, ctx.admin))
-      assert match?({:error, _}, provision(ctx, system_actor(:agent_runtime, ctx.fx.tenant)))
+      for {name, actor} <- [
+            admin: ctx.admin,
+            agent_runtime: system_actor(:agent_runtime, ctx.fx.tenant)
+          ] do
+        result = provision(ctx, actor)
+
+        assert match?({:error, %Ash.Error.Forbidden{}}, result),
+               "#{name}: expected Forbidden, got #{inspect(result)}"
+      end
     end
 
     test "in prototype runtime grant creation, term changes and releases are refused; revoke is the operator's",
          ctx do
-      {:ok, grant} = provision(ctx)
+      provisioned = provision(ctx)
+      assert match?({:ok, _}, provisioned), "provision: #{inspect(provisioned)}"
+      {:ok, grant} = provisioned
       admin = ctx.admin
 
       created =
