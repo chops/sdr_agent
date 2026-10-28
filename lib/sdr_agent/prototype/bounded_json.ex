@@ -139,27 +139,27 @@ defmodule SdrAgent.Prototype.BoundedJson do
 
   defp read_after_identity(handle, max_bytes) do
     hook(:after_identity, handle)
-    read_bounded(handle, max_bytes + 1, [])
+    read_bounded(handle, max_bytes + 1, <<>>)
   end
 
   # At most `remaining` bytes (the bound plus one sentinel byte) in total.
   defp read_bounded(handle, remaining, acc) when remaining > 0 do
     case :file.read(handle, remaining) do
       {:ok, <<_, _::binary>> = chunk} ->
-        read_bounded(handle, remaining - byte_size(chunk), [acc, chunk])
+        read_bounded(handle, remaining - byte_size(chunk), <<acc::binary, chunk::binary>>)
 
       {:ok, <<>>} ->
-        {:ok, IO.iodata_to_binary(acc)}
+        {:ok, acc}
 
       :eof ->
-        {:ok, IO.iodata_to_binary(acc)}
+        {:ok, acc}
 
       {:error, _reason} ->
         file_failure(:unreadable)
     end
   end
 
-  defp read_bounded(_handle, _remaining, acc), do: {:ok, IO.iodata_to_binary(acc)}
+  defp read_bounded(_handle, _remaining, acc), do: {:ok, acc}
 
   # The digest is of exactly this one snapshot; the path is never reread.
   defp check_snapshot(snapshot, sha256_hex, max_bytes) do
