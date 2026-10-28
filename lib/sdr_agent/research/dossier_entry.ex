@@ -18,10 +18,12 @@ defmodule SdrAgent.Research.DossierEntry do
   `(tenant_id, sha256)` foreign keys to `payloads`.
 
   APPEND-ONLY (trigger). Every entry counts toward the binding-wide contact
-  cap. The schema is frozen by S1 (D-237 freeze); the `:import` shell (its
-  name, empty accept list, server-derived tenant, trace ids and the
-  `OperatorAction(:import_dossier)` policy) is S1's and refuses every call
-  until S3 delivers its body (`SdrAgent.Research.Changes.ImportPending`).
+  cap. The schema is frozen by S1 (D-237 freeze). The `:import` shell (its
+  name, server-derived tenant, trace ids and the
+  `OperatorAction(:import_dossier)` policy) is S1's; its body (the accepted
+  inputs, the importing delegation taken from the acting operator, and the
+  `research.dossier_entry.imported` event) is S3's. Replay and the cap are
+  decided by `SdrAgent.Prototype.DossierImport` under the binding lock.
   Reads here: the audit kernel.
   """
   use Ash.Resource,
@@ -94,15 +96,38 @@ defmodule SdrAgent.Research.DossierEntry do
   actions do
     defaults [:read]
 
-    # D-237 shell (S1; Codex d4196c02): the name, an explicit empty accept
-    # list, the server-derived tenant and trace ids, and the operator policy.
-    # S3 replaces the pending refusal with the body (accepted inputs,
-    # arguments, validated changes, audit, replay and cap).
+    # D-237: S1's shell (the name, the server-derived tenant and trace ids,
+    # the operator policy; Codex d4196c02) with S3's body: the accepted
+    # inputs, the importing delegation taken from the acting operator, and
+    # the audit event. Replay of an identical (dossier_sha256, row_id) and
+    # the binding-wide contact cap are decided by
+    # SdrAgent.Prototype.DossierImport under the binding lock, inside the
+    # same row transaction, before this action runs (supplement 1 r2 §5, R9).
     create :import do
-      accept []
+      description "OPR (D-237): record one imported dossier row inside its row transaction."
+
+      accept [
+        :lead_id,
+        :account_id,
+        :contact_id,
+        :dossier_sha256,
+        :row_id,
+        :spotcheck_sha256,
+        :email_kind,
+        :contact_classification,
+        :contact_confidence,
+        :claims_sha256,
+        :notes_sha256
+      ]
+
+      # The importing delegation is the acting operator itself (IF-3): an
+      # entry proves its binding through it. Never caller-supplied.
+      change set_attribute(:delegation_id, actor(:id))
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
-      change SdrAgent.Research.Changes.ImportPending
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "research.dossier_entry.imported", category: :domain_change}
     end
   end
 
