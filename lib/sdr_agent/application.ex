@@ -10,6 +10,8 @@ defmodule SdrAgent.Application do
 
   @impl true
   def start(_type, _args) do
+    # D-237 (IF-8): SafeLog first when the prototype switch is set.
+    :ok = attach_safe_log()
     # S12d: an explicitly configured but untrusted or missing witness store
     # root refuses to boot, before anything starts or reads (ADR-0005).
     Witness.check_configured_root!()
@@ -34,6 +36,9 @@ defmodule SdrAgent.Application do
       [
         SdrAgentWeb.Telemetry,
         SdrAgent.Repo,
+        # D-237 (IF-2): the one boot check, right after the Repo and before
+        # the model provider, Oban and the endpoint; a refusal fails the start.
+        {SdrAgent.Prototype.BootCheck, []},
         {DNSCluster, query: Application.get_env(:sdr_agent, :dns_cluster_query) || :ignore}
       ] ++
       ModelProviderRuntime.children() ++
@@ -46,6 +51,15 @@ defmodule SdrAgent.Application do
         SdrAgentWeb.Endpoint,
         {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
       ]
+  end
+
+  # D-237 (IF-8): with the prototype switch set, the content-free SafeLog is
+  # attached before any other startup work; a failure aborts the start.
+  defp attach_safe_log do
+    case Keyword.get(Application.get_env(:sdr_agent, SdrAgent.Prototype, []), :switch, :off) do
+      :off -> :ok
+      _switched -> SdrAgent.Prototype.SafeLog.attach()
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration

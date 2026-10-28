@@ -109,8 +109,18 @@ defmodule SdrAgent.Accounts.UserTest do
         |> Enum.map(& &1.name)
         |> Enum.sort()
 
-      # ADM create, the kernel's first-admin bootstrap, and the dev/test seed.
-      assert creates == [:bootstrap_admin, :create_user, :seed]
+      # ADM create, the kernel's first-admin bootstrap, the dev/test seed,
+      # and the two D-237 setup-only creates (interfaces r6 IF-3), which only
+      # a kernel request carrying the prototype `:setup` marker authorizes
+      # (`SdrAgent.Prototype.Checks.KernelMarker`, marker: :setup).
+      assert creates == [
+               :bootstrap_admin,
+               :create_prototype_anchor,
+               :create_prototype_auditor,
+               :create_user,
+               :seed
+             ]
+
       refute Ash.Resource.Info.actions(User) |> Enum.any?(&(&1.type == :destroy))
     end
 

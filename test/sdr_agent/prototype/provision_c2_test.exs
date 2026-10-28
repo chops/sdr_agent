@@ -782,6 +782,111 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
       assert registered() == 0, "after raise: #{inspect(registered())}"
     end
 
+    # Codex 54f4263b P0-3: the cleanup fault proof. A failed statement in a
+    # hook aborts the provisioning transaction (so ProvisionScope's own
+    # marker read, and every later statement, fails); a programming error is
+    # raised with the scope's marker set. Each must end in no grant, no
+    # allocation and no provisioned event, with no scope registered, never
+    # a success, and never a later hook running on the aborted transaction.
+    defp attempt(actor, bytes, root) do
+      provision(actor, bytes, root)
+    rescue
+      error -> {:raised, error}
+    end
+
+    defp aborting_statement, do: Repo.query("SELECT 1 / 0", [])
+
+    defp division_by_zero?(result),
+      do: match?({:error, %Postgrex.Error{postgres: %{code: :division_by_zero}}}, result)
+
+    test "P0-3: a read failure after the grant insert leaves no survivors and stops", ctx do
+      hook(:scope_bound, fn _scope -> see(:aborted, aborting_statement()) end)
+      hook(:after_allocations, fn _scope -> see(:continued, true) end)
+      before = counts()
+
+      result = attempt(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+
+      assert division_by_zero?(seen(:aborted)),
+             "prerequisite: the aborting statement ran after the grant insert: #{inspect(seen(:aborted))}"
+
+      refute match?({:ok, _}, result), "provision succeeded after the abort: #{inspect(result)}"
+      assert seen(:continued) == nil, "a later hook ran on the aborted transaction"
+      assert counts() == before
+      assert registered() == 0, "after the read failure: #{inspect(registered())}"
+    end
+
+    test "P0-3: a read failure after the allocation insert leaves no survivors", ctx do
+      hook(:after_allocations, fn _scope -> see(:aborted, aborting_statement()) end)
+      before = counts()
+
+      result = attempt(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+
+      assert division_by_zero?(seen(:aborted)),
+             "prerequisite: the aborting statement ran after the allocation insert: #{inspect(seen(:aborted))}"
+
+      refute match?({:ok, _}, result), "provision succeeded after the abort: #{inspect(result)}"
+      assert counts() == before
+      assert registered() == 0, "after the read failure: #{inspect(registered())}"
+    end
+
+    test "P0-3: a programming error with the marker set leaves no survivors (negative control)",
+         ctx do
+      hook(:after_allocations, fn scope ->
+        see(:marker, scope && scope.marker)
+        raise KeyError, key: :injected, term: %{}
+      end)
+
+      before = counts()
+      result = attempt(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+
+      assert is_binary(seen(:marker)), "prerequisite: the scope's marker was set at the hook"
+      assert match?({:raised, _}, result), "the injected raise: #{inspect(result)}"
+      {:raised, error} = result
+      assert Exception.message(error) =~ "injected", "raise cause: #{inspect(error)}"
+      assert counts() == before
+      assert registered() == 0, "after the programming error: #{inspect(registered())}"
+    end
+
+    # Codex 93af0eec qualification: during the LIVE hook (scope registered,
+    # bound, unconsumed), a copy of the bound scope with any one field
+    # altered, or a hand-built struct under a fresh ref, writing the exact
+    # planned allocation is Forbidden; the genuine write still succeeds.
+    test "D3: an altered-field or hand-built scope with the exact plan is refused during the live hook",
+         ctx do
+      actor = ctx.fx.actor
+
+      hook(:scope_bound, fn scope ->
+        exact = planned(scope.grant_id)
+        [planned_row] = scope.planned
+
+        altered = [
+          marker: %{scope | marker: scope.marker <> "x"},
+          xact_id: %{scope | xact_id: "0"},
+          delegation_id: %{scope | delegation_id: Ecto.UUID.generate()},
+          anchor_id: %{scope | anchor_id: Ecto.UUID.generate()},
+          tenant_id: %{scope | tenant_id: Ecto.UUID.generate()},
+          binding_id: %{scope | binding_id: Ecto.UUID.generate()},
+          planned: %{scope | planned: [%{planned_row | attempts: 49}]},
+          grant_revision: %{scope | grant_revision: 2},
+          consumed: %{scope | consumed?: true},
+          hand_built_fresh_ref:
+            Map.put(Map.from_struct(scope), :ref, make_ref())
+            |> Map.put(:__struct__, @scope_module)
+        ]
+
+        see(:altered, for({name, copy} <- altered, do: {name, raw(actor, exact, copy)}))
+      end)
+
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      assert is_list(seen(:altered)), "prerequisite: the :scope_bound hook ran"
+
+      for {name, result} <- seen(:altered) do
+        assert forbidden?(result), "#{name}: #{inspect(result)}"
+      end
+
+      assert allocations_of(grant.id) == [@b1]
+    end
+
     test "D3: a forged ref, a hand-built scope and another delegation of the binding are refused",
          ctx do
       actor = ctx.fx.actor

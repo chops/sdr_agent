@@ -15,7 +15,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       auditor (`auditor_password:`), the binding and the setup session's
       delegation (`agent:`, `session_correlation:`); `{:ok, %{tenant:,
       anchor:, auditor:, binding:, delegation:}}`, or
-      `{:error, :bootstrap_failed}` with everything rolled back. In a
+      `{:error, :bootstrap_failed}` with everything rolled back. It is top
+      level only: inside an already-open transaction it refuses with
+      `{:error, :bootstrap_failed}` before any query or write. In a
       test-seam build only (`:prototype_test_seams`), inside that
       transaction after the binding write and before the delegation's, it
       calls the one-argument hook `{SdrAgent.Prototype.Authority,
@@ -24,9 +26,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     - `snapshot/1`: the `SdrAgent.Prototype.Binding` of a binding row;
     - `resolve_delegation/2`: resolver steps 3-7 of IF-1 for a boot snapshot
       and a delegation row (or nil);
-    - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0`,
-      `write_credential/1`, `check_fresh/0`, `check_resumable/0`,
-      `pinned_migrations/0`;
+    - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0,1`
+      with `app_names/0`, `write_credential/1` (still a stub; the credential
+      is owner-held), `check_fresh/0`, `check_resumable/0`,
+      `public_tables/0` and `pinned_migrations/0`;
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
       evidence under a root;
     - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
@@ -164,17 +167,55 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    # The runtime in effect. A test-seam build reads the calling process only
-    # (`SdrAgent.Prototype.Authority.TestSeam`); no global lookup. Any other
-    # build keeps its RED declaration until BootCheck fixes the VM runtime
-    # (increment G): ordinary, typed dynamic through `red/1`, never written.
-    if @test_seams do
-      @runtime_key {SdrAgent.Prototype, :runtime}
+    @runtime_key {SdrAgent.Prototype, :runtime}
 
+    # The fixed runtime: nil (unfixed), :ordinary or {:prototype, snapshot}.
+    # A test-seam build reads the calling process (then its $callers) through
+    # `SdrAgent.Prototype.Authority.TestSeam`; any other build reads the VM
+    # value that `SdrAgent.Prototype.BootCheck.verify!/1` fixed once.
+    if @test_seams do
       defp current, do: SdrAgent.Prototype.Authority.TestSeam.lookup(@runtime_key)
+      defp store(:ordinary), do: SdrAgent.Prototype.Authority.TestSeam.leave_runtime()
+
+      defp store({:prototype, snapshot}),
+        do: SdrAgent.Prototype.Authority.TestSeam.enter_runtime(snapshot)
+
+      defp serial(fun), do: fun.()
     else
-      defp current, do: red(:ordinary)
+      defp current, do: :persistent_term.get(@runtime_key, nil)
+
+      defp store(fixed) do
+        :persistent_term.put(@runtime_key, fixed)
+        :ok
+      end
+
+      # persistent_term is not compare-and-set: the first fix is serialized on
+      # one VM-local lock (Codex 23b4603a G1).
+      # A fixed resource id, a per-process requester (Codex 026058ec); the
+      # read, compare and write all run inside; a failed lock refuses.
+      defp serial(fun) do
+        case :global.trans({{SdrAgent.Prototype.BootCheck, :runtime_fix}, self()}, fun, [node()]) do
+          :aborted -> {:error, :binding_not_exact}
+          result -> result
+        end
+      end
     end
+
+    @doc """
+    The write-once runtime transition (G1, Codex 23b4603a), for
+    `SdrAgent.Prototype.BootCheck.verify!/1` only: unfixed takes the checked
+    result; the identical fixed result is idempotent; any other transition
+    (ordinary → prototype, prototype → another prototype, prototype →
+    ordinary) is `{:error, :binding_not_exact}` and changes nothing.
+    """
+    @spec fix_runtime({:ok, :ordinary | {:prototype, Binding.t()}}) ::
+            :ok | {:error, :binding_not_exact}
+    def fix_runtime({:ok, wanted}) when wanted == :ordinary or elem(wanted, 0) == :prototype,
+      do: serial(fn -> transition(current(), wanted) end)
+
+    defp transition(nil, wanted), do: store(wanted)
+    defp transition(same, same), do: :ok
+    defp transition(_fixed, _other), do: {:error, :binding_not_exact}
 
     @doc """
     Creates or replays this agent session's delegation (IF-3), from the boot
@@ -188,9 +229,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     the kernel with the `:task_entry` marker, with binding, tenant and
     anchor forced from the snapshot.
 
-    A concurrent creator's unique violation on that identity is re-read
-    only AFTER the failed top-level transaction has rolled back, never
-    inside the aborted transaction; any other failure is
+    A concurrent creator's unique violation on that identity, as the
+    failure's SOLE error, is re-read only AFTER the failed top-level
+    transaction has rolled back, never inside the aborted transaction; any
+    other failure, including that error together with any other, is
     `:binding_mismatch`, never a replay. A call inside an already-open
     transaction (a nested Audit or Repo transaction is not a savepoint) is
     refused with `:binding_mismatch` after the input checks and before any
@@ -272,15 +314,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp session_conflict?(%Ash.Error.Invalid{errors: errors}), do: unique_session?(errors)
     defp session_conflict?(_other), do: false
 
-    defp unique_session?(errors) do
-      Enum.any?(List.wrap(errors), fn
-        %Ash.Error.Changes.InvalidAttribute{private_vars: vars} when is_list(vars) ->
-          vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
+    # Codex 54f4263b P0-1: recoverable only when the failure carries exactly
+    # one error and it is the session unique constraint. A mixed list (that
+    # error with any other) or a repeated one is never a recoverable race.
+    defp unique_session?([%Ash.Error.Changes.InvalidAttribute{private_vars: vars}])
+         when is_list(vars),
+         do: vars[:constraint_type] == :unique and vars[:constraint] == @session_identity_index
 
-        _other ->
-          false
-      end)
-    end
+    defp unique_session?(_errors), do: false
 
     defp find_session(binding_id, agent, correlation) do
       PrototypeDelegation
@@ -313,7 +354,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
     def bootstrap(opts) do
-      with {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
+      with :ok <- bootstrap_top_level(),
+           {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
            {:ok, correlation} <- setup_correlation(Keyword.get(opts, :session_correlation)),
            {:ok, created} <-
              Audit.transaction(fn -> bootstrap_steps(opts, agent, correlation) end) do
@@ -324,6 +366,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     rescue
       _error -> {:error, :bootstrap_failed}
     end
+
+    # Codex 54f4263b P0-2: top level only. A caller's open transaction would
+    # make phase 2 share its physical transaction (no savepoint), so it is
+    # refused first, before any query or write; Repo.in_transaction?/0 issues
+    # no query.
+    defp bootstrap_top_level,
+      do: if(Repo.in_transaction?(), do: {:error, :nested_transaction}, else: :ok)
 
     # Inside the transaction: any error rolls every write back.
     defp bootstrap_steps(opts, agent, correlation) do
@@ -416,7 +465,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
              %{database: String.t(), database_oid: pos_integer(), system_identifier: integer()}}
             | {:error, :live_identity_unavailable}
     def live_identity do
-      case Repo.query(@identity_sql, []) do
+      case identity_query() do
         {:ok, %{rows: [[name, oid, system_identifier]]}}
         when is_binary(name) and is_integer(oid) and oid > 0 and is_integer(system_identifier) ->
           {:ok,
@@ -473,10 +522,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           do: {:ok, nil},
           else: result
       end
+
+      # Codex dd9c0f20 F1: the synthetic catalog seam. When the calling
+      # process sets `{SdrAgent.Prototype.Authority, :catalog_tables}` to a
+      # one-argument function, the observed public-table list passes
+      # through it; no schema object changes.
+      defp seam_catalog(tables) do
+        case Process.get({__MODULE__, :catalog_tables}) do
+          hook when is_function(hook, 1) -> hook.(tables)
+          _none -> tables
+        end
+      end
     else
       defp seam_identity(identity), do: identity
       defp seam(_name, _arg), do: :ok
       defp seam_lookup(result), do: result
+      defp seam_catalog(tables), do: tables
     end
 
     @doc """
@@ -519,11 +580,64 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       _error -> false
     end
 
-    defp read_bindings do
+    defp read_bindings_real do
       PrototypeDatabaseBinding
       |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
       |> Ash.Query.limit(2)
       |> Ash.read()
+    end
+
+    defp delegation_read_real(uuid) do
+      PrototypeDelegation
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.filter(id == ^uuid)
+      |> Ash.read_one()
+    end
+
+    # The three live reads (the binding read, the identity query, the
+    # delegation read). In a test-seam build each consults
+    # `TestSeam.claim_live_fault/1` immediately before its real read
+    # (proposal r2, Codex 382437da): `:returned_error` replaces the read's
+    # result and `:raise` raises in its place (no target SQL; the caller's
+    # own handling and rescue are unchanged), `:abort` runs one tagged real
+    # `SELECT 1 / 0` and then the REAL read. Any other build is the plain
+    # read, with no reference to the seam.
+    if @test_seams do
+      defp read_bindings,
+        do: live_fault(:binding_read, &ash_fault/0, &read_bindings_real/0)
+
+      defp identity_query,
+        do: live_fault(:identity_read, &query_fault/0, fn -> Repo.query(@identity_sql, []) end)
+
+      defp delegation_read(uuid),
+        do: live_fault(:delegation_read, &ash_fault/0, fn -> delegation_read_real(uuid) end)
+
+      defp live_fault(stage, synthetic, read) do
+        case SdrAgent.Prototype.Authority.TestSeam.claim_live_fault(stage) do
+          nil ->
+            read.()
+
+          :returned_error ->
+            synthetic.()
+
+          :raise ->
+            raise ArgumentError, "test seam: live-stage fault"
+
+          :abort ->
+            _ = Repo.query("SELECT 1 / 0", [], telemetry_options: [d237_live_fault: stage])
+            read.()
+        end
+      end
+
+      defp ash_fault,
+        do:
+          {:error, Ash.Error.Unknown.UnknownError.exception(error: "test seam: live-stage fault")}
+
+      defp query_fault, do: {:error, %Postgrex.Error{message: "test seam: live-stage fault"}}
+    else
+      defp read_bindings, do: read_bindings_real()
+      defp identity_query, do: Repo.query(@identity_sql, [])
+      defp delegation_read(uuid), do: delegation_read_real(uuid)
     end
 
     @doc """
@@ -547,10 +661,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp read_delegation(id) do
       case Ecto.UUID.cast(id) do
         {:ok, uuid} ->
-          PrototypeDelegation
-          |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
-          |> Ash.Query.filter(id == ^uuid)
-          |> Ash.read_one()
+          uuid
+          |> delegation_read()
           |> case do
             {:ok, delegation} -> {:ok, delegation}
             {:error, _error} -> {:error, :binding_mismatch}
@@ -592,29 +704,237 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def operator?(_actor), do: false
 
-    @doc "`:ok` when a Repo config targets exactly the prototype socket, port and database."
-    @spec check_repo_target(keyword()) :: :ok | {:error, :repo_target_mismatch}
-    def check_repo_target(_config), do: red({:error, :not_implemented})
+    # IF-2 phase 0: the one Repo target, sorted by key.
+    @repo_target [database: @database, port: 5541, socket_dir: "/private/tmp/d237-pg"]
+    # Every Repo option that selects a PostgreSQL target (Postgrex/Ecto).
+    @target_selectors [:database, :endpoints, :hostname, :port, :socket, :socket_dir, :url]
 
-    @doc "`:ok` when no Oban, endpoint or provider name is alive; otherwise `:app_running`."
+    @doc """
+    `:ok` when a Repo config (a keyword list) targets exactly the prototype
+    socket directory, port and database: each selector at most once, no
+    `:socket`, `:url` or `:endpoints`, and `:hostname` absent or
+    `"localhost"` (Postgrex gives `:socket_dir` precedence over it).
+    Anything else is `:repo_target_mismatch`.
+    """
+    @spec check_repo_target(term()) :: :ok | {:error, :repo_target_mismatch}
+    def check_repo_target(config) when is_list(config) do
+      if Keyword.keyword?(config) and exact_target?(config),
+        do: :ok,
+        else: {:error, :repo_target_mismatch}
+    end
+
+    def check_repo_target(_config), do: {:error, :repo_target_mismatch}
+
+    defp exact_target?(config) do
+      selectors = for {key, _value} = entry <- config, key in @target_selectors, do: entry
+      keys = Keyword.keys(selectors)
+
+      # Codex dd9c0f20 F2: DBConnection runs a :configure fun or MFA
+      # before each connect, which could redirect the target; only nil is
+      # accepted, and the callback is never called here.
+      keys == Enum.uniq(keys) and
+        Enum.all?(Keyword.get_values(config, :configure), &is_nil/1) and
+        Enum.sort(Keyword.delete(selectors, :hostname)) == @repo_target and
+        Keyword.get(selectors, :hostname, "localhost") == "localhost"
+    end
+
+    # IF-2 phase 0: Oban, the endpoint and the model provider tree
+    # (`SdrAgent.AI.ModelProvider.ProfileSupervisor`'s children and the
+    # `ClaudeCLI.server/0` name).
+    @app_names [
+      {:oban, Oban},
+      {:process, SdrAgentWeb.Endpoint},
+      {:process, SdrAgent.AI.ModelProvider.ProfileSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.ServerSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.Coordinator},
+      {:process, SdrAgent.AI.ModelProvider.OperationSupervisor},
+      {:process, SdrAgent.AI.ModelProvider.ClaudeCLI}
+    ]
+
+    @doc "`:ok` when none of `app_names/0` is alive; otherwise `:app_running`."
     @spec check_app_stopped() :: :ok | {:error, :app_running}
-    def check_app_stopped, do: red({:error, :not_implemented})
+    def check_app_stopped, do: check_app_stopped(@app_names)
+
+    @doc """
+    As `check_app_stopped/0`, for an explicit list of `app_names/0`-shaped
+    names: an Oban instance is alive when `Oban.whereis/1` finds it, any
+    other name when it resolves to a live pid. A malformed entry counts as
+    alive (fail closed).
+    """
+    @spec check_app_stopped(term()) :: :ok | {:error, :app_running}
+    def check_app_stopped(names) when is_list(names) do
+      if Enum.any?(names, &alive?/1), do: {:error, :app_running}, else: :ok
+    end
+
+    def check_app_stopped(_names), do: {:error, :app_running}
+
+    @doc "The IF-2 app-running names: Oban, the endpoint and the model provider tree."
+    @spec app_names() :: [{:oban | :process, atom()}]
+    def app_names, do: @app_names
+
+    defp alive?({:oban, name}) when is_atom(name), do: is_pid(Oban.whereis(name))
+
+    defp alive?({:process, name}) when is_atom(name) do
+      case Process.whereis(name) do
+        nil -> false
+        pid when is_pid(pid) -> Process.alive?(pid)
+        _port -> true
+      end
+    end
+
+    defp alive?(_malformed), do: true
 
     @doc "Creates the auditor credential file exclusively (0600) and returns its password."
     @spec write_credential(Path.t()) :: {:ok, String.t()} | {:error, atom()}
     def write_credential(_path), do: red({:error, :not_implemented})
 
-    @doc "`:ok` when the database holds no tenant, user, binding, delegation, head or business row."
+    # The exact migration set setup runs (`priv/repo/migrations`, in
+    # version order); a new migration must be added here, or resume refuses.
+    @pinned_migrations [
+      {20_261_006_212_538, "initialize_extensions_1"},
+      {20_261_006_212_604, "add_authentication_resources_extensions_1"},
+      {20_261_006_212_605, "add_authentication_resources"},
+      {20_261_006_212_617, "add_oban"},
+      {20_261_007_021_151, "s3_audit_kernel"},
+      {20_261_007_030_213, "s11_anchoring_export"},
+      {20_261_007_033_707, "s11_security_fix"},
+      {20_261_007_042_000, "preserve_key_retirement"},
+      {20_261_007_043_305, "s5_domain"},
+      {20_261_007_051_155, "s7_operations"},
+      {20_261_007_142_841, "s8a_outreach"},
+      {20_261_007_150_632, "s8b_delivery"},
+      {20_261_007_155_131, "s9a_replies"},
+      {20_261_007_160_142, "s9b_reply_assessments"},
+      {20_261_007_175_954, "s12b_wire_witness"},
+      {20_261_012_181_602, "c9_model_call_grants"},
+      {20_261_012_182_415, "c9_run_usage_origin"},
+      {20_261_012_182_416, "c9_admission"},
+      {20_261_012_214_848, "r0_07a_result_release"},
+      {20_261_014_220_246, "c1_inbox_indexes"},
+      {20_261_015_074_454, "c2_02a_profile_switch"},
+      {20_261_015_164_737, "c2_02b2a_model_server_starts"},
+      {20_261_016_011_853, "c4_01a_run_settings"},
+      {20_261_016_041_646, "c2_02b2b_resolve"},
+      {20_261_016_052_435, "c2_02b2b_resolution_check"},
+      {20_261_021_101_539, "v4_mismatch_lineage"},
+      {20_261_026_033_738, "ash_functions_v7_extensions_1"},
+      {20_261_028_052_008, "d237_01_users"},
+      {20_261_028_052_100, "d237_02_actor_types"},
+      {20_261_028_052_135, "d237_03_prototype_database_bindings"},
+      {20_261_028_052_139, "d237_04_prototype_delegations"},
+      {20_261_028_052_257, "d237_05_release_decisions"},
+      {20_261_028_052_400, "d237_06_sources"},
+      {20_261_028_052_425, "d237_07_dossier"}
+    ]
+
+    # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
+    # inventory of the pinned migration set, sorted. It includes the five
+    # IF-2 named tables (audit_chain_heads, prototype_database_bindings,
+    # prototype_delegations, tenants, users), every business table and
+    # Oban's two; schema_migrations is checked separately. A new table must
+    # be added here with its migration, or setup refuses.
+    @public_tables Enum.sort(~w(
+      accounts agent_definitions agent_runs anchor_sink_receipts approvals
+      audit_accesses audit_anchors audit_chain_heads audit_events audit_exports
+      audit_signing_keys campaign_enrollments campaigns contacts decisions
+      delivery_operations delivery_receipts dossier_entries dossier_sources
+      draft_revisions drafts evidence_claims failures icp_definitions leads
+      model_call_allocations model_call_grants model_invocations
+      model_profile_settings model_profile_switches model_result_releases
+      model_server_counters model_server_starts oban_jobs oban_peers operations
+      payloads prototype_database_bindings prototype_delegations
+      provenance_snapshots qualification_evidences qualifications replies
+      reply_assessments research_artifacts retention_markers revision_citations
+      run_settings_snapshots send_quota_days sequence_steps sequences
+      settings_revisions suppressions tenants tokens tool_invocations users
+      webhook_events wire_witness_links
+    ))
+
+    @doc """
+    `:ok` when the public schema's base tables other than `schema_migrations`
+    are exactly `public_tables/0`, no more and no fewer (an extra public
+    table refuses as well as a missing one), and none of them holds a row.
+    It reads the catalog and row presence only, never row content. Any
+    other outcome, including a failed read, is `:database_not_fresh`.
+    """
     @spec check_fresh() :: :ok | {:error, :database_not_fresh}
-    def check_fresh, do: red({:error, :not_implemented})
+    def check_fresh, do: if(rowless?(), do: :ok, else: {:error, :database_not_fresh})
 
-    @doc "`:ok` when the database holds exactly the pinned migrations and no row (bounded resume)."
+    @doc """
+    `:ok` for the bounded resume: `schema_migrations` holds exactly the
+    versions of `pinned_migrations/0`, no more and no fewer, and
+    `check_fresh/0`'s tables hold no row. Anything else, or a failed read,
+    is `:database_not_resumable`.
+    """
     @spec check_resumable() :: :ok | {:error, :database_not_resumable}
-    def check_resumable, do: red({:error, :not_implemented})
+    def check_resumable do
+      if migrated_exactly?() and rowless?(),
+        do: :ok,
+        else: {:error, :database_not_resumable}
+    end
 
-    @doc "The pinned migration set, `[{version, name}]` in order."
-    @spec pinned_migrations() :: [{integer(), String.t()}] | {:error, atom()}
-    def pinned_migrations, do: red({:error, :not_implemented})
+    # The catalog must equal the fixed inventory; only then is row presence
+    # read, over the fixed inventory. Each outcome is matched on its own;
+    # every one but `{:ok, exact, no row}` refuses.
+    defp rowless? do
+      case catalog_tables() do
+        {:ok, @public_tables} ->
+          case Repo.query(any_row_sql(@public_tables), []) do
+            {:ok, %{rows: [[false]]}} -> true
+            {:ok, %{rows: [[true]]}} -> false
+            {:error, _read_failed} -> false
+          end
+
+        {:ok, _missing_or_extra} ->
+          false
+
+        {:error, _read_failed} ->
+          false
+      end
+    end
+
+    defp catalog_tables do
+      case Repo.query(
+             "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+               "AND tablename <> 'schema_migrations' ORDER BY tablename",
+             []
+           ) do
+        {:ok, %{rows: rows}} ->
+          {:ok, Enum.sort(seam_catalog(Enum.map(rows, fn [table] -> table end)))}
+
+        {:error, _read_failed} = failed ->
+          failed
+      end
+    end
+
+    # One statement: does any of `tables` hold a row (identifiers quoted).
+    defp any_row_sql(tables) do
+      "SELECT " <>
+        Enum.map_join(tables, " OR ", fn table ->
+          ~s[EXISTS (SELECT 1 FROM "public"."#{String.replace(table, ~s["], ~s[""])}")]
+        end)
+    end
+
+    defp migrated_exactly? do
+      # Codex dd9c0f20 F3: qualified, as the row checks are, so no
+      # search_path or pg_temp shadow can answer for the public table.
+      case Repo.query("SELECT version FROM public.schema_migrations ORDER BY version", []) do
+        {:ok, %{rows: rows}} ->
+          Enum.map(rows, fn [version] -> version end) ==
+            Enum.map(@pinned_migrations, &elem(&1, 0))
+
+        {:error, _error} ->
+          false
+      end
+    end
+
+    @doc "The pinned public base-table inventory of the pinned migration set (F1)."
+    @spec public_tables() :: [String.t()]
+    def public_tables, do: @public_tables
+
+    @doc "The pinned migration set, `[{version, name}]` in version order."
+    @spec pinned_migrations() :: [{integer(), String.t()}]
+    def pinned_migrations, do: @pinned_migrations
 
     @doc """
     Checks the IF-2 budget worksheet `bytes` against its sha256 hex, with its
@@ -792,9 +1112,24 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         (`database`, `database_oid`, `system_identifier`) or makes its read
         raise (`:raise`), for the calling process; by default the test
         database reads as `sdr_agent_prototype`.
+      - `put_boot_switch/1` sets the calling process's boot-switch input:
+        the switch `SdrAgent.Prototype.BootCheck.verify!/0` reads in a test
+        build, independent of the fixed runtime (Codex 026058ec); an
+        explicit `verify!(switch: ...)` takes precedence. Process-local
+        only (never read from `$callers`).
       - `leave_runtime/0` returns the process to ordinary runtime;
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
+      - `with_live_fault/3` and `live_fault_hits/1`: the live-read fault
+        seam (proposal r2; Codex 7ba6d116, 382437da). A scope arms ONE
+        fault of a kind at one live-read stage (`:binding_read`,
+        `:identity_read`, `:delegation_read`) for the calling process and
+        every process that inherits it through `$callers`; the first read
+        at that stage that wins the scope's shared atomic claim fires it,
+        exactly once per scope. The scope's prior binding is restored on
+        return, raise, throw and exit. `clear/0` never touches a live-fault
+        scope. A copied scope is not revoked from work still running after
+        its scope ends: join inheriting work inside the scope.
 
       Keys are `{SdrAgent.Prototype, atom}` in the calling process's
       dictionary; `lookup/1` reads them.
@@ -810,6 +1145,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
       @runtime_key {SdrAgent.Prototype, :runtime}
       @identity_key {SdrAgent.Prototype, :live_identity}
+      @boot_switch_key {SdrAgent.Prototype, :boot_switch}
+      @live_stages [:binding_read, :identity_read, :delegation_read]
+      @live_kinds [:returned_error, :raise, :abort]
+
+      @typedoc "A live-read stage of the fault seam."
+      @type live_stage :: :binding_read | :identity_read | :delegation_read
+
+      @typedoc "A live-read fault kind."
+      @type live_kind :: :returned_error | :raise | :abort
 
       @doc "Enters prototype runtime with `snapshot` for the calling process."
       @spec enter_runtime(Binding.t()) :: :ok
@@ -836,14 +1180,87 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         :ok
       end
 
+      @doc "Sets the calling process's boot-switch input (`:off` or a switch map)."
+      @spec put_boot_switch(term()) :: :ok
+      def put_boot_switch(switch) do
+        Process.put(@boot_switch_key, switch)
+        :ok
+      end
+
+      @doc "The calling process's own boot-switch input, or nil (process-local)."
+      @spec boot_switch() :: term()
+      def boot_switch, do: Process.get(@boot_switch_key)
+
       @doc """
-      Removes the seam's two keys (runtime and live identity) from the
-      calling process only; no caller or other process is touched.
+      Runs `fun` inside a live-fault scope and returns its result; a raise,
+      throw or exit of `fun` passes through unchanged.
+
+      The scope binds `{kind, ref}` (`ref` a fresh one-slot atomics array)
+      to `stage` in the calling process, shadowing any outer scope of the
+      same stage; scopes of other stages compose. The first read at
+      `stage`, in this process or in one that finds this scope through its
+      `$callers`, whose claim (`compare_exchange` 0 -> 1) succeeds fires the
+      fault: `:returned_error` replaces the read's result, `:raise` raises
+      in its place, `:abort` runs one real `SELECT 1 / 0` and then the real
+      read. Every later read at `stage` in the scope is real (a claimed
+      scope never falls through to an outer one). On exit, the prior
+      binding of `stage` is restored, or removed when there was none.
+      """
+      @spec with_live_fault(live_stage(), live_kind(), (-> result)) :: result when result: term()
+      def with_live_fault(stage, kind, fun)
+          when stage in @live_stages and kind in @live_kinds and is_function(fun, 0) do
+        key = live_key(stage)
+        previous = Process.put(key, {kind, :atomics.new(1, signed: false)})
+
+        try do
+          fun.()
+        after
+          restore(key, previous)
+        end
+      end
+
+      @doc """
+      The fired count (0 or 1) of the innermost `stage` scope visible to the
+      calling process (itself, then its `$callers`), or 0 when none is.
+      """
+      @spec live_fault_hits(live_stage()) :: 0 | 1
+      def live_fault_hits(stage) when stage in @live_stages do
+        case lookup(live_key(stage)) do
+          {_kind, ref} -> :atomics.get(ref, 1)
+          nil -> 0
+        end
+      end
+
+      @doc false
+      # The live read's claim (`SdrAgent.Prototype.Authority`'s read sites
+      # only): the kind of the innermost visible `stage` scope when this
+      # call wins its claim, else nil.
+      @spec claim_live_fault(live_stage()) :: live_kind() | nil
+      def claim_live_fault(stage) when stage in @live_stages do
+        case lookup(live_key(stage)) do
+          {kind, ref} -> if :atomics.compare_exchange(ref, 1, 0, 1) == :ok, do: kind
+          nil -> nil
+        end
+      end
+
+      defp live_key(:binding_read), do: {SdrAgent.Prototype, :live_fault_binding_read}
+      defp live_key(:identity_read), do: {SdrAgent.Prototype, :live_fault_identity_read}
+      defp live_key(:delegation_read), do: {SdrAgent.Prototype, :live_fault_delegation_read}
+
+      defp restore(key, nil), do: Process.delete(key)
+      defp restore(key, previous), do: Process.put(key, previous)
+
+      @doc """
+      Removes the seam's keys (runtime, live identity and boot switch) from
+      the calling process only; no caller or other process is touched. A
+      live-fault scope is left alone: it belongs to its `with_live_fault/3`
+      call, which alone restores it, and its shared claim is never reset.
       """
       @spec clear() :: :ok
       def clear do
         Process.delete(@runtime_key)
         Process.delete(@identity_key)
+        Process.delete(@boot_switch_key)
         :ok
       end
 

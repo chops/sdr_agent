@@ -1,5 +1,37 @@
 import Config
 
+# D-237 prototype switch (interfaces r6 IF-2; amendment item 2 "The switch").
+# SDR_PROTOTYPE and SDR_PROTOTYPE_INSTANCE: both or neither; accepted in dev
+# only, and only with the compiled policy id and a canonical instance UUID.
+# It then selects the isolated prototype cluster (the 5541 socket endpoint,
+# no TCP listener). Values are never echoed. config/config.exs defaults the
+# switch to :off.
+case {System.get_env("SDR_PROTOTYPE"), System.get_env("SDR_PROTOTYPE_INSTANCE")} do
+  {nil, nil} ->
+    :ok
+
+  {policy_id, instance_id} ->
+    uuid = ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+    cond do
+      config_env() != :dev ->
+        raise "SDR_PROTOTYPE switch refused outside dev (switch_outside_dev)"
+
+      policy_id != "d237-prototype/1" or not is_binary(instance_id) or
+          not Regex.match?(uuid, instance_id) ->
+        raise "SDR_PROTOTYPE switch invalid (switch_invalid)"
+
+      true ->
+        config :sdr_agent, SdrAgent.Prototype,
+          switch: %{policy_id: policy_id, instance_id: instance_id}
+
+        config :sdr_agent, SdrAgent.Repo,
+          socket_dir: "/private/tmp/d237-pg",
+          port: 5541,
+          database: "sdr_agent_prototype"
+    end
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
