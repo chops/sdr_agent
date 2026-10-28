@@ -117,12 +117,12 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
       a.inode == b.inode and a.major_device == b.major_device and a.minor_device == b.minor_device
 
   # At most `left` bytes in total, however the reads are split.
-  defp read_at_most(_handle, 0, acc), do: {:ok, IO.iodata_to_binary(acc)}
+  defp read_at_most(_handle, 0, acc), do: {:ok, :erlang.iolist_to_binary(acc)}
 
   defp read_at_most(handle, left, acc) do
     case :file.read(handle, left) do
       {:ok, data} -> read_at_most(handle, left - byte_size(data), [acc, data])
-      :eof -> {:ok, IO.iodata_to_binary(acc)}
+      :eof -> {:ok, :erlang.iolist_to_binary(acc)}
       {:error, _} = error -> error
     end
   end
