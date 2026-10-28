@@ -18,8 +18,10 @@ defmodule SdrAgent.Audit.Checks.DossierSourceScope do
 
   `purpose/0` is the fixed AuditAccess purpose of a scoped read.
 
-  RED stage (D-237 S1 item 5): DENY-ONLY. `match?/3` refuses every request;
-  `context/1`, `fetch/1` and `purpose/0` are the contract.
+  `fetch/1` validates every member at consumption and never raises. The
+  positive branch exists only with the prototype authority
+  (`:prototype_authority_compiled`); the production build refuses every
+  request.
   """
   use Ash.Policy.SimpleCheck
 
@@ -29,8 +31,29 @@ defmodule SdrAgent.Audit.Checks.DossierSourceScope do
   def describe(_opts),
     do: "the agent runtime reads a source hash of its run's lead entry in the live binding"
 
-  @impl true
-  def match?(_actor, _authorizer, _opts), do: red(false)
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    @impl true
+    def match?(
+          %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id},
+          %{subject: %Ash.ActionInput{context: context, arguments: arguments}},
+          _opts
+        )
+        when is_binary(tenant_id) and is_map(context) do
+      with :prototype <- SdrAgent.Prototype.Authority.runtime(),
+           {:ok, %{tenant_id: ^tenant_id}} <- SdrAgent.Prototype.Authority.binding(),
+           :ok <- SdrAgent.Prototype.Authority.check_live(),
+           {:ok, %{tenant_id: ^tenant_id, sha256s: sha256s}} <- fetch(context) do
+        Map.get(arguments, :sha256) in sha256s
+      else
+        _refused -> false
+      end
+    end
+
+    def match?(_actor, _authorizer, _opts), do: false
+  else
+    @impl true
+    def match?(_actor, _authorizer, _opts), do: false
+  end
 
   @doc "The fixed AuditAccess purpose of a scoped dossier source read."
   @spec purpose() :: String.t()
@@ -62,28 +85,30 @@ defmodule SdrAgent.Audit.Checks.DossierSourceScope do
 
   def context(_other), do: raise(ArgumentError, "not a dossier source scope")
 
-  @doc "The well-formed scope in `context`, if any."
+  @doc """
+  The well-formed scope in `context`, if any: binary tenant, run, lead and
+  entry ids and a non-empty list of 32-byte hashes only. A forged or
+  malformed scope (any other shape or member) is `:error`; it never raises.
+  """
   @spec fetch(term()) :: {:ok, map()} | :error
   def fetch(context) when is_map(context) do
-    case Map.get(context, @marker) do
-      %{
-        tenant_id: tenant_id,
-        agent_run_id: agent_run_id,
-        lead_id: lead_id,
-        entry_id: entry_id,
-        sha256s: sha256s
-      } = scope
-      when is_binary(tenant_id) and is_binary(agent_run_id) and is_binary(lead_id) and
-             is_binary(entry_id) and is_list(sha256s) ->
-        {:ok, scope}
-
-      _other ->
-        :error
+    with %{sha256s: sha256s} = scope <- Map.get(context, @marker),
+         true <-
+           Enum.all?(
+             [:tenant_id, :agent_run_id, :lead_id, :entry_id],
+             &is_binary(Map.get(scope, &1))
+           ),
+         true <- hashes?(sha256s) do
+      {:ok, scope}
+    else
+      _malformed -> :error
     end
   end
 
   def fetch(_context), do: :error
 
-  # RED stub result, typed dynamic(); nothing sets the key (ruling e).
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+  defp hashes?([_ | _] = sha256s),
+    do: Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32))
+
+  defp hashes?(_other), do: false
 end
