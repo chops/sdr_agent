@@ -132,7 +132,7 @@ defmodule SdrAgent.Prototype.BootCheckTest do
       # on the agent_operator anchor unrepresentable, so the anchor must also
       # change role to carry one. Not reachable through any action.
       tamper!(
-        "UPDATE users SET role = 'admin', hashed_password =  WHERE id = ",
+        "UPDATE users SET role = 'admin', hashed_password = $1 WHERE id = $2",
         ["synthetic-test-hash-not-a-credential", Ecto.UUID.dump!(fx.anchor.id)]
       )
 
