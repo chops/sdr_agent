@@ -14,13 +14,17 @@ defmodule SdrAgent.Prototype.AdmissionOriginTest do
   - repeated `Ash.can?/2` (build-time verification) leaves the registration
     available; one insert consumes it; a second raw write is Forbidden;
   - a valid registration authorizes no other run, profile or purpose;
-  - a registration is invalid in another process, after its top-level
-    transaction ended, and after a literal `ROLLBACK TO SAVEPOINT` (the
-    connection stays usable);
-  - `pending/0` (this process's owned registrations, stale ones included)
-    is 0 after a reservation succeeds, after a gate refusal, after a
-    Forbidden caller authority and after a rolled-back insert (a real
-    first success, then a duplicate idempotency key).
+  - a registration is invalid in another process, after a literal
+    `ROLLBACK TO SAVEPOINT` (the connection stays usable), and once its
+    owner discarded it after its callback. Sandboxed transaction callbacks
+    are SAVEPOINTs sharing one PostgreSQL xid (Codex 3b2e8c61 N1), so no test
+    here proves a real top-level transaction boundary: that proof is OWED
+    to an approved isolated harness;
+  - `pending/0` (this process's owned registrations: live, stale and
+    consumed) returns to its pre-call value after a reservation succeeds,
+    after a gate refusal, after a Forbidden caller authority and after a
+    rolled-back insert (a real first success, then a duplicate idempotency
+    key).
 
   Direct `admit/5` calls are cleaned up by the test itself, in `after`,
   with `discard/1` (note r3). A raise inside the reserve is UNTESTED here:
@@ -240,14 +244,24 @@ defmodule SdrAgent.Prototype.AdmissionOriginTest do
     refute seen, "another process saw the registration"
   end
 
-  test "after its top-level transaction ended the registration is invalid", ctx do
+  # Codex 3b2e8c61 N1: in this sandbox a transaction callback is a SAVEPOINT,
+  # so two callbacks share one PostgreSQL xid. This test does NOT prove a real
+  # transaction boundary (that proof is OWED to an approved isolated
+  # harness); it proves the owner's cleanup: a registration its owner
+  # discarded after its callback (as the reserve's `after` does) is invalid
+  # in the next one, and `pending/0` is back to its pre-call value.
+  test "a registration its owner discarded after its callback is invalid", ctx do
     registered? = api!(:registered?, 1)
+    discard = api!(:discard, 1)
+    pending = api!(:pending, 0)
     seed = seed!(ctx, ctx.run)
+    before = pending.()
 
     {available, write} =
       owned(fn ->
         admitted = in_transaction(fn -> own!(admit!(ctx, locked_run!(ctx.run))) end)
         {charge, _at} = admitted
+        :ok = discard.(registration(charge))
 
         in_transaction(fn ->
           {registered?.(registration(charge)),
@@ -255,8 +269,9 @@ defmodule SdrAgent.Prototype.AdmissionOriginTest do
         end)
       end)
 
-    refute available, "a registration outlived its transaction"
-    assert match?({:error, %Ash.Error.Forbidden{}}, write), "stale write: #{inspect(write)}"
+    refute available, "a discarded registration is still registered"
+    assert match?({:error, %Ash.Error.Forbidden{}}, write), "write: #{inspect(write)}"
+    assert pending.() == before
     assert claude_invocations(ctx.fx) == 0
   end
 
@@ -285,9 +300,10 @@ defmodule SdrAgent.Prototype.AdmissionOriginTest do
     assert claude_invocations(ctx.fx) == 0
   end
 
-  test "pending/0 is 0 after success, a gate refusal, a Forbidden authority and a rollback",
+  test "pending/0 returns to its pre-call value after success, a gate refusal, a Forbidden authority and a rollback",
        ctx do
     pending = api!(:pending, 0)
+    before = pending.()
 
     success = G.reserve(ctx.fx, ctx.run)
     after_success = pending.()
@@ -317,6 +333,8 @@ defmodule SdrAgent.Prototype.AdmissionOriginTest do
            "prerequisite: the first of the duplicate pair: #{inspect(first)}"
 
     assert match?({:error, %Ash.Error.Invalid{}}, duplicate), "rollback: #{inspect(duplicate)}"
-    assert {after_success, after_refusal, after_forbidden, after_rollback} == {0, 0, 0, 0}
+
+    assert {after_success, after_refusal, after_forbidden, after_rollback} ==
+             {before, before, before, before}
   end
 end
