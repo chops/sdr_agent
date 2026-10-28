@@ -118,8 +118,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            {:ok, invocation} <-
              ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
            evidence = known_evidence(invocation),
-           {:ok, plan, cause} <-
-             hold(plan(outcome, evidence, invocation), receipt, evidence, {invocation, run}),
+           plan = plan(outcome, evidence, invocation),
+           :ok <- usable_after_live_refusal(plan),
+           {:ok, plan, cause} <- hold(plan, receipt, evidence, {invocation, run}),
            :ok <- before_head(invocation),
            {:ok, _head} <- Kernel.lock_head(tenant_id),
            :ok <- recheck(plan, cause, evidence, {invocation, run}) do
@@ -267,6 +268,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp absent_observation(_receipt, _live), do: {:refuse, :witness_mode_mismatch}
 
     ## The cause, locked before the head
+
+    # D-237 TF-2 (plan r2): only the refusal code `binding_mismatch` can
+    # follow a live read (`refusal_code/3`); one state probe before the cause
+    # read. An error leaves through `locked/5`'s owner rollback.
+    defp usable_after_live_refusal(%{prototype_refusal: :binding_mismatch}),
+      do: PrototypeAdmission.state_probe()
+
+    defp usable_after_live_refusal(_plan), do: :ok
 
     defp hold(%{reason: :witness_mismatch}, _receipt, _evidence, {invocation, run}),
       do: Recovery.mismatch(invocation, run)

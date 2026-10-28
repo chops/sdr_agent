@@ -484,6 +484,23 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     @doc """
+    D-237 TF-2: one raw, read-only state probe of the CURRENT transaction,
+    for a consumer that just received a returned `binding_mismatch` from
+    `live/0` (Codex c83a34e9 Q-T1). `:ok` when the transaction is usable;
+    otherwise `{:error, error}` with the probe's own error unchanged (a
+    typed `in_failed_sql_transaction` for an aborted owner, or any other
+    error as it is). It never retries, repairs, rescues or parses text, and
+    it writes nothing. The caller exits through its owner (plan r2 §3).
+    """
+    @spec state_probe() :: :ok | {:error, term()}
+    def state_probe do
+      case Repo.query("SELECT 1", []) do
+        {:ok, _result} -> :ok
+        {:error, error} -> {:error, error}
+      end
+    end
+
+    @doc """
     The `prototype_authority` recorded by `invocation`'s one original
     `model.invocation.reserved` event: `{:ok, map}` or
     `{:error, reason, :authority_unrecorded}`.
