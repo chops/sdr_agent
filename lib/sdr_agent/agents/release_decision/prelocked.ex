@@ -12,7 +12,10 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
 
   A context binds `tenant_id`, `model_invocation_id`, the optional
   `wire_witness_link_id` and `receipt_id` (the selected gate cause's
-  Failure id), and the PostgreSQL transaction id it was established in. It
+  Failure id), the optional `finalizer` (D-237 IF-4: `:prototype_gate` only
+  for the prototype gate's own context, `SdrAgent.Prototype.Release`; nil
+  otherwise; any other value is refused), and the PostgreSQL transaction id
+  it was established in. It
   is registered in the calling process only for the duration of `run/2`:
   the registration is removed when `run/2` returns or raises, and a
   rollback, commit or process exit ends its transaction. `verify/1` accepts
@@ -51,46 +54,65 @@ defmodule SdrAgent.Agents.ReleaseDecision.Prelocked do
     :model_invocation_id,
     :wire_witness_link_id,
     :receipt_id,
+    :finalizer,
     :xact_id,
     :marker
   ]
 
   @registry {__MODULE__, :registry}
+  # D-237 IF-4: the only finalizer binding a context may carry (nil for an
+  # ordinary context).
+  @finalizers [nil, :prototype_gate]
 
   @type t :: %__MODULE__{}
 
   @doc """
   Finalizer only: establishes the context for `bindings` (`tenant_id`,
-  `model_invocation_id`, optional `wire_witness_link_id` and `receipt_id`)
-  inside the open transaction, after every dependent lock is held, and runs
-  `fun.(context)`. Returns `fun`'s result, or `{:error, :not_in_transaction}`.
+  `model_invocation_id`, optional `wire_witness_link_id`, `receipt_id` and
+  `finalizer`) inside the open transaction, after every dependent lock is
+  held, and runs `fun.(context)`. Returns `fun`'s result,
+  `{:error, :invalid_finalizer}` for a `finalizer` other than nil or
+  `:prototype_gate` (D-237 IF-4: only the prototype gate's own context
+  may decide `released_unverified`; `fun` does not run), or
+  `{:error, :not_in_transaction}`.
   """
-  @spec run(map(), (t() -> result)) :: result | {:error, :not_in_transaction} when result: term()
+  @spec run(map(), (t() -> result)) ::
+          result | {:error, :invalid_finalizer | :not_in_transaction}
+        when result: term()
   def run(%{tenant_id: tenant_id, model_invocation_id: invocation_id} = bindings, fun)
       when is_binary(tenant_id) and is_binary(invocation_id) and is_function(fun, 1) do
-    if Repo.in_transaction?() do
-      marker = "sdr_prelocked.c" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
-      Repo.query!("SELECT set_config($1, '1', true)", [marker])
+    finalizer = Map.get(bindings, :finalizer)
 
-      context = %__MODULE__{
-        ref: make_ref(),
-        tenant_id: tenant_id,
-        model_invocation_id: invocation_id,
-        wire_witness_link_id: Map.get(bindings, :wire_witness_link_id),
-        receipt_id: Map.get(bindings, :receipt_id),
-        xact_id: transaction_state(marker) |> elem(0),
-        marker: marker
-      }
+    cond do
+      finalizer not in @finalizers -> {:error, :invalid_finalizer}
+      Repo.in_transaction?() -> establish(bindings, finalizer, fun)
+      true -> {:error, :not_in_transaction}
+    end
+  end
 
-      register(context)
+  defp establish(bindings, finalizer, fun) do
+    %{tenant_id: tenant_id, model_invocation_id: invocation_id} = bindings
 
-      try do
-        fun.(context)
-      after
-        unregister(context.ref)
-      end
-    else
-      {:error, :not_in_transaction}
+    marker = "sdr_prelocked.c" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
+    Repo.query!("SELECT set_config($1, '1', true)", [marker])
+
+    context = %__MODULE__{
+      ref: make_ref(),
+      tenant_id: tenant_id,
+      model_invocation_id: invocation_id,
+      wire_witness_link_id: Map.get(bindings, :wire_witness_link_id),
+      receipt_id: Map.get(bindings, :receipt_id),
+      finalizer: finalizer,
+      xact_id: transaction_state(marker) |> elem(0),
+      marker: marker
+    }
+
+    register(context)
+
+    try do
+      fun.(context)
+    after
+      unregister(context.ref)
     end
   end
 

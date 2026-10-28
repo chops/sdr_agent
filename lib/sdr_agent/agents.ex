@@ -118,6 +118,8 @@ defmodule SdrAgent.Agents do
   }
   # ADR-0004: at most 200 model calls per UTC day; configuration may only lower it.
   @daily_model_call_limit 200
+  # D-237 TF-2: the prototype-only state-probe clauses (plan r2).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   resources do
     resource SdrAgent.Agents.AgentDefinition
@@ -368,10 +370,37 @@ defmodule SdrAgent.Agents do
 
   # The reservation rolled back; the refusal is committed on its own.
   defp refusal_recorded({:error, %Admission.Refusal{} = refusal}) do
-    with {:ok, refused} <- Admission.record_refusal(refusal), do: {:error, refused}
+    with :ok <- caller_owner_usable(refusal),
+         {:ok, refused} <- Admission.record_refusal(refusal),
+         do: {:error, refused}
   end
 
   defp refusal_recorded(result), do: result
+
+  if @prototype_compiled do
+    # D-237 TF-2 (plan r2; Codex 8052289d P1): `transact/1` has returned, so
+    # the reservation's own transaction (if it opened one) has ended. A
+    # transaction still open here is the CALLER's allowed
+    # `Audit.transaction/1` owner (Guard admits no other). After a live
+    # refusal it is probed once; on any probe error the reservation exits
+    # that owner at once with `Repo.rollback(error)`: no refusal is
+    # recorded, nothing returns into the caller, and the owner returns the
+    # error unchanged. Top level (no open transaction) is unchanged.
+    defp caller_owner_usable(%Admission.Refusal{check: :binding_mismatch}) do
+      if SdrAgent.Prototype.runtime() == :prototype and Repo.in_transaction?() do
+        case SdrAgent.Prototype.Admission.state_probe() do
+          :ok -> :ok
+          {:error, error} -> Repo.rollback(error)
+        end
+      else
+        :ok
+      end
+    end
+
+    defp caller_owner_usable(_refusal), do: :ok
+  else
+    defp caller_owner_usable(_refusal), do: :ok
+  end
 
   # R0-07 slice B (row B5'): the store observation — the admission gate's
   # only filesystem I/O — runs after input normalisation and before the
@@ -441,16 +470,18 @@ defmodule SdrAgent.Agents do
   # The admission instant is read only once every lock is held, and is used
   # for the daily limit, eligibility, the grant's UTC day and `reserved_at`.
   defp reserve_admitted(run, attrs, request, actor, gate) do
-    with {:ok, locked} <- lock_run(run.id, actor),
-         {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
-         {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
-         now = SdrAgent.Clock.utc_now(),
-         {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
-         :ok <- check_daily_limit(run.tenant_id, now),
-         {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
-      context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
-      create_reserved(run, attrs, request, actor, context)
-    end
+    AdmissionContext.with_owned_registrations(fn ->
+      with {:ok, locked} <- lock_run(run.id, actor),
+           {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
+           {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
+           now = SdrAgent.Clock.utc_now(),
+           {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
+           :ok <- check_daily_limit(run.tenant_id, now),
+           {:ok, charge} <- Admission.admit(locked, attrs, now, candidates, gate) do
+        context = AdmissionContext.context(Map.put(charge, :reserved_at, now))
+        create_reserved(run, attrs, request, actor, context)
+      end
+    end)
   end
 
   defp reserve(run, attrs, request, actor, context) do
@@ -723,8 +754,25 @@ defmodule SdrAgent.Agents do
     with {:ok, sent} <- do_update(invocation, :mark_sent, %{}, actor), do: {:ok, {:sent, sent}}
   end
 
-  defp admit_or_refuse({:error, reason, check}, run, invocation, profile, actor),
-    do: refuse_launch(run, invocation, reason, check, profile, actor)
+  defp admit_or_refuse({:error, reason, check}, run, invocation, profile, actor) do
+    with :ok <- usable_after_live_refusal(check),
+         do: refuse_launch(run, invocation, reason, check, profile, actor)
+  end
+
+  if @prototype_compiled do
+    # D-237 TF-2: a live-read refusal may sit on an aborted owner; one state
+    # probe before any write, in prototype runtime only (plan r2). An error
+    # leaves through `audit_transact/1`'s owner rollback.
+    defp usable_after_live_refusal(:binding_mismatch) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: SdrAgent.Prototype.Admission.state_probe(),
+        else: :ok
+    end
+
+    defp usable_after_live_refusal(_check), do: :ok
+  else
+    defp usable_after_live_refusal(_check), do: :ok
+  end
 
   # An unlocked read only to find the run to lock first; the row is re-read
   # under its own lock.

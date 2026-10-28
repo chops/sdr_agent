@@ -11,8 +11,9 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
 
     * the release `:withheld`, for an invocation of this run, with a reason
       of the stop's category — `:witness_mismatch` for `:witness_mismatch`;
-      `:witness_missing`, `:witness_timeout`, `:store_unreadable` or
-      `:gate_interrupted` for `:witness_unreconciled`;
+      `:witness_missing`, `:witness_timeout`, `:store_unreadable`,
+      `:gate_interrupted` or (D-237) `:prototype_authority_refused` for
+      `:witness_unreconciled`;
     * the Failure of the run's tenant, class `reconciliation_required`,
       subject that invocation, `operation_id` equal to the run's Operation
       (nil for a run without one), and bound as `gate_cause_id` by the
@@ -39,7 +40,14 @@ defmodule SdrAgent.Agents.Changes.LinkGateCause do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Failure
 
-  @unreconciled [:witness_missing, :witness_timeout, :store_unreadable, :gate_interrupted]
+  # D-237 IF-4: a prototype gate refusal stops the run witness_unreconciled.
+  @unreconciled [
+    :witness_missing,
+    :witness_timeout,
+    :store_unreadable,
+    :gate_interrupted,
+    :prototype_authority_refused
+  ]
 
   @impl true
   def change(changeset, _opts, _context) do

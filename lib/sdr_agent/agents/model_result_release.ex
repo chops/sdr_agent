@@ -122,6 +122,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     context_links: [agent_run_id: :model_result_release_agent_run_id],
     arguments: [:gate_cause_id, :gate_classification]
   ]
+  # D-237 IF-4: a prototype refusal's withheld event also records its closed
+  # code (`@prototype_codes`).
+  @refusal_event Keyword.put(@event, :arguments, [
+                   :gate_cause_id,
+                   :gate_classification,
+                   :prototype_refusal
+                 ])
 
   postgres do
     table "model_result_releases"
@@ -230,6 +237,26 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @gate_classifications
       end
 
+      # D-237 IF-4 (amendment item 5): the closed code of a
+      # prototype_authority_refused decision (SdrAgent.Prototype.Release);
+      # ReleaseDecision requires it there and refuses it anywhere else.
+      argument :prototype_refusal, :atom do
+        constraints one_of: @prototype_codes
+      end
+
+      # D-237 RED-b2c deny-only declaration (Codex 3122b0d4): the caller-built
+      # d237-basis/1 and its digest, untrusted input, redacted from any
+      # inspection. ReleaseDecision refuses them on every decision; no
+      # decision records them yet (the released_unverified decision itself is
+      # still refused inside the gate's own context).
+      argument :basis, :map do
+        sensitive? true
+      end
+
+      argument :basis_sha256, :string do
+        sensitive? true
+      end
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision
@@ -238,7 +265,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         where: [attribute_equals(:disposition, :released)]
 
       change {AppendEvent, [event_type: "model.result.withheld"] ++ @event},
-        where: [attribute_equals(:disposition, :withheld)]
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_does_not_equal(:reason, :prototype_authority_refused)
+        ]
+
+      change {AppendEvent, [event_type: "model.result.withheld"] ++ @refusal_event},
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_equals(:reason, :prototype_authority_refused)
+        ]
 
       change {AppendEvent, [event_type: "model.result.calibration"] ++ @event},
         where: [attribute_equals(:disposition, :calibration)]
@@ -338,8 +374,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   @doc "The typed classifications of a withheld gate outcome (R0-07 slice C, G2)."
   def gate_classifications, do: @gate_classifications
 
-  @doc "Whether `{disposition, reason}` is an allowed pair."
+  @doc """
+  Whether `{disposition, reason}` is an allowed pair. D-237 (amendment
+  items 5 and 6): `:released_unverified` pairs only with
+  `:owner_prototype_unverified`, and `:withheld` also pairs with
+  `:prototype_authority_refused`; neither new value pairs with an ordinary
+  one. This is the static pair rule only.
+  """
   def allowed_pair?(:released, :reconciled), do: true
+  def allowed_pair?(:released_unverified, :owner_prototype_unverified), do: true
+  def allowed_pair?(:withheld, :prototype_authority_refused), do: true
   def allowed_pair?(:withheld, reason), do: reason in @withheld_reasons
   def allowed_pair?(:calibration, :calibration), do: true
   def allowed_pair?(_disposition, _reason), do: false

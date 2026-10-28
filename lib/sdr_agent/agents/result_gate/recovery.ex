@@ -49,6 +49,12 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   exact receipt; a terminal run gets the release only (R3). One attempt:
   no recursion. A refusal or a database error returns `{:error, reason}`
   with no output, and the state stays sweepable.
+
+    * **In prototype runtime (D-237 TF-1)** Recovery selects no new
+      decision: with no release it returns the finite internal
+      `{:error, :no_prototype_decision}` after rolling back, with nothing
+      written (it is never persisted, an event argument or a stop reason).
+      An existing release keeps the paths above.
   """
 
   require Ash.Query
@@ -68,17 +74,23 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
   alias SdrAgent.Repo
 
   @subject "SdrAgent.Agents.ModelInvocation"
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @doc """
   Recovers the gate of `invocation` under `gate` (`%{run_id,
   operation_id}`). Option `guard:` as for `ResultGate.finalize/4`. Returns `{:released, release, output}` (a competing
   release only), `{:withheld, release, run}` or `{:error, reason}`.
+  In prototype runtime with no release: `{:error, :no_prototype_decision}`,
+  nothing written (D-237 TF-1).
 
   C2* operation snapshot entry `:result_gate_recovery` (ADR-0005 C2* item
   2): under the gate or the sweeper's per-run owner it inherits.
   """
   @spec run(struct(), map(), keyword()) ::
-          {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
+          {:released, struct(), term()}
+          | {:withheld, struct(), struct()}
+          | {:error, :no_prototype_decision}
+          | {:error, term()}
   def run(invocation, gate, opts \\ []) do
     OperationSnapshot.enter(:result_gate_recovery, fn ->
       actor = Actor.system(:agent_runtime, invocation.tenant_id)
@@ -106,11 +118,26 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
          :ok <- guard.(run),
          {:ok, invocation} <-
            ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE"),
-         {:ok, release} <- existing_release(invocation) do
+         {:ok, release} <- existing_release(invocation),
+         :ok <- new_decision_allowed(release) do
       decide(release, {invocation, run}, actor)
     else
       {:error, error} -> Repo.rollback(error)
     end
+  end
+
+  if @prototype_compiled do
+    # D-237 TF-1 (Codex eff38bd0): in prototype runtime Recovery never
+    # selects a new decision; an existing release stays authoritative.
+    defp new_decision_allowed(nil) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: {:error, :no_prototype_decision},
+        else: :ok
+    end
+
+    defp new_decision_allowed(_release), do: :ok
+  else
+    defp new_decision_allowed(_release), do: :ok
   end
 
   # No release: G5's selection, then the head. A release a concurrent
@@ -203,8 +230,12 @@ defmodule SdrAgent.Agents.ResultGate.Recovery do
       else: interrupted(invocation, run)
   end
 
-  # Row R7-2 (isolated here): a known mismatch is never downgraded.
-  defp mismatch(invocation, run) do
+  @doc false
+  # Row R7-2 (isolated here): a known mismatch is never downgraded. Also the
+  # prototype gate's mismatch selection (D-237 IF-4, A2): `{:ok, plan, cause}`
+  # (cause nil: a bound critical is opened under the head) or
+  # `{:error, :mismatch_cause_unbound}`.
+  def mismatch(invocation, run) do
     plan = ResultGate.plan(:ok, %{status: :mismatch})
 
     with {:ok, live} <- lock_live(invocation, :critical) do
