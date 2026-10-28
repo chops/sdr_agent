@@ -7,7 +7,9 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   per-row cap recheck, idempotent replay by `(dossier_sha256, row_id)`,
   `:dossier_conflict`, the scoped Payload writes, explicit rollback of the
   whole row (no Sales row, no Payload reference, no cap slot), preserved
-  denial records, and live operator and binding checks at both entries.
+  denial records, and live operator and binding checks at both entries;
+  and `cap_used/1`, the summary count of the binding's distinct imported
+  contacts for the live operator only.
   Synthetic `.test` fixtures in a sandboxed prototype binding.
   """
   use SdrAgent.PrototypeCase, async: false
@@ -456,6 +458,89 @@ defmodule SdrAgent.Prototype.DossierImportTest do
 
       assert result == {:error, :binding_mismatch}, "import_row/3 returned #{inspect(result)}"
       assert length(events(ctx.tenant)) == events
+    end
+  end
+
+  # The import summary's cap_used count (IF-8 :import_summary): the binding's
+  # distinct imported contacts, read for the live operator only. Proposed
+  # contract (this RED): {:ok, count} or a closed {:error, code}, never a
+  # bare count for an unchecked caller. A count only, never authority: the
+  # cap is decided per row under the lock.
+  describe "cap_used/1" do
+    test "counts the binding's distinct imported contacts; a replay adds nothing", ctx do
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 0}
+
+      rows = rows!([F.company(1), F.company(2)], ~w(row-1 row-2))
+      assert import!(rows, ctx.actor).imported == ~w(row-1 row-2)
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 2}
+
+      assert import!(rows, ctx.actor).replayed == ~w(row-1 row-2)
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 2}
+    end
+
+    test "a failed row adds nothing; the count is the binding's, for every live delegation",
+         ctx do
+      [good] = rows!([F.company(1)], ["row-1"])
+      [bad] = rows!([F.company(2)], ["row-2"])
+      broken = put_in(bad, [:plan, :sources], [%{hd(bad.plan.sources) | source_id: "s!"}])
+
+      assert {:error, %{failed_row: "row-2"}} =
+               call(@import, :import, [[good, broken], ctx.actor])
+
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 1}
+
+      entered = SdrAgent.Prototype.enter_session(:codex_cli, "codex-session:s3-cap-0002")
+
+      assert match?({:ok, _}, entered),
+             "prerequisite: enter_session/2 returned #{inspect(entered)}"
+
+      {:ok, second_id} = entered
+      {:ok, second} = SdrAgent.Prototype.operator_actor(second_id)
+      assert call(@import, :cap_used, [second]) == {:ok, 1}
+    end
+
+    test "an entry of another tenant is not counted", ctx do
+      rows = rows!([F.company(1), F.company(2)], ~w(row-1 row-2))
+      import!(rows, ctx.actor)
+
+      # The database admits one tenant: a real entry is moved to another
+      # tenant id (AuditCase.tamper!/2, one statement).
+      tamper!(
+        "UPDATE dossier_entries SET tenant_id = $1 WHERE id = " <>
+          "(SELECT id FROM dossier_entries WHERE row_id = 'row-2')",
+        [Ecto.UUID.dump!(Ecto.UUID.generate())]
+      )
+
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 1}
+    end
+
+    test "a caller that is not the live operator gets a closed code, never a count", ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+
+      assert call(@import, :cap_used, [%{ctx.actor | id: Ecto.UUID.generate()}]) ==
+               {:error, :forbidden}
+
+      assert call(@import, :cap_used, [SdrAgent.Actor.system(:agent_runtime, ctx.tenant.id)]) ==
+               {:error, :forbidden}
+
+      :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1})
+      drifted = call(@import, :cap_used, [ctx.actor])
+      :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
+      assert drifted == {:error, :binding_mismatch}
+
+      :ok = SdrAgent.PrototypeFixtures.leave_runtime()
+      assert call(@import, :cap_used, [ctx.actor]) == {:error, :not_prototype_runtime}
+    end
+
+    test "it reads only: no row, Payload or event is written", ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+      tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads audit_accesses)
+      before = {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))}
+
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 1}
+      assert {Map.new(tables, &{&1, count(&1)}), length(events(ctx.tenant))} == before
     end
   end
 
