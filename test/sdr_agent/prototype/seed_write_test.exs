@@ -13,6 +13,7 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
   """
   use SdrAgent.PrototypeCase, async: false
 
+  alias SdrAgent.Agents.RunSettings.ContentRules
   alias SdrAgent.DossierFixtures, as: F
 
   @seed SdrAgent.Prototype.Seed
@@ -34,6 +35,64 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
   defp count(table, where \\ "TRUE", params \\ []) do
     %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM #{table} WHERE #{where}", params)
     n
+  end
+
+  # Benign text of exactly `n` characters: `unit` repeated (a word and one
+  # space), never ending in a space, so trimming keeps every character.
+  defp fill(n, unit) do
+    text = unit |> String.duplicate(div(n, String.length(unit)) + 1) |> String.slice(0, n)
+    if String.ends_with?(text, " "), do: String.slice(text, 0, n - 1) <> "z", else: text
+  end
+
+  defp secret_shaped?(text), do: ContentRules.secret_shaped?(text)
+
+  # The content of one settings file of `contents` for `kind`.
+  defp file_content(contents, :writing_guide), do: contents["writing_guide.json"]
+  defp file_content(contents, :offering_profile), do: contents["offering_profile.json"]
+
+  # The canonical size the profile rule measures (content_rules.ex
+  # profile_size/2): the trimmed name, summary, audience and items.
+  defp canonical_size(profile) do
+    trimmed =
+      Map.new([:name, :summary, :audience, :items], fn field ->
+        {field, trim(profile[Atom.to_string(field)])}
+      end)
+
+    {:ok, bytes} = SdrAgent.Audit.Canonical.encode(trimmed)
+    byte_size(bytes)
+  end
+
+  defp trim(value) when is_binary(value), do: String.trim(value)
+  defp trim(list) when is_list(list), do: Enum.map(list, &trim/1)
+  defp trim(map) when is_map(map), do: Map.new(map, fn {k, v} -> {k, trim(v)} end)
+  defp trim(value), do: value
+
+  # A valid profile whose canonical size is exactly `target` bytes: items of
+  # 400 characters of two-byte text (each within the 400-character bound),
+  # as many as keep the rest within the 1500-character summary, then an
+  # ASCII summary that makes up the exact remainder.
+  defp profile_of_bytes(target) do
+    base = F.seed_contents()["offering_profile.json"]
+
+    count =
+      Enum.find(30..1//-1, fn k ->
+        size = canonical_size(%{base | "summary" => "s", "items" => items(k)})
+        size <= target and target - size < 1_499
+      end)
+
+    probe = %{base | "summary" => "s", "items" => items(count)}
+    summary = fill(1 + target - canonical_size(probe), "abcd ")
+    profile = %{probe | "summary" => summary}
+
+    assert String.length(summary) <= 1_500
+    assert Enum.all?(profile["items"], &(String.length(&1["text"]) == 400))
+    refute Enum.any?([summary | Enum.map(profile["items"], & &1["text"])], &secret_shaped?/1)
+    profile
+  end
+
+  defp items(k) do
+    for i <- 1..k,
+        do: %{"id" => "feature-#{i}", "kind" => "feature", "text" => fill(400, "éééé ")}
   end
 
   describe "a first seed" do
@@ -153,30 +212,48 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
     end
   end
 
+  # Codex 2cf8613e (must-fix): boundary fixtures use benign, space-separated
+  # or multibyte text (never a secret-shaped run of 40 base64-like or 32 hex
+  # characters), assert their constructed character lengths and canonical
+  # byte sizes, and isolate the first refusal with the real content rules
+  # before the seed runs. The Redactor and the size rule are never relaxed.
   describe "the actual settings content rules (no bypass)" do
-    test "a forbidden control character, an over-bound guide or an over-long item refuses the whole seed",
-         ctx do
+    test "each single violation refuses the whole seed, and only that rule is broken", ctx do
       contents = F.seed_contents()
+      guide = "the GTMscape team " <> fill(5_983, "abcde ")
+      item = fill(401, "abcd ")
 
       cases = [
-        put_in(contents, ["writing_guide.json", "text"], "Sign as the GTMscape team.\u0007"),
-        put_in(
-          contents,
-          ["writing_guide.json", "text"],
-          "the GTMscape team " <> String.duplicate("g", 5_983)
-        ),
-        F.update(contents, ["offering_profile.json", "items", 0, "text"], fn _ ->
-          String.duplicate("i", 401)
-        end),
-        put_in(
-          contents,
-          ["campaign.json", "sequence", "step", "instructions"],
-          "Ask one question.\u001B"
-        )
+        {"a control character in the guide",
+         put_in(contents, ["writing_guide.json", "text"], "Sign as the GTMscape team.\u0007"),
+         {:writing_guide, [{:text, :control_character}]}},
+        {"a guide of 6001 characters", put_in(contents, ["writing_guide.json", "text"], guide),
+         {:writing_guide, [{:text, :too_long}]}},
+        {"an item of 401 characters",
+         F.update(contents, ["offering_profile.json", "items", 0, "text"], fn _ -> item end),
+         {:offering_profile, [{:text, :too_long}]}},
+        {"a control character in the step instructions",
+         put_in(
+           contents,
+           ["campaign.json", "sequence", "step", "instructions"],
+           "Ask one question.\u001B"
+         ), nil}
       ]
 
-      for bad <- cases do
-        assert call(@seed, :run, [seed(bad), ctx.actor]) == {:error, :seed_invalid}
+      assert String.length(guide) == 6_001 and not secret_shaped?(guide)
+      assert String.length(item) == 401 and not secret_shaped?(item)
+
+      for {label, bad, expected} <- cases do
+        case expected do
+          {kind, errors} ->
+            assert ContentRules.validate(kind, file_content(bad, kind)) == {:error, errors},
+                   "#{label}: not exactly #{inspect(errors)}"
+
+          nil ->
+            :ok
+        end
+
+        assert call(@seed, :run, [seed(bad), ctx.actor]) == {:error, :seed_invalid}, label
         assert count("settings_revisions") == 0
         assert count("icp_definitions") == 0
         assert count("campaigns") == 0
@@ -184,19 +261,33 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
     end
 
     test "the guide at exactly its 6000-character bound is accepted", ctx do
-      text = "the GTMscape team " <> String.duplicate("g", 5_982)
+      text = "the GTMscape team " <> fill(5_982, "abcde ")
       assert String.length(text) == 6_000
+      refute secret_shaped?(text)
+      assert ContentRules.validate(:writing_guide, %{"text" => text}) == :ok
+
       contents = put_in(F.seed_contents(), ["writing_guide.json", "text"], text)
       assert run!(seed(contents), ctx.actor).result == :created
     end
 
-    test "the canonical profile over 16 KiB is refused", ctx do
-      items =
-        for k <- 1..30 do
-          %{"id" => "feature-#{k}", "kind" => "feature", "text" => String.duplicate("f", 400)}
-        end
+    test "a canonical profile of exactly 16384 bytes is accepted", ctx do
+      profile = profile_of_bytes(16_384)
+      assert canonical_size(profile) == 16_384
+      assert ContentRules.validate(:offering_profile, profile) == :ok
 
-      contents = put_in(F.seed_contents(), ["offering_profile.json", "items"], items)
+      contents = Map.put(F.seed_contents(), "offering_profile.json", profile)
+      assert run!(seed(contents), ctx.actor).result == :created
+    end
+
+    test "a canonical profile of 16385 bytes is refused by its size alone", ctx do
+      profile = profile_of_bytes(16_385)
+      assert canonical_size(profile) == 16_385
+
+      # Every field and item is within its own bounds and benign; only the
+      # canonical size is over 16 KiB.
+      assert ContentRules.validate(:offering_profile, profile) == {:error, [{:items, :too_large}]}
+
+      contents = Map.put(F.seed_contents(), "offering_profile.json", profile)
       assert call(@seed, :run, [seed(contents), ctx.actor]) == {:error, :seed_invalid}
       assert count("settings_revisions") == 0
     end
