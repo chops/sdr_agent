@@ -18,12 +18,28 @@ defmodule SdrAgent.Prototype.SafeLog do
   Ref value types: `uuid` (a canonical lowercase 36-character UUID),
   `count` (an integer 0..1,000,000, or the bound shown), and a closed enum
   of atoms. `shapes/0` is the pinned table; `reasons/1` gives each reason
-  enum.
+  enum. Refs must have exactly the code's keys, each once, in any order;
+  a retained event carries them in shape order.
 
-  RED stage (D-237 S1): the closed code, shape and reason sets are the
-  contract; `event/2`, `say/2`, `attach/0,1` and `detach/0` return
-  `{:error, :not_implemented}` and filter nothing.
+  A retained or withheld event keeps its level (an invalid or missing
+  level becomes `:error`) and only the standard metadata whose value has a
+  bounded safe shape, the same set as `SdrAgent.Logger.ExceptionFilter`'s
+  `scan_limit` event: `pid`/`gl` pids, `time` and `line` integers, `mfa`
+  an `{atom, atom, arity}`, `file` a string or charlist of at most 1,024,
+  `domain` a list of at most 16 atoms. Nothing else of the event is kept.
+  The filter never raises, never returns `:ignore` or `:stop` and never
+  passes an event through: an internal failure yields the withheld event
+  at `:error`.
+
+  Staged GREEN (D-237 S1b, Codex b069e93f): `filter/2` is implemented;
+  `event/2`, `say/2`, `attach/0,1` and `detach/0` still return
+  `{:error, :not_implemented}`.
   """
+
+  @withheld "prototype: log content withheld"
+  @levels [:emergency, :alert, :critical, :error, :warning, :notice, :info, :debug]
+  @max_file 1_024
+  @max_domain 16
 
   @boot_reasons [
     :none,
@@ -192,8 +208,101 @@ defmodule SdrAgent.Prototype.SafeLog do
   `"prototype: log content withheld"`, level and validated standard
   metadata kept, `sdr_prototype_code: :withheld`). Never `:ignore`.
   """
-  @spec filter(:logger.log_event(), term()) :: :logger.log_event() | {:error, :not_implemented}
-  def filter(_event, _extra), do: red({:error, :not_implemented})
+  @spec filter(:logger.log_event(), term()) :: :logger.log_event()
+  def filter(event, _extra) do
+    rebuild(event)
+  catch
+    _kind, _reason -> withheld(:error, %{})
+  end
+
+  defp rebuild(event) do
+    level = level_of(event)
+    meta = meta_of(event)
+    code = Map.get(meta, :sdr_prototype_code)
+
+    case validate(code, Map.get(meta, :sdr_prototype_refs)) do
+      {:ok, refs} ->
+        tag = %{sdr_prototype_code: code, sdr_prototype_refs: refs}
+
+        %{
+          level: level,
+          msg: {:string, "prototype: #{code}"},
+          meta: Map.merge(standard(meta), tag)
+        }
+
+      :error ->
+        withheld(level, meta)
+    end
+  end
+
+  defp withheld(level, meta),
+    do: %{
+      level: level,
+      msg: {:string, @withheld},
+      meta: meta |> standard() |> Map.put(:sdr_prototype_code, :withheld)
+    }
+
+  defp level_of(%{level: level}) when level in @levels, do: level
+  defp level_of(_event), do: :error
+
+  defp meta_of(%{meta: meta}) when is_map(meta), do: meta
+  defp meta_of(_event), do: %{}
+
+  # ExceptionFilter's validated standard metadata; everything else dropped.
+  defp standard(meta), do: meta |> Enum.filter(&safe_standard?/1) |> Map.new()
+
+  defp safe_standard?({:pid, pid}), do: is_pid(pid)
+  defp safe_standard?({:gl, pid}), do: is_pid(pid)
+  defp safe_standard?({:time, time}), do: is_integer(time)
+  defp safe_standard?({:line, line}), do: is_integer(line)
+
+  defp safe_standard?({:mfa, {m, f, a}}),
+    do: is_atom(m) and is_atom(f) and is_integer(a) and a >= 0
+
+  defp safe_standard?({:file, file}) when is_binary(file),
+    do: byte_size(file) <= @max_file and String.valid?(file)
+
+  defp safe_standard?({:file, file}) when is_list(file),
+    do: length(file) <= @max_file and Enum.all?(file, &(is_integer(&1) and &1 in 0..0x10FFFF))
+
+  defp safe_standard?({:domain, domain}) when is_list(domain),
+    do: length(domain) <= @max_domain and Enum.all?(domain, &is_atom/1)
+
+  defp safe_standard?(_entry), do: false
+
+  # `{:ok, refs in shape order}` when `refs` has exactly the code's keys,
+  # each once and of its pinned type; `:error` otherwise (an unknown code
+  # included). No atom is ever created.
+  defp validate(code, refs) when is_map_key(@shapes, code) and is_list(refs) do
+    shape = Map.fetch!(@shapes, code)
+
+    with true <- Keyword.keyword?(refs),
+         true <- length(refs) == length(shape),
+         true <- Enum.sort(Keyword.keys(refs)) == Enum.sort(Keyword.keys(shape)),
+         true <- Enum.all?(shape, fn {key, type} -> valid?(type, Keyword.fetch!(refs, key)) end) do
+      {:ok, Enum.map(shape, fn {key, _type} -> {key, Keyword.fetch!(refs, key)} end)}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp validate(_code, _refs), do: :error
+
+  defp valid?(:uuid, value), do: uuid?(value)
+  defp valid?(:count, value), do: is_integer(value) and value in 0..1_000_000
+  defp valid?({:count, range}, value), do: is_integer(value) and value in range
+  defp valid?({:enum, values}, value), do: is_atom(value) and value in values
+
+  defp uuid?(
+         <<a::binary-size(8), ?-, b::binary-size(4), ?-, c::binary-size(4), ?-, d::binary-size(4),
+           ?-, e::binary-size(12)>>
+       ),
+       do: Enum.all?([a, b, c, d, e], &lower_hex?/1)
+
+  defp uuid?(_value), do: false
+
+  defp lower_hex?(part),
+    do: part |> :binary.bin_to_list() |> Enum.all?(&(&1 in ?0..?9 or &1 in ?a..?f))
 
   @doc "Installs the content-free primary filter and the file sink."
   @spec attach() :: :ok | {:error, :not_implemented}
