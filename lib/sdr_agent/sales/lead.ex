@@ -137,6 +137,14 @@ defmodule SdrAgent.Sales.Lead do
 
       accept [:contact_id, :account_id]
       change set_attribute(:source, :dossier)
+
+      # After SetTenant and authorization (Codex 9a6dba0a R1): the contact and
+      # the account are rows of the new lead's own tenant; LeadAccount still
+      # requires the account to be the contact's, and active.
+      validate {SdrAgent.Sales.Validations.ImportTenant,
+                refs: [contact_id: SdrAgent.Sales.Contact, account_id: SdrAgent.Sales.Account]},
+               before_action?: true
+
       change SdrAgent.Sales.Changes.LeadAccount
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds

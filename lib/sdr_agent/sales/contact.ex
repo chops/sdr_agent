@@ -72,7 +72,14 @@ defmodule SdrAgent.Sales.Contact do
       """
 
       accept [:account_id, :first_name, :last_name, :title, :email]
-      validate {Validations.DatasetDomain, attribute: :email, kind: :email}
+
+      # After SetTenant and authorization (Codex 9a6dba0a R1): the account is
+      # a row of the new contact's own tenant, and the address is on its domain.
+      validate {Validations.ImportTenant, refs: [account_id: SdrAgent.Sales.Account]},
+        before_action?: true
+
+      validate {Validations.DatasetDomain, attribute: :email, kind: :email}, before_action?: true
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {AppendEvent, event_type: "sales.contact.created", category: :domain_change}
