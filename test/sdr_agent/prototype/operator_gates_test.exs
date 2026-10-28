@@ -244,7 +244,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   test "Lead :assign: the live operator assigns; transition, stamp, owner and event as before" do
     ctx = bound_with_demo!()
-    lead = lead!(ctx, "04")
+    lead = lead!(ctx, "07")
     assert can?(lead, :assign, ctx.operator)
 
     assert {:ok, assigned} = Sales.update(lead, :assign, %{}, actor: ctx.operator)
@@ -258,7 +258,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   test "Lead :assign: an operator-supplied owner is refused, through the resource and through SDR" do
     ctx = bound_with_demo!()
-    lead = lead!(ctx, "04")
+    lead = lead!(ctx, "07")
 
     assert forbidden?(
              Sales.update(lead, :assign, %{owner_user_id: ctx.admin.id}, actor: ctx.operator)
@@ -278,7 +278,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   test "Lead :assign: forged, foreign-tenant and stale-binding operators are refused" do
     ctx = bound_with_demo!()
-    lead = lead!(ctx, "04")
+    lead = lead!(ctx, "07")
     forged = %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id}
 
     foreign = %Actor{
@@ -300,7 +300,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   test "the operator gets no other Lead mutation" do
     ctx = bound_with_demo!()
-    lead = lead!(ctx, "04")
+    lead = lead!(ctx, "07")
 
     for action <- @lead_mutations do
       refute can?(lead, action, ctx.operator), "the operator may #{action} a lead"
@@ -311,7 +311,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   test "Lead :assign control: an admin still assigns with an owner in ordinary runtime (unchanged)" do
     ctx = demo!(nil)
-    lead = lead!(ctx, "04")
+    lead = lead!(ctx, "07")
 
     assert {:ok, assigned} =
              Sales.update(lead, :assign, %{owner_user_id: ctx.admin.id}, actor: ctx.admin)
