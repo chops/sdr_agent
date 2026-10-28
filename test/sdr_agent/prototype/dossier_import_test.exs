@@ -31,6 +31,13 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     n
   end
 
+  # A result, or any raise captured as {:raised, module}.
+  defp capture(fun) do
+    fun.()
+  rescue
+    error -> {:raised, error.__struct__}
+  end
+
   defp import!(rows, actor) do
     result = call(@import, :import, [rows, actor])
 
@@ -322,6 +329,115 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       for value <- [row.plan.contact.email, row.plan.contact.last_name, row.plan.account.domain] do
         refute echoed =~ value, "the denial echoed an input value"
       end
+    end
+  end
+
+  # Codex 22958123 (C2 and the closure items): the failure boundary, the
+  # authoritative per-row cap, same-key conflicts, nested calls and the
+  # locked binding re-check.
+  describe "closure: failure boundary, per-row cap, conflicts, nesting, locked re-check" do
+    test "a real PostgreSQL failure late in the row is :import_failed, with no survivor and a usable connection",
+         ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads)
+      before = Map.new(tables, &{&1, count(&1)})
+      events = count("audit_events", @business_events)
+      denials = length(events_of_type(ctx.tenant, "authz.denied"))
+
+      # A real PostgreSQL error (division_by_zero) after the Sales writes,
+      # which leaves the row's transaction aborted.
+      fail = fn ->
+        assert {:error, %Postgrex.Error{}} = Repo.query("SELECT 1 / 0", [])
+        :ok
+      end
+
+      result =
+        capture(fn -> call(@import, :import_row, [row, ctx.actor, [after_sales: fail]]) end)
+
+      assert result == {:error, :import_failed}, "import_row/3 returned #{inspect(result)}"
+
+      assert Map.new(tables, &{&1, count(&1)}) == before
+      assert count("audit_events", @business_events) == events
+      assert length(events_of_type(ctx.tenant, "authz.denied")) == denials
+
+      # The connection is usable and no slot was used: the row imports.
+      assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+      assert import!([row], ctx.actor) == %{imported: ["row-1"], replayed: []}
+    end
+
+    test "the per-row recheck refuses a direct import_row over the cap, without the precheck",
+         ctx do
+      rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
+      assert import!(rows, ctx.actor).imported == ~w(row-1 row-2 row-3)
+      [fourth] = rows!([F.company(4)], ["row-4"])
+      before = {count("accounts"), count("contacts"), count("dossier_entries"), count("payloads")}
+
+      assert call(@import, :import_row, [fourth, ctx.actor]) == {:error, :contact_cap_exceeded}
+
+      assert {count("accounts"), count("contacts"), count("dossier_entries"), count("payloads")} ==
+               before
+    end
+
+    test "the same key with a changed manifest, claims or notes is :dossier_conflict, writing nothing",
+         ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+      before = {count("dossier_entries"), count("dossier_sources"), count("payloads")}
+
+      changed = [
+        manifest: %{row | spotcheck_sha256: String.duplicate("e", 64)},
+        claims:
+          update_in(row, [:plan, :claims], fn [claim | rest] ->
+            [Map.put(claim, "basis", "changed") | rest]
+          end),
+        notes: put_in(row, [:plan, :notes, "why_fit"], "A changed note.")
+      ]
+
+      for {label, other} <- changed do
+        assert call(@import, :import_row, [other, ctx.actor]) == {:error, :dossier_conflict},
+               "changed #{label}"
+      end
+
+      assert {count("dossier_entries"), count("dossier_sources"), count("payloads")} == before
+    end
+
+    test "a call inside an open transaction is refused before any write; that transaction stays usable",
+         ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+
+      for {label, open} <- [repo: &Repo.transaction/1, audit: &SdrAgent.Audit.transaction/1] do
+        {:ok, {whole, one}} =
+          open.(fn ->
+            whole = capture(fn -> call(@import, :import, [[row], ctx.actor]) end)
+            one = capture(fn -> call(@import, :import_row, [row, ctx.actor]) end)
+            assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+            {whole, one}
+          end)
+
+        assert whole ==
+                 {:error, %{code: :import_failed, failed_row: nil, imported: [], replayed: []}},
+               "#{label}: import/2 returned #{inspect(whole)}"
+
+        assert one == {:error, :import_failed}, "#{label}: import_row/2 returned #{inspect(one)}"
+      end
+
+      assert {count("accounts"), count("dossier_entries"), count("payloads")} == {0, 0, 0}
+    end
+
+    test "a binding drift between the entry check and the lock refuses, even a replay", ctx do
+      [row] = rows!([F.company(1)], ["row-1"])
+      import!([row], ctx.actor)
+      events = length(events(ctx.tenant))
+
+      drift = fn -> :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1}) end
+
+      result =
+        capture(fn -> call(@import, :import_row, [row, ctx.actor, [before_lock: drift]]) end)
+
+      :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
+
+      assert result == {:error, :binding_mismatch}, "import_row/3 returned #{inspect(result)}"
+      assert length(events(ctx.tenant)) == events
     end
   end
 
