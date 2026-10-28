@@ -362,21 +362,25 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     dlv = Actor.system(:delivery_worker, ctx.tenant.id)
     {:ok, payload} = Audit.put_payload("synthetic message", "message/rfc822", actor: dlv)
 
-    result =
-      Outreach.record_receipt(
-        %{
-          delivery_operation_id: delivery.id,
-          idempotency_key: delivery.idempotency_key,
-          kind: :captured,
-          provider: :capture,
-          provider_message_id: "capture-mismatch",
-          rendered_sha256: payload.sha256
-        },
-        actor: dlv
-      )
+    # The refusal fails closed by raising (the capture adapter and the
+    # delivery worker pass an action error on as a FunctionClauseError that
+    # carries no detail), so the direct call raises the named refusal too.
+    refused =
+      raised(fn ->
+        Outreach.record_receipt(
+          %{
+            delivery_operation_id: delivery.id,
+            idempotency_key: delivery.idempotency_key,
+            kind: :captured,
+            provider: :capture,
+            provider_message_id: "capture-mismatch",
+            rendered_sha256: payload.sha256
+          },
+          actor: dlv
+        )
+      end)
 
-    assert match?({:error, _}, result)
-    assert inspect(result) =~ "prototype_binding_mismatch"
+    assert refused =~ "prototype_binding_mismatch"
     no_capture!(ctx, delivery)
   end
 
