@@ -52,8 +52,10 @@ defmodule SdrAgent.Prototype.BindPathTest do
 
   test "snapshot/1 refuses anything but a binding row", %{created: created} do
     for other <- [created.delegation, %{}, nil] do
-      assert call(@authority, :snapshot, [other]) == {:error, :not_a_binding},
-             "snapshot/1 accepted #{inspect(other)}"
+      result = call(@authority, :snapshot, [other])
+
+      assert result == {:error, :not_a_binding},
+             "snapshot/1 of #{inspect(other)}: expected {:error, :not_a_binding}, got #{inspect(result)}"
     end
   end
 
