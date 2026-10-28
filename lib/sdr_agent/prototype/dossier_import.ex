@@ -80,11 +80,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     DossierEntry rows in the binding's tenant (every delegation's; a replay
     or a failed row adds none), for the live operator only, through the same
     fresh `live/1` gate, else `{:error, :forbidden | :binding_mismatch |
-    :not_prototype_runtime}`. A call inside an already-open transaction and
-    a failed read are the closed `{:error, :import_failed}`. It reads only:
-    no write, audit, reservation or output. Never authority: the cap is
-    decided per row under the binding lock.
-    O1
+    :not_prototype_runtime}`. A call inside an already-open transaction is
+    the closed `{:error, :import_failed}`, refused before any read. An exact
+    `Ash.Error.Forbidden` from the count read is `{:error, :forbidden}`; any
+    other failed read raises its original Ash exception, unclassified
+    (Codex 6d1ead6d option 2, d59fb7a3): Splode formats a non-Ash cause into
+    `UnknownError` text, so its type is gone, and it is never recovered from
+    that text. No count, code or write follows a raise. It reads only: no
+    write, audit, reservation or output. Never authority: the cap is decided
+    per row under the binding lock.
+
+    **Open boundary (Codex d59fb7a3).** A raise from `cap_used/1` is not
+    value-free at the task: `Mix.CLI` re-raises a non-Mix exception to
+    `Kernel.CLI`, which formats it and its stack to stderr outside Logger,
+    so `SdrAgent.Prototype.SafeLog`'s logger filter does not contain it. No
+    caller guarantee is made here. The import task's terminal presentation
+    boundary (a value-free failure exit that formats no error, message,
+    stack, query or input, proved with synthetic stdout, stderr, logger and
+    sink sentinel controls) is reviewed separately before any task GREEN;
+    the task and sink holds stay.
     """
 
     require Ash.Query
@@ -236,7 +250,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp closed(%Ash.Changeset{}), do: :import_failed
     defp closed(%Ash.ActionInput{}), do: :import_failed
 
-    @doc "The binding's distinct imported contacts, for the live operator; see the moduledoc."
+    @doc """
+    The binding's distinct imported contacts, for the live operator. Any
+    failed count read other than an exact Forbidden raises its original Ash
+    exception; see the moduledoc, including its open boundary.
+    """
     @spec cap_used(SdrAgent.Actor.t()) ::
             {:ok, non_neg_integer()}
             | {:error, :forbidden | :binding_mismatch | :not_prototype_runtime | :import_failed}
@@ -244,7 +262,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     # Outside any transaction (refused inside one), so a failed read returns
     # an error here rather than rolling a caller back by throw; it is not
-    # used/1, whose read/1 rolls the row transaction back.
+    # used/1, whose read/1 rolls the row transaction back. Only an exact
+    # Forbidden is mapped; any other returned error is raised as the
+    # original exception, never classified (a lossy UnknownError carries no
+    # type to classify).
     defp count_used(actor, seams) do
       with :ok <- not_nested(),
            :ok <- live(actor) do
@@ -256,7 +277,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         |> count_read()
         |> case do
           {:ok, records} -> {:ok, records |> MapSet.new(& &1.contact_id) |> MapSet.size()}
-          {:error, _error} -> {:error, :import_failed}
+          {:error, %Ash.Error.Forbidden{}} -> {:error, :forbidden}
+          {:error, error} -> raise error
         end
       end
     end
