@@ -63,7 +63,6 @@ defmodule SdrAgent.Agents.ResultGate do
   alias SdrAgent.Operations
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Operations.Operation
-  alias SdrAgent.Prototype
   alias SdrAgent.Repo
 
   # Slice B row B3 (accepted): the compiled gate mode, set by no config
@@ -105,6 +104,9 @@ defmodule SdrAgent.Agents.ResultGate do
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  # D-237: the prototype gate exists only in builds with the prototype
+  # authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   # Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): a
   # `before_gate: fun/1` in this module's Application env runs on the
@@ -276,17 +278,29 @@ defmodule SdrAgent.Agents.ResultGate do
   decision (`SdrAgent.Prototype.Release`, referenced only here) and never
   falls back to the ordinary branches below; `:interrupted` and `:timeout`
   never release there either.
+  The dispatch is compiled only with the prototype authority
+  (`:prototype_authority_compiled`); the production build has the ordinary
+  branches only.
   """
   @spec finalize(struct(), map(), {:ok | :timeout | :interrupted, map()}, keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
   def finalize(invocation, gate, outcome, opts \\ [])
 
   def finalize(invocation, gate, {kind, _receipt} = outcome, opts)
-      when kind in [:ok, :timeout, :interrupted] do
-    case Prototype.runtime() do
-      :prototype -> SdrAgent.Prototype.Release.finalize(invocation, gate, outcome, opts)
-      _ordinary -> ordinary_finalize(invocation, gate, outcome, opts)
+      when kind in [:ok, :timeout, :interrupted],
+      do: dispatch_finalize(invocation, gate, outcome, opts)
+
+  if @prototype_compiled do
+    defp dispatch_finalize(invocation, gate, outcome, opts) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Release.finalize(invocation, gate, outcome, opts)
+        _ordinary -> ordinary_finalize(invocation, gate, outcome, opts)
+      end
     end
+  else
+    # The production build has no prototype runtime: the ordinary gate only.
+    defp dispatch_finalize(invocation, gate, outcome, opts),
+      do: ordinary_finalize(invocation, gate, outcome, opts)
   end
 
   defp ordinary_finalize(invocation, gate, {kind, receipt}, opts) do

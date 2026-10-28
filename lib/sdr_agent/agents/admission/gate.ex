@@ -59,6 +59,9 @@ defmodule SdrAgent.Agents.Admission.Gate do
   (`SdrAgent.Prototype.Admission`) exists, and its refusal
   `:prototype_not_authorized` (with its check) never falls back to the
   ordinary checks above.
+  The dispatch is compiled only with the prototype authority
+  (`:prototype_authority_compiled`); the production build has the ordinary
+  checks only.
   """
 
   require Ash.Query
@@ -69,8 +72,6 @@ defmodule SdrAgent.Agents.Admission.Gate do
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit.AuditEvent
   alias SdrAgent.Audit.Kernel
-  alias SdrAgent.Prototype
-  alias SdrAgent.Prototype.Admission, as: PrototypeAdmission
 
   @reasons [
     :result_gate_inactive,
@@ -83,6 +84,9 @@ defmodule SdrAgent.Agents.Admission.Gate do
   ]
   @tuple_keys ~w(cli_version method model_id profile_id projection_version provider)
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  # D-237: the prototype runtime and its gate exist only in builds with the
+  # prototype authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @doc """
   The admission refusal reasons (packet section 2, Admission row; with
@@ -140,15 +144,11 @@ defmodule SdrAgent.Agents.Admission.Gate do
   """
   def admit_reservation(
         run,
-        %{profile_id: profile_id, purpose: _purpose} = call,
+        %{profile_id: _profile_id, purpose: _purpose} = call,
         observation,
         authority
-      ) do
-    case Prototype.runtime() do
-      :prototype -> PrototypeAdmission.reservation(run, call, observation, authority)
-      _ordinary -> ordinary_reservation(run, profile_id, observation, authority)
-    end
-  end
+      ),
+      do: dispatch_reservation(run, call, observation, authority)
 
   defp ordinary_reservation(run, profile_id, observation, authority) do
     {:ok, profile} = ModelProfiles.fetch_real(profile_id)
@@ -179,11 +179,32 @@ defmodule SdrAgent.Agents.Admission.Gate do
   re-derived from its one original reservation event. Returns `:ok` or
   `{:error, reason, check}`.
   """
-  def admit_launch(run, invocation, observation) do
-    case Prototype.runtime() do
-      :prototype -> PrototypeAdmission.launch(run, invocation, observation)
-      _ordinary -> ordinary_launch(run, invocation, observation)
+  def admit_launch(run, invocation, observation),
+    do: dispatch_launch(run, invocation, observation)
+
+  ## The runtime partition (D-237 IF-4)
+
+  if @prototype_compiled do
+    defp dispatch_reservation(run, call, observation, authority) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Admission.reservation(run, call, observation, authority)
+        _ordinary -> ordinary_reservation(run, call.profile_id, observation, authority)
+      end
     end
+
+    defp dispatch_launch(run, invocation, observation) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Admission.launch(run, invocation, observation)
+        _ordinary -> ordinary_launch(run, invocation, observation)
+      end
+    end
+  else
+    # The production build has no prototype runtime: the ordinary gate only.
+    defp dispatch_reservation(run, call, observation, authority),
+      do: ordinary_reservation(run, call.profile_id, observation, authority)
+
+    defp dispatch_launch(run, invocation, observation),
+      do: ordinary_launch(run, invocation, observation)
   end
 
   defp ordinary_launch(run, invocation, observation) do

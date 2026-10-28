@@ -65,10 +65,12 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
   alias SdrAgent.Agents.WitnessEvidence
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.Failure
-  alias SdrAgent.Prototype
 
   @terminal [:completed, :failed, :unknown]
   @fingerprint [:disposition, :reason, :wire_witness_link_id, :evidence_sha256]
+  # D-237: prototype runtime exists only in builds with the prototype
+  # authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -196,23 +198,35 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     code = Ash.Changeset.get_argument(changeset, :prototype_refusal)
     classification = Ash.Changeset.get_argument(changeset, :gate_classification)
 
-    with :ok <- runtime_partition(disposition, reason, Prototype.runtime()),
+    with :ok <- runtime_partition(disposition, reason),
          :ok <- unverified(disposition, mode),
          :ok <- refusal_code(reason, code) do
       reconciled(classification, {reason, code})
     end
   end
 
-  defp runtime_partition(:released, _reason, :prototype),
-    do: {:error, :disposition, "the ordinary release is unreachable in prototype runtime"}
+  if @prototype_compiled do
+    defp runtime_partition(disposition, reason) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> prototype_partition(disposition)
+        _ordinary -> ordinary_partition(disposition, reason)
+      end
+    end
 
-  defp runtime_partition(_disposition, _reason, :prototype), do: :ok
+    defp prototype_partition(:released),
+      do: {:error, :disposition, "the ordinary release is unreachable in prototype runtime"}
 
-  defp runtime_partition(disposition, reason, _ordinary)
+    defp prototype_partition(_disposition), do: :ok
+  else
+    # The production build has no prototype runtime.
+    defp runtime_partition(disposition, reason), do: ordinary_partition(disposition, reason)
+  end
+
+  defp ordinary_partition(disposition, reason)
        when disposition == :released_unverified or reason == :prototype_authority_refused,
        do: {:error, :disposition, "is decided only in prototype runtime"}
 
-  defp runtime_partition(_disposition, _reason, _ordinary), do: :ok
+  defp ordinary_partition(_disposition, _reason), do: :ok
 
   defp unverified(:released_unverified, {:prelocked, %Prelocked{finalizer: :prototype_gate}}),
     do: {:error, :disposition, "needs its closed basis (d237-basis/1)"}
