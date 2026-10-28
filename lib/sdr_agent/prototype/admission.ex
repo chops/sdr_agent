@@ -84,6 +84,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @reason :prototype_not_authorized
     @registry {__MODULE__, :admission_registry}
+    @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
     ## Reservation
 
@@ -177,7 +178,23 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # the parent grant `FOR UPDATE` first, so they serialize on that grant
     # lock. No per-row lock is claimed for the other rows, and nothing here
     # proves concurrency against SQL written behind the application.
-    defp charged_grant(%{grant_id: grant_id, tenant_id: tenant_id}) when is_binary(grant_id) do
+    #
+    # RED-b2c seam (Codex 79819840 R1): in test-seam builds only, an injected
+    # result replaces these reads (`charged_grant_read/1` below). It is a
+    # deny/no-positive declaration: the injected result takes the SAME path
+    # as a real one, so `{:ok, nil}` and a returned error are both still
+    # refused `grant_not_eligible` (S2-A, unchanged until the Q6 GREEN).
+    # Every other build has no seam path.
+    defp charged_grant(%{grant_id: grant_id} = invocation) when is_binary(grant_id) do
+      case charged_grant_read(invocation) do
+        {:ok, grant, allocations} -> {:ok, grant, allocations}
+        _missing_or_error -> refuse(:grant_not_eligible)
+      end
+    end
+
+    defp charged_grant(_invocation), do: refuse(:grant_not_eligible)
+
+    defp read_charged_grant(%{grant_id: grant_id, tenant_id: tenant_id}) do
       opts = AuditKernel.opts(tenant_id)
 
       with {:ok, %ModelCallGrant{} = grant} <-
@@ -192,12 +209,23 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
              |> Ash.Query.sort(id: :asc)
              |> Ash.read() do
         {:ok, grant, allocations}
-      else
-        _missing_or_error -> refuse(:grant_not_eligible)
       end
     end
 
-    defp charged_grant(_invocation), do: refuse(:grant_not_eligible)
+    if @test_seams do
+      # Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): a
+      # `charged_grant_read: fun/1` in this module's Application env, given
+      # the invocation, returns the read result to use. Without it the real
+      # reads run.
+      defp charged_grant_read(invocation) do
+        case Keyword.get(Application.get_env(:sdr_agent, __MODULE__, []), :charged_grant_read) do
+          fun when is_function(fun, 1) -> fun.(invocation)
+          _none -> read_charged_grant(invocation)
+        end
+      end
+    else
+      defp charged_grant_read(invocation), do: read_charged_grant(invocation)
+    end
 
     defp same_revision(%{"grant_revision" => revision}, %{revision: revision}), do: :ok
     defp same_revision(_recorded, _grant), do: refuse(:grant_changed)
