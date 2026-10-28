@@ -156,6 +156,12 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
       assert match?({:ok, [_ | _]}, result),
              "the operator cannot read #{inspect(resource)}: #{inspect(result, limit: 3)}"
+
+      # The direct read of one of those rows, by id.
+      {:ok, [row | _]} = result
+
+      assert match?({:ok, %{id: _}}, Ash.get(resource, row.id, actor: ctx.operator)),
+             "the operator cannot read a #{inspect(resource)} directly"
     end
 
     for resource <- @not_review_read do
@@ -256,24 +262,91 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     assert {event.actor_type, event.actor_id} == {:prototype_operator, ctx.operator.id}
   end
 
-  test "Lead :assign: an operator-supplied owner is refused, through the resource and through SDR" do
+  # Every assignment effect a refused call must not have (supplement 2 r2
+  # Q1): runs, jobs, operations and audit events other than a denial record.
+  defp assignment_effects(ctx) do
+    opts = SdrAgent.Audit.Kernel.opts(ctx.tenant.id)
+    {:ok, runs} = Ash.read(SdrAgent.Agents.AgentRun, opts)
+    {:ok, operations} = Ash.read(SdrAgent.Operations.Operation, opts)
+
+    %{
+      runs: length(runs),
+      operations: length(operations),
+      jobs: Repo.aggregate(Oban.Job, :count),
+      events:
+        ctx.tenant |> events() |> Enum.reject(&(&1.event_type == "authz.denied")) |> length()
+    }
+  end
+
+  defp refused_without_effects!(ctx, lead, fun) do
+    before = assignment_effects(ctx)
+    result = fun.()
+    assert match?({:error, %Ash.Error.Forbidden{}}, result), "not Forbidden: #{inspect(result)}"
+    reloaded = reload!(ctx, lead)
+    assert {reloaded.status, reloaded.owner_user_id} == {lead.status, lead.owner_user_id}
+    assert assignment_effects(ctx) == before, "a refused assignment left an effect"
+  end
+
+  # A human user who is NOT the lead's current owner, so the input is a change.
+  defp other_owner!(ctx, lead) do
+    owner =
+      Enum.find([ctx.admin, operator!(ctx, :reviewer)], &(&1.id != lead.owner_user_id))
+
+    assert owner && owner.id != lead.owner_user_id
+    owner
+  end
+
+  test "Lead :assign (direct): an operator-supplied CHANGED owner is Forbidden by the policy alone, with no effect" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "07")
+    owner = other_owner!(ctx, lead)
+
+    refused_without_effects!(ctx, lead, fn ->
+      Sales.update(lead, :assign, %{owner_user_id: owner.id}, actor: ctx.operator)
+    end)
+  end
+
+  test "SDR.assign_lead: any caller-supplied owner is Forbidden before assignment, never stripped" do
     ctx = bound_with_demo!()
     lead = lead!(ctx, "07")
 
-    assert forbidden?(
-             Sales.update(lead, :assign, %{owner_user_id: ctx.admin.id}, actor: ctx.operator)
-           )
+    # A changed owner, and the current owner value itself (nil when there is
+    # none): owner input present at all is refused on the operator path.
+    for owner_id <- [other_owner!(ctx, lead).id, lead.owner_user_id] do
+      refused_without_effects!(ctx, lead, fn ->
+        SDR.assign_lead(lead,
+          campaign_id: ctx.campaign_id,
+          owner_user_id: owner_id,
+          actor: ctx.operator
+        )
+      end)
+    end
+  end
 
-    assert forbidden?(
+  test "SDR.assign_lead: an accepted operator call keeps the existing owner" do
+    ctx = bound_with_demo!()
+    lead = lead!(ctx, "07")
+
+    assert {:ok, %{lead: assigned}} =
+             SDR.assign_lead(lead, campaign_id: ctx.campaign_id, actor: ctx.operator)
+
+    assert {assigned.status, assigned.owner_user_id} == {:assigned, lead.owner_user_id}
+  end
+
+  test "SDR.assign_lead control: a human still assigns with an owner in ordinary runtime (unchanged)" do
+    ctx = demo!(nil)
+    SdrAgent.SDRCase.ensure_offering!(ctx)
+    lead = lead!(ctx, "07")
+    reviewer = operator!(ctx, :reviewer)
+
+    assert {:ok, %{lead: assigned}} =
              SDR.assign_lead(lead,
                campaign_id: ctx.campaign_id,
-               owner_user_id: ctx.admin.id,
-               actor: ctx.operator
+               owner_user_id: reviewer.id,
+               actor: ctx.admin
              )
-           )
 
-    reloaded = reload!(ctx, lead)
-    assert {reloaded.status, reloaded.owner_user_id} == {:new, lead.owner_user_id}
+    assert {assigned.status, assigned.owner_user_id} == {:assigned, reviewer.id}
   end
 
   test "Lead :assign: forged, foreign-tenant and stale-binding operators are refused" do
@@ -321,9 +394,9 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
   # ------------------------------------------------------------------ ruling 2: Campaign review_read
 
-  # A copy of an existing row under a random, foreign tenant (raw SQL with
-  # triggers disabled, as a database administrator could): the row the
-  # operator's policy-level read must exclude.
+  # Negative synthetic tampering, not a domain-write success path: a raw copy
+  # of an existing row under a random, foreign tenant (SQL with triggers
+  # disabled). The operator's policy-level read must exclude it.
   defp foreign_copy!(table, id) do
     foreign_id = Ecto.UUID.generate()
 
@@ -347,6 +420,7 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
 
     assert {:ok, %{id: _}} = Sales.fetch(Sales.Campaign, ctx.campaign_id, actor: ctx.operator)
     refute match?({:ok, _}, Sales.fetch(Sales.Campaign, foreign_id, actor: ctx.operator))
+    refute match?({:ok, _}, Ash.get(Sales.Campaign, foreign_id, actor: ctx.operator))
   end
 
   test "review_read rows are the binding tenant's only (Lead, through the policy itself)" do
@@ -381,5 +455,18 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     end
 
     refute Ash.can?({Sales.Campaign, :create}, ctx.operator) == true
+  end
+
+  test "control: the human auditor still reads the review resources in ordinary runtime (unchanged)" do
+    ctx = demo!(nil)
+    %{draft: draft} = drafted!(ctx)
+    auditor = operator!(ctx, :auditor)
+
+    for resource <- [Sales.Lead, Sales.Campaign, SdrAgent.Outreach.Draft] do
+      assert match?({:ok, [_ | _]}, Ash.read(resource, actor: auditor)),
+             "the auditor cannot read #{inspect(resource)}"
+    end
+
+    assert match?({:ok, %{id: _}}, Ash.get(SdrAgent.Outreach.Draft, draft.id, actor: auditor))
   end
 end

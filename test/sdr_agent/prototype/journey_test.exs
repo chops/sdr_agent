@@ -13,10 +13,17 @@ defmodule SdrAgent.Prototype.JourneyTest do
        `SdrAgent.Prototype.Seed.run/2`);
     3. the budget worksheet and provisioning (S1
        `SdrAgent.Agents.provision_prototype_grant/2`);
-    4. import of ONE synthetic dossier row (S3
-       `SdrAgent.Sales.import_dossier_row/2`);
-    5. `op assign` (S4) → the agent run on ClaudeCLI → three
-       `released_unverified` releases (S2) → a draft;
+    4. import of ONE synthetic dossier row through the real route (S3
+       `SdrAgent.Prototype.DossierImport.import_row/2`, supplement 1 r2
+       section 5; the row from S3's synthetic fixtures);
+    5. `op assign` (S4) → the agent run in prototype runtime on the
+       ClaudeCLI provider with a FAKE CLI executable (the
+       `:claude_cli_test_seams` harness; never the Fake provider: the policy
+       entry pins `:claude_cli` with `:claude_cli_opus`) → the bound dossier
+       excerpts become accepted claims on `:company_website` / `:web_page`
+       artifacts of provider `:public_dossier` (S3) → three
+       `released_unverified` releases (S2) → a draft, absent from Home
+       (R10: Home keeps requiring `:released`);
     6. `op review` (S4): the bundle with the pending-revision view;
     7. `op approve` (S4) with the reviewed revision, digest and address →
        the delegated machine approval;
@@ -30,6 +37,8 @@ defmodule SdrAgent.Prototype.JourneyTest do
   """
   use SdrAgent.PrototypeCase, async: false
 
+  require Ash.Query
+
   import SdrAgent.OutreachFixtures,
     only: [deliver!: 0, receipts!: 2, delivery_of!: 2, approvals!: 2]
 
@@ -42,7 +51,14 @@ defmodule SdrAgent.Prototype.JourneyTest do
 
   @op Mix.Tasks.Sdr.Prototype.Op
   @seed SdrAgent.Prototype.Seed
-  @sales SdrAgent.Sales
+  @import SdrAgent.Prototype.DossierImport
+  # S3's fixtures (test/support/dossier_fixtures.ex; S3 RED-2): company/1,2
+  # builds a valid synthetic row (reserved names; size, location and industry
+  # facts verified), route_rows/2 takes it through DossierParser.parse,
+  # SpotcheckManifest.parse and DossierImport.prepare in its own exclusive
+  # scratch dir, and seed_read/0 gives the SeedDir.read/2 map. Until S3 lands
+  # these links fail as assertions (call/3 guards).
+  @s3_fixtures SdrAgent.DossierFixtures
   @cli Path.expand("../../support/d237_journey_cli.exs", __DIR__)
   @label "UNVERIFIED (PROTOTYPE)"
 
@@ -75,14 +91,14 @@ defmodule SdrAgent.Prototype.JourneyTest do
   defp agent(ctx), do: SdrAgent.Actor.system(:agent_runtime, ctx.fixture.tenant.id)
 
   # Steps 1–4: a bound prototype with the seed, a provisioned grant and one imported row.
-  defp prepared!(variant) do
-    fixture = bound!()
+  defp prepared! do
+    fixture = bound!(auditor: true)
     enter_window!(fixture)
     actor = fixture.actor
 
-    seed_dir = scratch!("seed")
-    seed = call(@seed, :run, [%{dir: seed_dir, fixture: :synthetic}, [actor: actor]])
-    assert match?({:ok, _}, seed), "seed (S3): #{inspect(seed)}"
+    seed = call(@seed, :run, [call(@s3_fixtures, :seed_read, []), actor])
+    assert match?({:ok, %{campaign_id: _}}, seed), "seed (S3): #{inspect(seed)}"
+    {:ok, %{campaign_id: campaign_id}} = seed
 
     root = scratch!("worksheet")
     {worksheet, worksheet_sha} = private!(root, "worksheet.json", journey_worksheet(root))
@@ -95,20 +111,73 @@ defmodule SdrAgent.Prototype.JourneyTest do
 
     assert match?({:ok, _}, grant), "provision (S1): #{inspect(grant)}"
 
-    dossier_dir = scratch!("dossier")
-    {dossier, dossier_sha} = private!(dossier_dir, "dossier.json", journey_dossier(variant))
+    # One row prepared through the real route by S3's route_rows/2 (never a
+    # bespoke row). The variant is decided by the ICP and the fake CLI's
+    # answer, not by the row.
+    company = call(@s3_fixtures, :company, [1])
+    routed = call(@s3_fixtures, :route_rows, [[company], ["row-1"]])
+    assert match?({:ok, [_ | _]}, routed), "route_rows (S3): #{inspect(routed, limit: 5)}"
+    {:ok, [row | _]} = routed
+    imported = call(@import, :import_row, [row, actor])
 
-    imported =
-      call(@sales, :import_dossier_row, [
-        %{dossier: dossier, dossier_sha256: dossier_sha, row_id: "acme-widgets"},
-        [actor: actor]
-      ])
+    assert match?({:ok, :imported, %{lead_id: _, entry_id: _}}, imported),
+           "import (S3): #{inspect(imported)}"
 
-    assert match?({:ok, %{lead: _}}, imported), "import (S3): #{inspect(imported)}"
-    {:ok, %{lead: lead, campaign: campaign}} = imported
+    {:ok, :imported, %{lead_id: lead_id, entry_id: entry_id}} = imported
+    {:ok, lead} = SdrAgent.Sales.fetch(SdrAgent.Sales.Lead, lead_id, actor: actor)
+    {:ok, campaign} = SdrAgent.Sales.fetch(SdrAgent.Sales.Campaign, campaign_id, actor: actor)
     {:ok, %{grant: grant_record}} = grant
 
-    %{fixture: fixture, actor: actor, lead: lead, campaign: campaign, grant: grant_record}
+    %{
+      fixture: fixture,
+      actor: actor,
+      lead: lead,
+      entry_id: entry_id,
+      campaign: campaign,
+      grant: grant_record
+    }
+  end
+
+  # The bound dossier excerpts became accepted claims on public_dossier
+  # website or page artifacts, each artifact bound to one of the entry's
+  # DossierSource digests (supplement 1 r2 sections 6 and 6a).
+  defp assert_dossier_evidence!(ctx) do
+    {:ok, sources} =
+      Ash.read(SdrAgent.Research.DossierSource, actor: ctx.actor)
+
+    source_digests =
+      for source <- sources,
+          source.dossier_entry_id == ctx.entry_id,
+          into: MapSet.new(),
+          do: source.content_sha256
+
+    assert MapSet.size(source_digests) > 0, "the imported entry has no dossier sources"
+
+    {:ok, claims} =
+      SdrAgent.Research.EvidenceClaim
+      |> Ash.Query.filter(lead_id == ^ctx.lead.id and quality == :accepted)
+      |> Ash.read(actor: ctx.actor)
+
+    assert claims != [], "no accepted claim on the imported lead"
+
+    for claim <- claims do
+      {:ok, artifact} =
+        Ash.get(SdrAgent.Research.ResearchArtifact, claim.research_artifact_id, actor: ctx.actor)
+
+      assert artifact.provider == :public_dossier
+      assert artifact.source_type in [:company_website, :web_page]
+      assert artifact.trust_level == :unverified
+      assert MapSet.member?(source_digests, artifact.content_sha256)
+    end
+  end
+
+  # R10: Home keeps requiring `:released`, so a released_unverified draft
+  # never appears there.
+  defp refute_on_home!(ctx, draft) do
+    auditor = ctx.fixture.auditor
+    result = SdrAgent.Outreach.Inbox.list(auditor, nil)
+    assert match?({:ok, _}, result), "Home refused the auditor: #{inspect(result, limit: 5)}"
+    refute inspect(result, limit: :infinity) =~ draft.id, "a released_unverified draft is on Home"
   end
 
   defp journey_worksheet(root) do
@@ -140,18 +209,6 @@ defmodule SdrAgent.Prototype.JourneyTest do
     })
   end
 
-  # A synthetic `sdr-agent.prototype-dossier` v1 file with one importable row
-  # (reserved `.test` names only); the S3 parser is the authority on its shape.
-  defp journey_dossier(_variant) do
-    Jason.encode!(%{
-      "schema" => "sdr-agent.prototype-dossier",
-      "schema_version" => 1,
-      "generated_at" => "2026-10-29T10:00:00Z",
-      "sources_policy" => "synthetic journey fixture",
-      "companies" => []
-    })
-  end
-
   defp op!(parsed, actor) do
     result = call(@op, :execute, [parsed, actor])
     assert match?({:ok, _}, result), "op #{parsed.command}: #{inspect(result)}"
@@ -160,7 +217,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
   end
 
   test "G4: assign → three released_unverified → draft → review → delegated approve → captured with the block" do
-    ctx = prepared!("qualified")
+    ctx = prepared!()
     start_cli!("qualified")
 
     %{id: run_id} =
@@ -173,6 +230,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
 
     {:ok, run} = Agents.get_run(run_id, actor: ctx.actor)
     assert run.status == :succeeded, inspect({run.status, run.status_reason})
+    assert_dossier_evidence!(ctx)
 
     {:ok, invocations} = Agents.list_model_invocations(run.id, actor: agent(ctx))
     assert length(invocations) == 3
@@ -185,6 +243,8 @@ defmodule SdrAgent.Prototype.JourneyTest do
 
     {:ok, [draft]} =
       Outreach.list_records(Outreach.Draft, filter: [lead_id: ctx.lead.id], actor: ctx.actor)
+
+    refute_on_home!(ctx, draft)
 
     bundle_id =
       op!(%{command: :review, agent: :claude_code, draft: draft.id}, ctx.actor).bundle_id
@@ -224,7 +284,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
   end
 
   test "G4 disqualified variant: a truthful disqualification, no draft and no approval" do
-    ctx = prepared!("disqualified")
+    ctx = prepared!()
     start_cli!("disqualified")
 
     %{id: run_id} =
@@ -236,6 +296,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
     assert %{success: 1} = Oban.drain_queue(queue: :research, with_safety: false)
     {:ok, run} = Agents.get_run(run_id, actor: ctx.actor)
     assert run.status == :succeeded
+    assert_dossier_evidence!(ctx)
 
     assert {:ok, []} =
              Outreach.list_records(Outreach.Draft,
