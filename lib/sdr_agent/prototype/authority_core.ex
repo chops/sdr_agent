@@ -638,6 +638,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec check_app_stopped() :: :ok | {:error, :app_running}
     def check_app_stopped, do: red({:error, :not_implemented})
 
+    @doc "As `check_app_stopped/0`, for an explicit list of `app_names/0`-shaped names."
+    @spec check_app_stopped([{:oban | :process, term()}]) :: :ok | {:error, :app_running}
+    def check_app_stopped(_names), do: red({:error, :not_implemented})
+
+    @doc "The IF-2 app-running names: Oban, the endpoint and the model provider tree."
+    @spec app_names() :: [{:oban | :process, atom()}] | {:error, atom()}
+    def app_names, do: red({:error, :not_implemented})
+
     @doc "Creates the auditor credential file exclusively (0600) and returns its password."
     @spec write_credential(Path.t()) :: {:ok, String.t()} | {:error, atom()}
     def write_credential(_path), do: red({:error, :not_implemented})

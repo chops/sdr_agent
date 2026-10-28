@@ -210,4 +210,143 @@ defmodule SdrAgent.Prototype.SetupTest do
       end
     end
   end
+
+  # Codex f3036a14 queue 2: success AND refusal coverage for each
+  # non-credential phase-0/1 helper, beyond the first REDs above.
+  describe "phase 0 and 1 helpers: success and refusal coverage" do
+    defmodule FreshProbeWorker do
+      @moduledoc "A test-only Oban worker; its jobs are inserted, never run (testing: :manual)."
+      use Oban.Worker, queue: :default
+
+      @impl Oban.Worker
+      def perform(_job), do: :ok
+    end
+
+    # Every base table of the public schema except schema_migrations, from
+    # the catalog, with its row presence.
+    defp public_tables_with_rows do
+      %{rows: rows} =
+        Repo.query!(
+          "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+            "AND tablename <> 'schema_migrations' ORDER BY tablename",
+          []
+        )
+
+      for [table] <- rows,
+          match?(
+            %{rows: [[true]]},
+            Repo.query!(~s[SELECT EXISTS (SELECT 1 FROM "public"."#{table}")], [])
+          ),
+          do: table
+    end
+
+    defp migration_files do
+      Path.wildcard("priv/repo/migrations/*.exs")
+      |> Enum.map(&Path.basename(&1, ".exs"))
+      |> Enum.map(fn base ->
+        [version, name] = String.split(base, "_", parts: 2)
+        {String.to_integer(version), name}
+      end)
+      |> Enum.sort()
+    end
+
+    test "conflicting or extra Repo target selectors refuse" do
+      for wrong <- [
+            [{:port, 5520} | @exact_repo],
+            [{:database, "sdr_agent_dev"} | @exact_repo],
+            [{:socket_dir, "/private/tmp/d237-pg-other"} | @exact_repo],
+            Keyword.put(@exact_repo, :endpoints, [{"localhost", 5541}]),
+            Keyword.put(@exact_repo, :hostname, "db.example.test"),
+            Keyword.put(@exact_repo, :socket_dir, "/private/tmp/d237-pg/"),
+            Map.new(@exact_repo)
+          ] do
+        result = call(@authority, :check_repo_target, [wrong])
+
+        assert result == {:error, :repo_target_mismatch},
+               "repo target #{inspect(wrong)} gave #{inspect(result)}"
+      end
+    end
+
+    test "the app-running names are exactly IF-2's: Oban, the endpoint and the provider tree" do
+      assert call(@authority, :app_names, []) == [
+               {:oban, Oban},
+               {:process, SdrAgentWeb.Endpoint},
+               {:process, SdrAgent.AI.ModelProvider.ProfileSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.ServerSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.Coordinator},
+               {:process, SdrAgent.AI.ModelProvider.OperationSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.ClaudeCLI}
+             ]
+    end
+
+    test "names that are not alive pass; a live registered name or Oban instance refuses" do
+      n = System.unique_integer([:positive])
+      absent_process = :"d237_setup_absent_#{n}"
+      absent_oban = Module.concat(__MODULE__, "AbsentOban#{n}")
+
+      assert call(@authority, :check_app_stopped, [
+               [{:process, absent_process}, {:oban, absent_oban}]
+             ]) ==
+               :ok
+
+      live = :"d237_setup_live_#{n}"
+      Process.register(self(), live)
+
+      try do
+        assert call(@authority, :check_app_stopped, [
+                 [{:process, absent_process}, {:process, live}]
+               ]) ==
+                 {:error, :app_running}
+      after
+        Process.unregister(live)
+      end
+
+      oban = Module.concat(__MODULE__, "LiveOban#{n}")
+
+      start_supervised!(
+        {Oban,
+         [name: oban, repo: Repo, testing: :disabled] ++
+           SdrAgent.Prototype.Session.oban_insert_only_opts()}
+      )
+
+      assert call(@authority, :check_app_stopped, [[{:oban, oban}]]) == {:error, :app_running}
+    end
+
+    test "a row in any public table refuses freshness and resume: an Oban job alone" do
+      assert public_tables_with_rows() == [],
+             "prerequisite: the sandbox did not start empty: #{inspect(public_tables_with_rows())}"
+
+      assert call(@authority, :check_fresh, []) == :ok
+      assert call(@authority, :check_resumable, []) == :ok
+
+      assert {:ok, _job} = Oban.insert(FreshProbeWorker.new(%{}))
+      assert public_tables_with_rows() == ["oban_jobs"]
+
+      assert call(@authority, :check_fresh, []) == {:error, :database_not_fresh}
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+
+    test "resume refuses a missing migration version (labelled negative tamper)" do
+      assert call(@authority, :check_resumable, []) == :ok
+
+      # Synthetic negative tamper inside the sandbox transaction (rolled back):
+      # one pinned version row removed from schema_migrations.
+      Repo.query!("DELETE FROM schema_migrations WHERE version = 20261028052425", [])
+
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+
+    test "the pinned migration set is exactly the migration files, in version order" do
+      pinned = call(@authority, :pinned_migrations, [])
+      assert is_list(pinned), "pinned_migrations/0 returned #{inspect(pinned)}"
+      assert pinned == migration_files()
+      assert pinned == Enum.sort(pinned)
+      assert length(pinned) == 34
+
+      %{rows: rows} =
+        Repo.query!("SELECT version FROM schema_migrations ORDER BY version", [])
+
+      assert Enum.map(rows, fn [v] -> v end) == Enum.map(pinned, &elem(&1, 0))
+    end
+  end
 end
