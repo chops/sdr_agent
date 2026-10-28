@@ -91,6 +91,8 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
 
   defp filter_ids, do: Enum.map(:logger.get_primary_config().filters, &elem(&1, 0))
 
+  defp primary_filters, do: :logger.get_primary_config().filters
+
   # Records every event through the test-only handler, with the primary
   # level set to `level`; both are restored when the test exits.
   defp capture_events(level) do
@@ -505,6 +507,38 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
 
       assert SafeLog.detach() == :ok, "detach without SafeLog's filter installed is not :ok"
       assert filter_ids() == List.delete(filters, @filter_id)
+    end
+  end
+
+  describe "a foreign callback under SafeLog's filter id (Codex db38fb96 R1)" do
+    # Labelled owned fixture: ExceptionFilter's actual callback, a real
+    # non-SafeLog filter, installed under SafeLog's id. This test's own
+    # on_exit removes exactly that fixture, if it is still there.
+    test "attach and detach both refuse it and leave it, the filters and the handlers intact" do
+      foreign = {&SdrAgent.Logger.ExceptionFilter.filter/2, []}
+
+      on_exit(fn ->
+        with {@filter_id, ^foreign} <- List.keyfind(primary_filters(), @filter_id, 0),
+             do: :logger.remove_primary_filter(@filter_id)
+      end)
+
+      assert :logger.add_primary_filter(@filter_id, foreign) == :ok
+      filters = primary_filters()
+      handlers = Enum.sort_by(:logger.get_handler_config(), & &1.id)
+
+      assert SafeLog.attach(file: nil) == {:error, :attach_failed}
+      assert primary_filters() == filters, "attach changed the filters"
+
+      result = SafeLog.detach()
+
+      assert List.keyfind(primary_filters(), @filter_id, 0) == {@filter_id, foreign},
+             "detach removed the foreign filter (it returned #{inspect(result)})"
+
+      assert primary_filters() == filters, "detach changed the filters"
+      assert result == {:error, :foreign_filter}
+
+      assert Enum.sort_by(:logger.get_handler_config(), & &1.id) == handlers,
+             "attach or detach changed the handlers"
     end
   end
 end
