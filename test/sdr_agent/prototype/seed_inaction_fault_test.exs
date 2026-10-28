@@ -29,10 +29,22 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
     or audit survivor; and `SELECT 1` usable after. Under the action's own
     transaction and under an `SdrAgent.Audit.transaction/1` caller.
 
+  - **G1, S1's live-read fault at the in-action live check** (S1 seam at the
+    combined pin 5a6daa6, `SdrAgent.Prototype.Authority.TestSeam`): the G0
+    wrapper opens `with_live_fault(stage, kind, inner)` exactly around
+    SeedAnchor's own check, after the pre-flight, for each stage
+    (`:binding_read`, `:identity_read`, `:delegation_read`), kind
+    (`:returned_error`, `:raise`, `:abort`) and owner. The fault fires exactly
+    once there (its hit count read inside the scope); the in-action
+    statements from the wrapper's entry to the end are exactly the reads up to
+    the faulted one (for `:abort`, the S1-tagged `SELECT 1 / 0` and the real
+    read seeing 25P02), then exactly one successful owner rollback: no anchor
+    or Payload read and no write after the fault; the owner outcome is exact;
+    nothing survives; `SELECT 1` works after.
+
   Owner outcomes are closed shapes (an unknown one fails). The sandbox owner
   unwinding is a logical-transaction control, not a committed durability
-  proof. The G1 controls, which open S1's live-read fault scope inside the G0
-  wrapper, follow S1's seam gate. Observations keep closed labels only
+  proof. Observations keep closed labels only
   (statement verb, table, result code, fault tag), never SQL text,
   parameters or error terms. Synthetic `.test` data.
   """
@@ -42,6 +54,8 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   alias SdrAgent.Agents.SettingsRevision
   alias SdrAgent.Audit.Payload
   alias SdrAgent.DossierFixtures, as: F
+  alias SdrAgent.Operations.PrototypeDatabaseBinding, as: Binding
+  alias SdrAgent.Operations.PrototypeDelegation, as: Delegation
   alias SdrAgent.Prototype.Changes.SeedAnchor
   alias SdrAgent.Prototype.Changes.SeedNote
 
@@ -67,6 +81,8 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   }
   @codes [:division_by_zero, :in_failed_sql_transaction]
   @fault_sites [:anchor_read, :payload_read]
+  @live_stages [:binding_read, :identity_read, :delegation_read]
+  @seam SdrAgent.Prototype.Authority.TestSeam
 
   # The closed owner-outcome vocabulary (T4): anything else is :other or
   # :unknown, which no expectation names.
@@ -75,9 +91,10 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
     Ash.Error.Invalid,
     Ash.Error.Forbidden,
     Ash.Error.Unknown,
-    Ash.Error.Framework
+    Ash.Error.Framework,
+    Ash.Changeset
   ]
-  @query_resources [User, Payload]
+  @query_resources [User, Payload, Binding, Delegation]
 
   # The real check inside the wrapper, exactly (T1).
   @live_check [
@@ -201,9 +218,10 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   defp code(_result), do: :other
 
   defp tag(options) when is_list(options) do
-    case List.keyfind(options, :d237_s3_fault, 0) do
-      nil -> nil
-      {_key, {site, ref}} when site in @fault_sites and is_reference(ref) -> {site, ref}
+    case {List.keyfind(options, :d237_s3_fault, 0), List.keyfind(options, :d237_live_fault, 0)} do
+      {nil, nil} -> nil
+      {{_key, {site, ref}}, nil} when site in @fault_sites and is_reference(ref) -> {site, ref}
+      {nil, {_key, stage}} when stage in @live_stages -> {:live, stage}
       _other -> :other
     end
   end
@@ -290,23 +308,40 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
       ref = make_ref()
       parent = self()
 
-      other =
-        spawn(fn ->
+      # The foreign process confirms its registration (ref-tagged) before the
+      # create, and is always stopped and observed down afterwards (Codex
+      # de8c929, non-vacuous foreign control).
+      {other, monitor} =
+        spawn_monitor(fn ->
           Process.put({SeedAnchor, :live_wrap}, fn inner ->
             send(parent, {:s3_wrap, ref, :foreign})
             inner.()
           end)
+
+          send(
+            parent,
+            {:s3_foreign_ready, ref, is_function(Process.get({SeedAnchor, :live_wrap}), 1)}
+          )
 
           receive do
             :stop -> :ok
           end
         end)
 
-      result = owned(:action, fn -> create(ctx) end)
-      send(other, :stop)
+      try do
+        assert_receive {:s3_foreign_ready, ^ref, true}, 1_000
 
-      refute_received {:s3_wrap, ^ref, :foreign}
-      assert result == {:ok, SettingsRevision}, "the create returned #{inspect(result)}"
+        refute Process.get({SeedAnchor, :live_wrap}),
+               "the foreign wrapper leaked into this process"
+
+        result = owned(:action, fn -> create(ctx) end)
+
+        refute_received {:s3_wrap, ^ref, :foreign}
+        assert result == {:ok, SettingsRevision}, "the create returned #{inspect(result)}"
+      after
+        send(other, :stop)
+        assert_receive {:DOWN, ^monitor, :process, ^other, :normal}, 1_000
+      end
     end
 
     test "the observer keeps closed labels only, never query text, parameters or error terms" do
@@ -393,6 +428,122 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
 
         assert result == unquote(Macro.escape(expected)),
                "#{site}: owner outcome #{inspect(result)}"
+
+        assert survivors(ctx) == before
+        assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
+      end
+    end
+  end
+
+  # G1: S1's live-read fault at the in-action live check, exactly (pinned
+  # from the source of S1 at 5a6daa6 and Ash 3.37.2; verified by the first
+  # sealed run). Inside the wrapper the real check is bindings, identity,
+  # bindings, identity, delegation; the faulted stage's first read is the
+  # fault point.
+  @b {:select, :bindings, :ok, nil}
+  @i {:select, :none, :ok, nil}
+  @rollback {:rollback, :none, :ok, nil}
+  @g1_statements %{
+    {:binding_read, :returned_error} => [@rollback],
+    {:binding_read, :raise} => [@rollback],
+    {:binding_read, :abort} => [
+      {:select, :none, :division_by_zero, {:live, :binding_read}},
+      {:select, :bindings, :in_failed_sql_transaction, nil},
+      @rollback
+    ],
+    {:identity_read, :returned_error} => [@b, @rollback],
+    {:identity_read, :raise} => [@b, @rollback],
+    {:identity_read, :abort} => [
+      @b,
+      {:select, :none, :division_by_zero, {:live, :identity_read}},
+      {:select, :none, :in_failed_sql_transaction, nil},
+      @rollback
+    ],
+    {:delegation_read, :returned_error} => [@b, @i, @b, @i, @rollback],
+    {:delegation_read, :raise} => [@b, @i, @b, @i, @rollback],
+    {:delegation_read, :abort} => [
+      @b,
+      @i,
+      @b,
+      @i,
+      {:select, :none, :division_by_zero, {:live, :delegation_read}},
+      {:select, :delegations, :in_failed_sql_transaction, nil},
+      @rollback
+    ]
+  }
+  # A returned or rescued live failure is S1's :binding_mismatch, so
+  # SeedAnchor refuses; a real abort at an Ash read is that read's rollback
+  # throw to the owner.
+  @g1_outcomes %{
+    {:refused, :action} => {:error, Ash.Error.Invalid},
+    {:refused, :audit} => {:error, Ash.Changeset},
+    {{:thrown, :binding_read}, :action} => {:error, Ash.Error.Unknown},
+    {{:thrown, :binding_read}, :audit} => {:error, {Ash.Query, Binding}},
+    {{:thrown, :delegation_read}, :action} => {:error, Ash.Error.Unknown},
+    {{:thrown, :delegation_read}, :audit} => {:error, {Ash.Query, Delegation}}
+  }
+
+  defp g1_path(stage, :abort) when stage in [:binding_read, :delegation_read],
+    do: {:thrown, stage}
+
+  defp g1_path(_stage, _kind), do: :refused
+
+  describe "G1: S1's live-read fault at the in-action live check" do
+    for owner <- [:action, :audit],
+        stage <- [:binding_read, :identity_read, :delegation_read],
+        kind <- [:returned_error, :raise, :abort] do
+      test "#{stage} #{kind}: fired once at the in-action site, then exactly the owner's rollback, no survivor (#{owner} owner)",
+           ctx do
+        {stage, kind, owner} = {unquote(stage), unquote(kind), unquote(owner)}
+        ref = make_ref()
+        parent = self()
+        before = survivors(ctx)
+
+        # The S1 scope is opened inside the wrapper, so only the in-action
+        # check can claim it; the hit count is read inside the scope in an
+        # `after`, so a raise or throw still reports it.
+        wrap = fn inner ->
+          send(parent, {:s3_wrap, ref, {:entered, Repo.in_transaction?()}})
+
+          call(@seam, :with_live_fault, [
+            stage,
+            kind,
+            fn ->
+              try do
+                inner.()
+              after
+                send(parent, {:s3_wrap, ref, {:hits, call(@seam, :live_fault_hits, [stage])}})
+              end
+            end
+          ])
+        end
+
+        {stream, result} =
+          observed(fn ->
+            with_seam({SeedAnchor, :live_wrap}, wrap, fn ->
+              owned(owner, fn -> create(ctx) end)
+            end)
+          end)
+
+        assert for({:s3_wrap, ^ref, {:entered, in_tx}} <- stream, do: in_tx) == [true],
+               "#{stage} #{kind} #{owner}: the wrapper was not entered once inside the transaction"
+
+        assert for({:s3_wrap, ^ref, {:hits, hits}} <- stream, do: hits) == [1],
+               "#{stage} #{kind} #{owner}: the fault did not fire exactly once at the in-action site"
+
+        assert {pre_flight, [_entered | from_entry]} =
+                 Enum.split_while(stream, &(not match?({:s3_wrap, ^ref, {:entered, _}}, &1)))
+
+        assert @b in pre_flight,
+               "#{stage} #{kind} #{owner}: no pre-flight read before the wrapper"
+
+        statements = Enum.reject(from_entry, &match?({:s3_wrap, _ref, _event}, &1))
+
+        assert statements == Map.fetch!(@g1_statements, {stage, kind}),
+               "#{stage} #{kind} #{owner}: statements #{inspect(statements)}"
+
+        assert result == Map.fetch!(@g1_outcomes, {g1_path(stage, kind), owner}),
+               "#{stage} #{kind} #{owner}: outcome #{inspect(result)}"
 
         assert survivors(ctx) == before
         assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
