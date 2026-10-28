@@ -16,35 +16,45 @@ defmodule SdrAgent.Prototype.AnchorAuthTest do
   end
 
   describe "the anchor never authenticates" do
-    test "password sign-in refuses the anchor for any password" do
+    test "password sign-in refuses the anchor for any password and issues no token" do
       fx = bound!()
+      assert to_string(fx.anchor.email) == "d237-operator@prototype.invalid"
 
       for password <- ["", "test-password-1234", String.duplicate("x", 40)] do
         assert match?({:error, _}, Accounts.sign_in("d237-operator@prototype.invalid", password))
       end
 
-      assert to_string(fx.anchor.email) == "d237-operator@prototype.invalid"
+      subject = AshAuthentication.user_to_subject(fx.anchor)
+
+      %{rows: [[tokens]]} =
+        Repo.query!("SELECT count(*) FROM tokens WHERE subject = $1", [subject])
+
+      assert tokens == 0, "a token was issued for the anchor"
     end
 
-    test "the session subject lookup and current_operator/1 refuse the anchor" do
+    test "the session subject lookup refuses the anchor" do
       fx = bound!()
       subject = AshAuthentication.user_to_subject(fx.anchor)
       assert match?({:error, _}, AshAuthentication.subject_to_user(subject, User))
+    end
 
+    test "a signed, stored session token for the anchor does not resolve in current_operator/1" do
+      fx = bound!()
+      # A token minted directly for the anchor (never issued by sign-in): the
+      # session lookup must still refuse it.
       token_result = AshAuthentication.Jwt.token_for_user(fx.anchor, %{"purpose" => "user"})
 
-      case token_result do
-        {:ok, token, _claims} -> assert Accounts.current_operator(token) == :error
-        :error -> :ok
-      end
+      assert match?({:ok, _token, _claims}, token_result),
+             "prerequisite: minting a test token returned #{inspect(token_result)}"
+
+      {:ok, token, _claims} = token_result
+      assert Accounts.current_operator(token) == :error
     end
   end
 
   describe "the role is immutable" do
     test "no change to or from :agent_operator, and no create or seed with it" do
-      fx = bound!()
-      leave = PrototypeFixtures.leave_runtime()
-      assert leave == :ok
+      fx = bound!(enter_runtime: false)
       admin = human(:admin, fx.tenant)
       reviewer = new_human(:reviewer, fx.tenant)
 

@@ -22,12 +22,8 @@ defmodule SdrAgent.Prototype.SetupTest do
     n
   end
 
-  defp scratch_dir! do
-    dir = Path.join(System.tmp_dir!(), "d237-setup-test-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(dir)
-    File.chmod!(dir, 0o700)
-    dir
-  end
+  # An exclusive, unpredictable, owned 0700 root (Codex 39a6fd61 R1).
+  defp scratch_dir!, do: PrototypeFixtures.scratch_dir!()
 
   describe "phase 0 preflight" do
     test "the Repo target must be exactly the prototype socket, port and database" do
@@ -90,6 +86,7 @@ defmodule SdrAgent.Prototype.SetupTest do
 
     test "the pinned migration set ends with the seven d237 migrations, in order" do
       versions = call(@authority, :pinned_migrations, [])
+      assert is_list(versions), "pinned_migrations/0 returned #{inspect(versions)}"
       names = Enum.map(versions, fn {_version, name} -> name end)
 
       assert Enum.take(names, -7) == [
@@ -136,14 +133,55 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert count("oban_jobs") == 0
     end
 
-    test "any failing step rolls back the tenant, users, binding and delegation" do
+    # Codex 97b19ad4: the rollback proof must show that the failure came AFTER
+    # earlier writes. The test-build hook `{Authority, :before_delegation}`
+    # runs inside bootstrap's transaction, after the tenant, anchor and
+    # binding writes and before the delegation's; here it reports the row
+    # counts it sees there and then raises (the injected late failure).
+    test "a failure after the earlier writes rolls back the tenant, users, binding and delegation" do
+      test_pid = self()
+      tables = ~w(tenants users prototype_database_bindings prototype_delegations)
+
+      Process.put({@authority, :before_delegation}, fn _created ->
+        send(test_pid, {:written, Map.new(tables, &{&1, count(&1)})})
+        raise "injected late bootstrap failure"
+      end)
+
       result =
-        call(@authority, :bootstrap, [[agent: :claude_code, session_correlation: "bad"]])
+        call(@authority, :bootstrap, [
+          [agent: :claude_code, session_correlation: "setup-session-0002"]
+        ])
 
-      assert match?({:error, _}, result), "a bootstrap with a bad correlation succeeded"
+      assert result == {:error, :bootstrap_failed},
+             "a bootstrap failing before its last write returned #{inspect(result)}"
 
-      for table <- ~w(tenants users prototype_database_bindings prototype_delegations) do
+      assert_received {:written, written}, "the late failure point was never reached"
+
+      assert written == %{
+               "tenants" => 1,
+               "users" => 1,
+               "prototype_database_bindings" => 1,
+               "prototype_delegations" => 0
+             }
+
+      for table <- tables do
         assert count(table) == 0, "#{table} kept a row after the rollback"
+      end
+    end
+
+    test "a malformed agent or correlation is refused and writes nothing" do
+      for opts <- [
+            [agent: :claude_code, session_correlation: "bad"],
+            [agent: :other_agent, session_correlation: "setup-session-0003"]
+          ] do
+        result = call(@authority, :bootstrap, [opts])
+
+        assert result == {:error, :bootstrap_failed},
+               "#{inspect(opts)} returned #{inspect(result)}"
+
+        for table <- ~w(tenants users prototype_database_bindings prototype_delegations) do
+          assert count(table) == 0, "#{inspect(opts)}: #{table} kept a row"
+        end
       end
     end
 
@@ -152,10 +190,19 @@ defmodule SdrAgent.Prototype.SetupTest do
       admin = human(:admin, fx.tenant)
       binding = loaded!(SdrAgent.Operations.PrototypeDatabaseBinding)
 
+      # Valid inputs, so a refusal is the authorization's, never Invalid.
+      params = %{
+        instance_id: Ecto.UUID.generate(),
+        operator_user_id: fx.anchor.id,
+        policy_entry_sha256: fx.snapshot.policy_entry_sha256,
+        database_oid: fx.snapshot.database_oid,
+        system_identifier: fx.snapshot.system_identifier
+      }
+
       for actor <- [admin, fx.actor, system_actor(:kernel, fx.tenant)] do
         result =
           binding
-          |> Ash.Changeset.for_create(:create, %{instance_id: Ecto.UUID.generate()}, actor: actor)
+          |> Ash.Changeset.for_create(:create, params, actor: actor)
           |> Ash.create()
 
         assert match?({:error, %Ash.Error.Forbidden{}}, result),

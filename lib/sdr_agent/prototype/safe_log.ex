@@ -185,6 +185,16 @@ defmodule SdrAgent.Prototype.SafeLog do
   @spec say(code(), keyword()) :: :ok | {:error, :not_implemented}
   def say(_code, _refs), do: red({:error, :not_implemented})
 
+  @doc """
+  The primary filter `:sdr_prototype_content_free` as a pure `:logger`
+  filter function: returns the event rebuilt from its validated code and
+  refs (message `"prototype: <code>"`), or the withheld event (message
+  `"prototype: log content withheld"`, level and validated standard
+  metadata kept, `sdr_prototype_code: :withheld`). Never `:ignore`.
+  """
+  @spec filter(:logger.log_event(), term()) :: :logger.log_event() | {:error, :not_implemented}
+  def filter(_event, _extra), do: red({:error, :not_implemented})
+
   @doc "Installs the content-free primary filter and the file sink."
   @spec attach() :: :ok | {:error, :not_implemented}
   def attach, do: red({:error, :not_implemented})

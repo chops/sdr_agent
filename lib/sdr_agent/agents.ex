@@ -2034,6 +2034,24 @@ defmodule SdrAgent.Agents do
   # --- real-model call grants (C9) -------------------------------------
 
   @doc """
+  OPR (D-237 prototype runtime only; interfaces r6 IF-2 "Provisioning"):
+  checks the budget worksheet (`worksheet:` bytes, `worksheet_sha256:` hex;
+  evidence resolved under `evidence_root:`, default the private handoff
+  `tmp/` directory) and provisions the one `d237-funding/1` grant through
+  `ModelCallGrant :provision_prototype`, with the exact entry terms and the
+  operator anchor as creator and updater. An identical replay returns the
+  same grant; a second grant is refused.
+
+  RED stage (D-237 S1): returns `{:error, :not_implemented}`.
+  """
+  @spec provision_prototype_grant(map(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def provision_prototype_grant(_attrs, _opts), do: d237_red({:error, :not_implemented})
+
+  # RED stub result, typed dynamic() so callers compile (Elixir 1.20 infers
+  # literal returns). Read-only: nothing writes the key; removed in GREEN.
+  defp d237_red(default), do: :persistent_term.get({__MODULE__, :d237_red_stub}, default)
+
+  @doc """
   ADM: creates a grant and its `allocations` (a list of maps with `:key`,
   `:applies_to`, `:attempts` and optional `:profile_id`, `:available_from`,
   `:available_until`) as one validated bundle. Returns the grant with its

@@ -70,9 +70,10 @@ defmodule SdrAgent.Prototype.DelegationTest do
 
   describe "the setup-only and task-entry actions" do
     test ":enter and :create_setup are refused for an operator, a user and an auditor" do
-      fx = bound!(auditor: true)
-      loaded!(@delegation)
+      fx = bound!(auditor: true, enter_runtime: false)
       admin = human(:admin, fx.tenant)
+      enter!(fx)
+      loaded!(@delegation)
 
       for action <- [:enter, :create_setup], actor <- [fx.actor, admin, fx.auditor, fx.anchor] do
         result =
@@ -90,12 +91,12 @@ defmodule SdrAgent.Prototype.DelegationTest do
     end
 
     test ":enter accepts no binding, tenant or anchor input" do
-      fx = bound!()
+      fx = bound!(enter_runtime: false)
+      other = human(:reviewer, fx.tenant)
+      enter!(fx)
       loaded!(@delegation)
       accepted = Ash.Resource.Info.action(@delegation, :enter).accept
       assert Enum.sort(accepted) == [:agent, :session_correlation]
-
-      other = human(:reviewer, fx.tenant)
 
       result =
         @delegation
@@ -114,8 +115,9 @@ defmodule SdrAgent.Prototype.DelegationTest do
     end
 
     test "the composite foreign key refuses a delegation naming another anchor" do
-      fx = bound!()
+      fx = bound!(enter_runtime: false)
       other = human(:reviewer, fx.tenant)
+      enter!(fx)
 
       result =
         raw_error(
