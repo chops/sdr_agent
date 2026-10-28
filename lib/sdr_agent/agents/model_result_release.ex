@@ -299,8 +299,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   @doc "The typed classifications of a withheld gate outcome (R0-07 slice C, G2)."
   def gate_classifications, do: @gate_classifications
 
-  @doc "Whether `{disposition, reason}` is an allowed pair."
+  @doc """
+  Whether `{disposition, reason}` is an allowed pair. D-237 (amendment
+  items 5 and 6): `:released_unverified` pairs only with
+  `:owner_prototype_unverified`, and `:withheld` also pairs with
+  `:prototype_authority_refused`; neither new value pairs with an ordinary
+  one. This is the static pair rule only.
+  """
   def allowed_pair?(:released, :reconciled), do: true
+  def allowed_pair?(:released_unverified, :owner_prototype_unverified), do: true
+  def allowed_pair?(:withheld, :prototype_authority_refused), do: true
   def allowed_pair?(:withheld, reason), do: reason in @withheld_reasons
   def allowed_pair?(:calibration, :calibration), do: true
   def allowed_pair?(_disposition, _reason), do: false

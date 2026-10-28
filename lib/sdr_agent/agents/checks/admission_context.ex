@@ -17,8 +17,10 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
   @doc """
   The context map carrying an admitted charge, with the recorded
   `calibration_tuple` of an authorized calibration call (R0-07 slice B,
-  row B4; nil otherwise) and the console's `calibration_claim` recorded
-  next to it (R0-07 E4c-2; nil otherwise).
+  row B4; nil otherwise), the console's `calibration_claim` recorded
+  next to it (R0-07 E4c-2; nil otherwise) and, in prototype runtime, the
+  `prototype_authority` that `Admission.admit/5` built after the room
+  check (D-237 IF-4; nil otherwise).
   """
   def context(
         %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: %DateTime{} = at} =
@@ -32,7 +34,8 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
         reserved_at: at,
         calibration_tuple: Map.get(charge, :calibration_tuple),
         calibration_claim: Map.get(charge, :calibration_claim),
-        calibration_binding: Map.get(charge, :calibration_binding)
+        calibration_binding: Map.get(charge, :calibration_binding),
+        prototype_authority: Map.get(charge, :prototype_authority)
       }
     }
   end
@@ -49,6 +52,7 @@ defmodule SdrAgent.Agents.Checks.AdmissionContext do
         |> Map.put_new(:calibration_tuple, nil)
         |> Map.put_new(:calibration_claim, nil)
         |> Map.put_new(:calibration_binding, nil)
+        |> Map.put_new(:prototype_authority, nil)
 
   def charge(%{@marker => _malformed}), do: :malformed
   def charge(_context), do: nil

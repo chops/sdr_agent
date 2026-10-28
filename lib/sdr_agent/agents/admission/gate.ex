@@ -69,7 +69,8 @@ defmodule SdrAgent.Agents.Admission.Gate do
     :witness_store_untrusted,
     :calibration_not_authorized,
     :calibration_evidence_pending,
-    :calibration_grant_mismatch
+    :calibration_grant_mismatch,
+    :prototype_not_authorized
   ]
   @tuple_keys ~w(cli_version method model_id profile_id projection_version provider)
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
