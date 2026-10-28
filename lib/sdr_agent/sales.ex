@@ -21,6 +21,13 @@ defmodule SdrAgent.Sales do
     * seeding (SEED, dev/test only) — `seed_icp_definition/2`,
       `seed_account/2`, `seed_contact/2`, `seed_sequence/2`,
       `seed_sequence_step/2`, `seed_campaign/2`, `seed_lead/2`;
+    * D-237 prototype import (OPR, prototype runtime only) —
+      `import_prototype_account/2`, `import_prototype_contact/2`,
+      `import_prototype_lead/2` (guarded: every denial is audited). Sales
+      never calls Research: the import is coordinated above both domains by
+      `SdrAgent.Prototype.DossierImport`; in prototype runtime imported
+      domains and addresses are real (`SdrAgent.Sales.Validations.DatasetDomain`),
+      everywhere else the synthetic guard holds;
     * `advance_enrollment/3` (DLV, REC, SCH) — the S8 step advancement;
     * `update/4` — any update or lifecycle action of a Sales record (e.g.
       `update(lead, :start_research, %{decision_id: id}, actor: agt)`); each
@@ -106,15 +113,20 @@ defmodule SdrAgent.Sales do
 
   @doc """
   OPR (D-237 prototype runtime): creates the account of one imported dossier
-  row. RED stage (D-237 S3): returns `{:error, :not_implemented}`.
+  row (`name`, `domain`, `website_url`; `source: :dossier`). Called only by
+  `SdrAgent.Prototype.DossierImport`, inside its row transaction; a denial
+  is audited.
   """
-  def import_prototype_account(_attrs, _opts), do: red({:error, :not_implemented})
+  def import_prototype_account(attrs, opts),
+    do: GuardedCall.create(Account, :import_prototype, attrs, Keyword.put(opts, :guarded?, true))
 
-  @doc "OPR (D-237): creates the person contact of one imported row. RED stage."
-  def import_prototype_contact(_attrs, _opts), do: red({:error, :not_implemented})
+  @doc "OPR (D-237 prototype runtime): creates the person contact of one imported dossier row."
+  def import_prototype_contact(attrs, opts),
+    do: GuardedCall.create(Contact, :import_prototype, attrs, Keyword.put(opts, :guarded?, true))
 
-  @doc "OPR (D-237): creates the new lead of one imported row. RED stage."
-  def import_prototype_lead(_attrs, _opts), do: red({:error, :not_implemented})
+  @doc "OPR (D-237 prototype runtime): creates the new lead of one imported dossier row."
+  def import_prototype_lead(attrs, opts),
+    do: GuardedCall.create(Lead, :import_prototype, attrs, Keyword.put(opts, :guarded?, true))
 
   @doc "AGT: enrolls a qualified lead in an active campaign (`campaign_id`, `lead_id`)."
   def enroll_lead(attrs, opts), do: GuardedCall.create(CampaignEnrollment, :enroll, attrs, opts)
@@ -154,8 +166,4 @@ defmodule SdrAgent.Sales do
     |> then(&GuardedCall.read_query(Lead, &1))
     |> Ash.read()
   end
-
-  # RED stub result (D-237 S3), typed dynamic() so callers compile against the
-  # stub (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end

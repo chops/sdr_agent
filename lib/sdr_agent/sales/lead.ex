@@ -128,6 +128,21 @@ defmodule SdrAgent.Sales.Lead do
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
     end
 
+    create :import_prototype do
+      description """
+      OPR (D-237 prototype runtime, via SdrAgent.Prototype.DossierImport):
+      create the new lead of one imported dossier row, `source: :dossier`,
+      with no owner.
+      """
+
+      accept [:contact_id, :account_id]
+      change set_attribute(:source, :dossier)
+      change SdrAgent.Sales.Changes.LeadAccount
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
+    end
+
     create :seed do
       description "SEED (dev/test only): create a new lead with a fixture id."
       accept [:id, :contact_id, :account_id, :owner_user_id, :source]
@@ -313,6 +328,10 @@ defmodule SdrAgent.Sales.Lead do
 
     policy action([:create, :retry, :reopen]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:import_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :import_dossier}
     end
 
     policy action(:seed) do

@@ -64,6 +64,20 @@ defmodule SdrAgent.Sales.Contact do
       change {AppendEvent, event_type: "sales.contact.created", category: :domain_change}
     end
 
+    create :import_prototype do
+      description """
+      OPR (D-237 prototype runtime, via SdrAgent.Prototype.DossierImport):
+      create the person contact of one imported dossier row; the work
+      address's host equals its account's domain.
+      """
+
+      accept [:account_id, :first_name, :last_name, :title, :email]
+      validate {Validations.DatasetDomain, attribute: :email, kind: :email}
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {AppendEvent, event_type: "sales.contact.created", category: :domain_change}
+    end
+
     create :seed do
       description "SEED (dev/test only): create a contact with a fixture id."
       accept [:id, :account_id, :email | @editable]
@@ -118,6 +132,10 @@ defmodule SdrAgent.Sales.Contact do
 
     policy action([:create, :update, :change_email, :archive]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:import_prototype) do
+      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :import_dossier}
     end
 
     policy action(:seed) do
