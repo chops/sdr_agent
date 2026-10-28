@@ -20,11 +20,20 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
   non-nil value is refused (Forbidden), never ignored, for every provider and
   runtime, before the insert, so the reservation transaction (run counter,
   request Payload, invocation and event) rolls back.
+
+  D-237 partition (interfaces r6 IF-4; amendment item 4): a ClaudeCLI charge
+  is made here only in ordinary runtime and only without a
+  `prototype_authority`. In prototype runtime the prototype gate
+  (`SdrAgent.Prototype.Admission`) admits no charge without the authority it
+  records, and no reservation records one yet, so every prototype-runtime
+  ClaudeCLI charge is refused (Forbidden): it never falls back to an
+  ordinary grant.
   """
   use Ash.Resource.Change
 
   alias Ash.Error.Forbidden
   alias SdrAgent.Agents.Checks.AdmissionContext
+  alias SdrAgent.Prototype
 
   # Arguments a caller may never supply (each is set only from an admitted
   # charge): any non-nil value is refused, for every provider and runtime.
@@ -49,15 +58,9 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
 
       {:claude_cli, %{grant_id: grant_id, allocation_id: allocation_id, reserved_at: at} = charge} ->
-        changeset
-        |> Ash.Changeset.force_change_attributes(%{
-          grant_id: grant_id,
-          allocation_id: allocation_id,
-          reserved_at: at
-        })
-        |> record_tuple(charge.calibration_tuple)
-        |> record_claim(Map.get(charge, :calibration_claim))
-        |> record_binding(Map.get(charge, :calibration_binding))
+        if partitioned?(charge),
+          do: charged(changeset, charge, {grant_id, allocation_id, at}),
+          else: Ash.Changeset.add_error(changeset, Forbidden.exception([]))
 
       {:claude_cli, _missing} ->
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
@@ -68,6 +71,22 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
       {_provider, _charge} ->
         Ash.Changeset.add_error(changeset, Forbidden.exception([]))
     end
+  end
+
+  # D-237 IF-4: ordinary runtime only, and no prototype authority.
+  defp partitioned?(charge),
+    do: Prototype.runtime() == :ordinary and is_nil(Map.get(charge, :prototype_authority))
+
+  defp charged(changeset, charge, {grant_id, allocation_id, at}) do
+    changeset
+    |> Ash.Changeset.force_change_attributes(%{
+      grant_id: grant_id,
+      allocation_id: allocation_id,
+      reserved_at: at
+    })
+    |> record_tuple(charge.calibration_tuple)
+    |> record_claim(Map.get(charge, :calibration_claim))
+    |> record_binding(Map.get(charge, :calibration_binding))
   end
 
   defp record_tuple(changeset, nil), do: changeset

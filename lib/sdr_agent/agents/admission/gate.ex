@@ -52,6 +52,13 @@ defmodule SdrAgent.Agents.Admission.Gate do
   Ordinary admission never reads a per-call witness override or the test
   override switch: there is no caller, job or runtime flag that admits an
   ordinary call.
+
+  **D-237 partition (interfaces r6 IF-4; amendment item 4).** Both entry
+  points dispatch on `SdrAgent.Prototype.runtime/0` before any scope or
+  eligibility check: in prototype runtime only the prototype path
+  (`SdrAgent.Prototype.Admission`) exists, and its refusal
+  `:prototype_not_authorized` (with its check) never falls back to the
+  ordinary checks above.
   """
 
   require Ash.Query
@@ -62,6 +69,8 @@ defmodule SdrAgent.Agents.Admission.Gate do
   alias SdrAgent.AI.ModelProfiles
   alias SdrAgent.Audit.AuditEvent
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Prototype
+  alias SdrAgent.Prototype.Admission, as: PrototypeAdmission
 
   @reasons [
     :result_gate_inactive,
@@ -119,14 +128,29 @@ defmodule SdrAgent.Agents.Admission.Gate do
 
   @doc """
   The gate before reservation, under the reservation's locks and after the
-  admission instant, for a call of the reviewed real `profile_id` in the
-  locked `run`: the runtime identity checked is the profile's reviewed one
-  (CLI version, resolved model; row B2). `observation` is
+  admission instant, for the `call` (`%{profile_id:, purpose:}`: the
+  reviewed real profile and the call's purpose, passed explicitly; D-237
+  P1) in the locked `run`. In prototype runtime it is
+  `SdrAgent.Prototype.Admission.reservation/4` only (D-237 IF-4: no
+  ordinary fallback). Otherwise the runtime identity checked is the
+  profile's reviewed one (CLI version, resolved model; row B2). `observation` is
   `observe_store/0`'s result and `authority` the calibration marker's scope
   (or nil). Returns `{:ok, calibration_tuple}` (the recorded tuple of an
   authorized calibration call, else nil) or `{:error, reason, check}`.
   """
-  def admit_reservation(run, profile_id, observation, authority) do
+  def admit_reservation(
+        run,
+        %{profile_id: profile_id, purpose: _purpose} = call,
+        observation,
+        authority
+      ) do
+    case Prototype.runtime() do
+      :prototype -> PrototypeAdmission.reservation(run, call, observation, authority)
+      _ordinary -> ordinary_reservation(run, profile_id, observation, authority)
+    end
+  end
+
+  defp ordinary_reservation(run, profile_id, observation, authority) do
     {:ok, profile} = ModelProfiles.fetch_real(profile_id)
 
     identity = %{
@@ -149,12 +173,20 @@ defmodule SdrAgent.Agents.Admission.Gate do
 
   @doc """
   The gate at launch, under the launch's locks and head, for the owned
-  reserved `invocation` of the locked `run`: the same checks against the
+  reserved `invocation` of the locked `run`. In prototype runtime it is
+  `SdrAgent.Prototype.Admission.launch/3` only. Otherwise the same checks against the
   invocation's recorded identity, with the calibration authority
   re-derived from its one original reservation event. Returns `:ok` or
   `{:error, reason, check}`.
   """
   def admit_launch(run, invocation, observation) do
+    case Prototype.runtime() do
+      :prototype -> PrototypeAdmission.launch(run, invocation, observation)
+      _ordinary -> ordinary_launch(run, invocation, observation)
+    end
+  end
+
+  defp ordinary_launch(run, invocation, observation) do
     identity =
       Map.take(invocation, [
         :provider,
@@ -424,6 +456,21 @@ defmodule SdrAgent.Agents.Admission.Gate do
     do: if(Map.has_key?(payload, "arguments"), do: :error, else: {:ok, %{}})
 
   defp arguments(_event), do: :error
+
+  @doc """
+  The D-237 `prototype_authority` recorded by the same one original
+  reservation event (interfaces r6 IF-4): `{:ok, map}`, or `:error` when the
+  event is missing or duplicated, or records no map.
+  """
+  def recorded_prototype_authority(invocation) do
+    with {:ok, event} <- original_reservation(invocation),
+         {:ok, arguments} <- arguments(event),
+         %{} = authority <- arguments["prototype_authority"] do
+      {:ok, authority}
+    else
+      _missing_duplicate_or_malformed -> :error
+    end
+  end
 
   @doc """
   The G-R0 binding recorded by the same one original reservation event

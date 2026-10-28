@@ -344,7 +344,9 @@ defmodule SdrAgent.Agents.Admission do
   defp claim_record(_tuple, _gate), do: nil
 
   defp admission_gate(refusal, run, gate) do
-    case Gate.admit_reservation(run, refusal.profile_id, gate.store, gate.calibration) do
+    call = %{profile_id: refusal.profile_id, purpose: refusal.purpose}
+
+    case Gate.admit_reservation(run, call, gate.store, gate.calibration) do
       {:ok, tuple} -> {:ok, tuple}
       {:error, reason, check} -> {:error, %{refusal | reason: reason, check: check}}
     end
