@@ -29,6 +29,13 @@ section) is accepted as D-224, owner acceptance delegated by D-219, after
 Codex's static PASS (ca0e5bec); its text is published as reviewed, so its own
 Status line still reads PROPOSED. Acceptance is not activation or spend
 approval.
+The agent-environment D-240 addendum (2026-10-28, after the amendment) moves
+only the environment's exclusive end, from 2026-11-01T06:00:00Z to
+2026-11-07T07:00:00Z. It is accepted as D-247 on the owner's direct decision
+D-240, after Codex's independent exact-text PASS
+(m_codex_d240_0004_r2_pass_1793158419375), not under the D-219 delegation;
+its text is published as reviewed, so its own Status line still reads
+PROPOSED. The amendment's text and its accepted hashes (D-224) are unchanged.
 
 ### Current policy (summary, 2026-10-12)
 
@@ -50,6 +57,10 @@ historical. What applies today:
 - Accepted (2026-10-27, D-224): for the D-218 scope through 2026-11-01T06:00:00Z, the
   attested agent environment `agentenv-1` may make real calls within one owner
   authorization that agents materialize but never set (agent-environment amendment).
+- D-240 (2026-10-28, owner decision; addendum accepted as D-247): the
+  agent-environment end moves to 2026-11-07T07:00:00Z exclusive (Saturday Nov 7
+  00:00 MST, the end of Friday Nov 6 in Denver). Only the end changes. The code
+  keeps 2026-11-01T06:00:00Z until its own reviewed edit lands.
 
 ## Context
 
@@ -907,6 +918,36 @@ Accepting this amendment sets no budget. Real calls stay at zero until an owner 
 - **Neutral:** no new dependency. Writes stay Ash actions with audit (ADR-0009).
 
 <!-- END ADR-0004 AGENT-ENVIRONMENT AMENDMENT -->
+
+<!-- BEGIN ADR-0004 AGENT-ENVIRONMENT ADDENDUM D-240: text as reviewed by Codex (m_codex_d240_0004_r2_pass_1793158419375) -->
+
+### Agent-environment amendment, D-240 addendum (2026-10-28, PROPOSED): the environment end moves to 2026-11-07T07:00:00Z
+
+**Status: PROPOSED.** The owner decided this change (D-240). To be accepted, this exact text needs Codex's independent PASS and a decision row that cites D-240, the commit, this file's SHA256 and the hash of the bytes between these markers.
+
+**The owner's decision.** D-240 (2026-10-28). The owner answered "yes to both" (chat, received 2026-10-28T02:38:32Z) to Claude's pick "extend all four through 2026-11-07 07:00 UTC". This is the explicit owner decision that ADR-0014 Amendment 3 requires for an extension ("an extension needs an explicit owner decision").
+
+**The change.** Two instants in the agent-environment amendment are read as **2026-11-07T07:00:00Z (exclusive)**:
+
+- the scope end, 2026-11-01T06:00:00Z, in the current-policy summary;
+- the fourth operand of item 11's terminal runtime expiry, 2026-11-01T06:00:00Z (exclusive).
+
+The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Friday Nov 6 in America/Denver. The old end was epoch 1793512800 (Sunday 2026-11-01 00:00 MDT). The difference is 522000 s, six days plus one hour across the end of daylight saving time.
+
+**Only the end changes.**
+
+- Everything else in the amendment stays as accepted (D-224): the environment identity, database, port and roots; the one authorization and its binding; the no-spend provisioning mode; delegated provisioning; the per-call deadlines; and the terms boundary.
+- Real calls stay at zero until an owner caps row exists.
+- The terminal runtime expiry is still the earliest of the authorization's `expires_at`, the grant's `expires_at`, revocation and the environment end. An earlier authorization expiry, grant expiry or revocation still makes the runtime expire first. An allocation's earlier end bounds only the calls funded by that allocation; it is not terminal runtime expiry, and a later approved allocation may become available on its own terms.
+- D-240 grants no calls, spend, scope or new authority. A later extension needs another explicit owner decision.
+
+**Records keep their values.** Existing authorizations, grants, allocations, revocations, bindings and receipts keep their recorded windows and expiries. Nothing is rewritten, renewed or re-funded, and no consumption is reset.
+
+**Code bindings take effect only when they land.** The environment end is compiled into `SdrAgent.AgentEnv` (`@environment_end`, read through `environment_end/0`) and duplicated in `SdrAgent.Agents.DemoException` (`@environment_end`). Each takes the new end only when its own reviewed edit, with boundary tests, lands on the reviewed head. Until then the code still ends the environment at 2026-11-01T06:00:00Z, and that earlier instant governs.
+
+**The text above is unchanged.** The amendment keeps its reviewed bytes and its accepted hashes (D-224). This addendum supersedes only that end, in the two places listed above.
+
+<!-- END ADR-0004 AGENT-ENVIRONMENT ADDENDUM D-240 -->
 
 ## Justification
 

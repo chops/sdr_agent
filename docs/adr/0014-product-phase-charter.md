@@ -16,6 +16,12 @@ and reviewed by Codex for gate G0 of the SDLC process in
 Amendment 3 (2026-10-27) is accepted as D-222, owner acceptance delegated by
 D-219, after Codex's static PASS (01a17b73); its text below is published as
 reviewed, so its own Status line still reads PROPOSED.
+The Amendment 3 addendum (2026-10-28, published after it) moves only the
+amendment's exclusive end, from 2026-11-01T06:00:00Z to 2026-11-07T07:00:00Z.
+It is accepted as D-247 on the owner's direct decision D-240, after Codex's
+independent exact-text PASS (m_codex_d240_r8_review_1793158304526, review
+7ab1cc15), not under the D-219 delegation; its own Status line still reads
+PROPOSED. Amendment 3's text and its accepted hashes (D-222) are unchanged.
 
 ## Context
 
@@ -282,3 +288,36 @@ At 2026-11-01T06:00:00Z, the decision rights and rules above revert to the rest 
 - **Risks:** a delegated acceptance is only as good as its independent review. A blocking security finding still blocks.
 
 <!-- END ADR-0014 AMENDMENT 3 -->
+
+<!-- BEGIN ADR-0014 AMENDMENT 3 ADDENDUM: text as reviewed by Codex (m_codex_d240_r8_review_1793158304526) -->
+
+## Amendment 3 addendum (2026-10-28, PROPOSED): the window ends at 2026-11-07T07:00:00Z (D-240)
+
+**Status: PROPOSED.** The owner decided this change (D-240). To be accepted, this exact text needs Codex's independent PASS and a decision row that cites D-240, the commit, this file's SHA256 and the hash of the bytes between these markers.
+
+**The owner's decision.** D-240 (2026-10-28). The owner answered "yes to both" (chat, received 2026-10-28T02:38:32Z) to Claude's pick "extend all four through 2026-11-07 07:00 UTC". Amendment 3 says "There is no automatic extension: an extension needs an explicit owner decision." D-240 is that decision.
+
+**The change.** Two instants in Amendment 3 are read as **2026-11-07T07:00:00Z (exclusive)**:
+
+- the end of its window in "Scope and window", 2026-11-01T06:00:00Z (exclusive);
+- the instant in "Expiry", 2026-11-01T06:00:00Z, at which the decision rights and rules revert to the rest of this charter, and after which no new acceptance may be recorded under D-219.
+
+The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Friday Nov 6 in America/Denver. The old end was epoch 1793512800. The difference is 522000 s, six days plus one hour across the end of daylight saving time.
+
+**Only the end changes.**
+
+- The start (its acceptance, D-222), the D-218 scope, the decision-rights table, the unchanged constraints, the process conventions and the reversion rule stay as accepted.
+- Gate approval, gate exceptions, real-call caps and windows, publication, elevated rights, deployment and credentials, and security blockers stay owner-only.
+- D-240 grants no calls, spend, scope or new authority. It is not a delegation to extend again: a further extension needs another explicit owner decision.
+
+**Records keep their values.** D-221, D-222 and every acceptance row recorded under the delegation keep their text, hashes and dates. An amendment accepted under the delegation keeps its own terms and its own expiry. Its end moves only through its own reviewed addendum (for D-240: ADR-0004's agent-environment D-240 addendum and ADR-0005's C2* addendum 5).
+
+**Bindings take effect only when they land.**
+
+- No runtime clock enforces this delegation. Acceptances recorded between 2026-11-01T06:00:00Z and 2026-11-07T07:00:00Z cite D-240 and this addendum.
+- The standing lane runner (D-221 item 2) has its own pinned expiry constant. It moves only when its reviewed engine with the new constant is installed; until then the runner stops at 2026-11-01T06:00:00Z.
+- The C2* and agent-environment code bindings likewise take effect only when their own reviewed edits land.
+
+**The text above is unchanged.** Amendment 3 keeps its reviewed bytes and accepted hashes (D-222). This addendum supersedes only the two instants named here.
+
+<!-- END ADR-0014 AMENDMENT 3 ADDENDUM -->

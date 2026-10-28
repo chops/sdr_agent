@@ -34,6 +34,13 @@ a new proposed-draft event), published between addenda 1 and 4, are accepted
 as D-230, owner acceptance delegated by D-219, after Codex's exact-text PASS
 (c151946f; addendum 3 with Codex's one-line correction); their own Status
 lines still read PROPOSED.
+Addendum 5 to the C2* amendment (2026-10-28; the policy expiry and the
+environment end move to 2026-11-07T07:00:00Z exclusive), published after
+addendum 4, is accepted as D-247 on the owner's direct decision D-240, after
+Codex's independent exact-text PASS (m_codex_d240_r8_review_1793158304526,
+review 7ab1cc15), not under the D-219 delegation; its own Status line still
+reads PROPOSED. The amendment, addenda 1-4 and their accepted hashes are
+unchanged.
 
 ## Context
 
@@ -1698,6 +1705,41 @@ It grants nothing.
 - **Negative.** One more value for readers of `invalidated_reason`.
 
 <!-- END ADR-0005 C2* ADDENDUM 4 -->
+
+<!-- BEGIN ADR-0005 C2* ADDENDUM 5: text as reviewed by Codex (m_codex_d240_r8_review_1793158304526) -->
+
+#### C2* demo-exception amendment, addendum 5 (2026-10-28, PROPOSED): the policy expiry and the environment end move to 2026-11-07T07:00:00Z
+
+**Status: PROPOSED.** The owner decided this change (D-240). To be accepted, this exact text needs Codex's independent PASS and a decision row that cites D-240, the commit, this file's SHA256 and the hash of the bytes between these markers.
+
+**The owner's decision.** D-240 (2026-10-28). The owner answered "yes to both" (chat, received 2026-10-28T02:38:32Z) to Claude's pick "extend all four through 2026-11-07 07:00 UTC". This is the explicit owner decision that ADR-0014 Amendment 3 requires for an extension.
+
+**The change.** Two instants in the C2* amendment are read as `2026-11-07T07:00:00.000000Z` (exclusive):
+
+- item 1's `expires_at` of `c2star-demo-v4/1`, `2026-11-01T06:00:00.000000Z` (exclusive);
+- item 2's environment-end operand of `effective_expires_at`, 2026-11-01T06:00:00Z (ADR-0004's agent-environment end, moved by its own D-240 addendum).
+
+The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Friday Nov 6 in America/Denver. The old end was epoch 1793512800. The difference is 522000 s, six days plus one hour across the end of daylight saving time.
+
+**Only the end changes.**
+
+- The policy id stays `c2star-demo-v4/1`. `starts_at` stays `2026-10-27T06:00:00.000000Z` (inclusive).
+- Every other item 1 field is unchanged: the environment, the identity, the projection version and method, the usage origins and purposes, the lead ids, the authorization id, the label and the acceptance reference.
+- `effective_expires_at` is still the earliest of the policy expiry, the environment end, the authorization expiry, the grant's `expires_at` and the allocation's `available_until`. A shorter authorization, grant or allocation window still wins.
+- The admission guard is unchanged: `effective_starts_at ≤ now < effective_expires_at − (T + ResultGate.wait_ms() + 60 000 ms)`, now computed over the later minimum end. There is still no launch at equality.
+- D-240 grants no calls, spend, scope or authority, resets no grant cap or consumption, and resurrects no withheld output or capture.
+
+**Records keep their values, and the digest check stays.**
+
+- The entry's canonical encoding includes `expires_at`, so the new entry has a new `entry_sha256`.
+- Existing demo-exception releases keep their recorded `exception_expires_at`, `exception_basis` and `exception_basis_sha256`. Their events and record hashes are unchanged, and historical replay and audit verification still use the recorded basis.
+- Current use authority still compares today's `entry_sha256` with the recorded basis. So once the new entry ships, a release decided under the old entry is refused current use (`:entry_changed`), even before its recorded expiry. That is the accepted fail-closed behaviour. This addendum does not renew old output; continuity for older live releases would need its own decision.
+
+**Code bindings take effect only when they land.** `SdrAgent.Agents.DemoException` (`@entry.expires_at`, `@environment_end` and their docs) changes only through its own reviewed edit with boundary tests, carried to the final combined head. Until then the compiled entry still ends at 2026-11-01T06:00:00Z, and that earlier instant governs.
+
+**The text above is unchanged.** The C2* amendment and addenda 1 to 4 keep their reviewed bytes and accepted hashes (D-223, D-227, D-228, D-230). This addendum supersedes only the two instants named here.
+
+<!-- END ADR-0005 C2* ADDENDUM 5 -->
 
 ### Anchoring (S11)
 
