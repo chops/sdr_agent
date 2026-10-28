@@ -10,9 +10,12 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
     contact whose work address is on its account's domain; a new lead with
     `source: :dossier` and no owner; one creation event each, attributed
     to the delegation;
-  - deny (`Ash.Error.Forbidden`, nothing written): a human admin, the
-    seeder, the agent runtime, no actor, the operator in ordinary runtime,
-    and the operator after the live binding drifts;
+  - deny (`Ash.Error.Forbidden` on EACH of the three actions, every
+    prerequisite valid: a real account and contact arranged first; no row
+    or creation event written): a human admin, the seeder, the agent
+    runtime, no actor, a forged delegation id or tenant, the operator in
+    ordinary runtime, and the operator after the live binding drifts
+    (Codex 9a6dba0a R2);
   - the dataset guard (`SdrAgent.Sales.Validations.DatasetDomain`): in
     prototype runtime a non-host domain and an address off its account's
     domain are refused;
@@ -115,6 +118,37 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
 
   defp all_refused?(results), do: Enum.all?(results, &match?({_path, {:error, _}}, &1))
 
+  @created ~w(sales.account.created sales.contact.created sales.lead.created)
+
+  # Rows and creation events written so far.
+  defp written(ctx) do
+    {count("accounts"), count("contacts"), count("leads"),
+     Enum.map(@created, &length(events_of_type(ctx.tenant, &1)))}
+  end
+
+  # A real account and contact of the operator's import, and what is written.
+  defp arrange!(ctx) do
+    account = account!(ctx)
+    contact = contact!(ctx, account, "jordan")
+    %{account: account, contact: contact, written: written(ctx)}
+  end
+
+  # One valid attempt per import action (a new account, a new contact on the
+  # arranged account, the arranged contact's lead), each as `actor`.
+  defp attempts(account, contact, actor) do
+    [
+      account: Sales.import_prototype_account(%{@account | domain: "acme2.test"}, actor: actor),
+      contact:
+        Sales.import_prototype_contact(contact_attrs(account, %{email: "sam@acme1.test"}),
+          actor: actor
+        ),
+      lead:
+        Sales.import_prototype_lead(%{account_id: account.id, contact_id: contact.id},
+          actor: actor
+        )
+    ]
+  end
+
   describe "allow: the live operator in prototype runtime" do
     test "an account, its person contact and a new lead, each attributed to the delegation",
          ctx do
@@ -159,46 +193,53 @@ defmodule SdrAgent.Prototype.SalesImportPolicyTest do
   end
 
   describe "deny" do
-    test "a human admin, the seeder, the agent runtime or no actor is Forbidden, writing nothing",
+    # Codex 9a6dba0a R2: every action, with all of its prerequisites valid
+    # (a real account and a real contact of the operator's import), so only
+    # the caller can be what is refused.
+    test "a human admin, the seeder, the agent runtime, no actor or a forged operator is Forbidden on each action",
          ctx do
+      %{account: account, contact: contact} = arranged = arrange!(ctx)
+
       for {label, actor} <- [
             admin: ctx.admin,
             seeder: system_actor(:seeder, ctx.tenant),
             agent_runtime: system_actor(:agent_runtime, ctx.tenant),
-            nil: nil
+            nil: nil,
+            forged_delegation: %{ctx.actor | id: Ecto.UUID.generate()},
+            forged_tenant: %{ctx.actor | tenant_id: Ecto.UUID.generate()}
           ] do
-        result = Sales.import_prototype_account(@account, actor: actor)
-
-        assert forbidden?(result),
-               "import_prototype_account/2 as #{label} returned #{inspect(result)}"
+        for {action, result} <- attempts(account, contact, actor) do
+          assert forbidden?(result), "#{action} as #{label} returned #{inspect(result)}"
+        end
       end
 
-      assert count("accounts") == 0
+      assert written(ctx) == arranged.written
     end
 
-    test "the operator outside prototype runtime is Forbidden", ctx do
+    test "the operator outside prototype runtime is Forbidden on each action", ctx do
+      %{account: account, contact: contact} = arranged = arrange!(ctx)
       :ok = SdrAgent.PrototypeFixtures.leave_runtime()
-      result = Sales.import_prototype_account(@account, actor: ctx.actor)
-      assert forbidden?(result), "import_prototype_account/2 returned #{inspect(result)}"
-      assert count("accounts") == 0
+
+      for {action, result} <- attempts(account, contact, ctx.actor) do
+        assert forbidden?(result), "#{action} returned #{inspect(result)}"
+      end
+
+      assert written(ctx) == arranged.written
     end
 
-    test "the operator after the live binding drifts is Forbidden, for each action", ctx do
-      account = account!(ctx)
+    test "the operator after the live binding drifts is Forbidden on each action", ctx do
+      # The real contact is created BEFORE the drift, so the lead attempt
+      # differs from a valid one only by the drift.
+      %{account: account, contact: contact} = arranged = arrange!(ctx)
       :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{database_oid: 1})
-
-      results = [
-        Sales.import_prototype_account(%{@account | domain: "acme2.test"}, actor: ctx.actor),
-        Sales.import_prototype_contact(contact_attrs(account), actor: ctx.actor),
-        Sales.import_prototype_lead(%{account_id: account.id, contact_id: Ecto.UUID.generate()},
-          actor: ctx.actor
-        )
-      ]
-
+      results = attempts(account, contact, ctx.actor)
       :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
 
-      for result <- results, do: assert(forbidden?(result), "returned #{inspect(result)}")
-      assert {count("accounts"), count("contacts"), count("leads")} == {1, 0, 0}
+      for {action, result} <- results do
+        assert forbidden?(result), "#{action} returned #{inspect(result)}"
+      end
+
+      assert written(ctx) == arranged.written
     end
   end
 
