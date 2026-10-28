@@ -26,8 +26,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       and a delegation row (or nil);
     - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0,1`
       with `app_names/0`, `write_credential/1` (still a stub; the credential
-      is owner-held), `check_fresh/0`, `check_resumable/0` and
-      `pinned_migrations/0`;
+      is owner-held), `check_fresh/0`, `check_resumable/0`,
+      `public_tables/0` and `pinned_migrations/0`;
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
       evidence under a root;
     - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
@@ -512,10 +512,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           do: {:ok, nil},
           else: result
       end
+
+      # Codex dd9c0f20 F1: the synthetic catalog seam. When the calling
+      # process sets `{SdrAgent.Prototype.Authority, :catalog_tables}` to a
+      # one-argument function, the observed public-table list passes
+      # through it; no schema object changes.
+      defp seam_catalog(tables) do
+        case Process.get({__MODULE__, :catalog_tables}) do
+          hook when is_function(hook, 1) -> hook.(tables)
+          _none -> tables
+        end
+      end
     else
       defp seam_identity(identity), do: identity
       defp seam(_name, _arg), do: :ok
       defp seam_lookup(result), do: result
+      defp seam_catalog(tables), do: tables
     end
 
     @doc """
@@ -656,7 +668,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       selectors = for {key, _value} = entry <- config, key in @target_selectors, do: entry
       keys = Keyword.keys(selectors)
 
+      # Codex dd9c0f20 F2: DBConnection runs a :configure fun or MFA
+      # before each connect, which could redirect the target; only nil is
+      # accepted, and the callback is never called here.
       keys == Enum.uniq(keys) and
+        Enum.all?(Keyword.get_values(config, :configure), &is_nil/1) and
         Enum.sort(Keyword.delete(selectors, :hostname)) == @repo_target and
         Keyword.get(selectors, :hostname, "localhost") == "localhost"
     end
@@ -750,16 +766,35 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_028_052_425, "d237_07_dossier"}
     ]
 
-    # IF-2 phase 1: the tables the exactness precheck names; every other
-    # base table of the public schema is the business-table list.
-    @named_tables ~w(audit_chain_heads prototype_database_bindings prototype_delegations tenants users)
+    # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
+    # inventory of the pinned migration set, sorted. It includes the five
+    # IF-2 named tables (audit_chain_heads, prototype_database_bindings,
+    # prototype_delegations, tenants, users), every business table and
+    # Oban's two; schema_migrations is checked separately. A new table must
+    # be added here with its migration, or setup refuses.
+    @public_tables Enum.sort(~w(
+      accounts agent_definitions agent_runs anchor_sink_receipts approvals
+      audit_accesses audit_anchors audit_chain_heads audit_events audit_exports
+      audit_signing_keys campaign_enrollments campaigns contacts decisions
+      delivery_operations delivery_receipts dossier_entries dossier_sources
+      draft_revisions drafts evidence_claims failures icp_definitions leads
+      model_call_allocations model_call_grants model_invocations
+      model_profile_settings model_profile_switches model_result_releases
+      model_server_counters model_server_starts oban_jobs oban_peers operations
+      payloads prototype_database_bindings prototype_delegations
+      provenance_snapshots qualification_evidences qualifications replies
+      reply_assessments research_artifacts retention_markers revision_citations
+      run_settings_snapshots send_quota_days sequence_steps sequences
+      settings_revisions suppressions tenants tokens tool_invocations users
+      webhook_events wire_witness_links
+    ))
 
     @doc """
-    `:ok` when no base table of the public schema other than
-    `schema_migrations` holds a row: the tenants, users, binding,
-    delegations and audit chain heads of IF-2, and every business table.
-    It reads row presence only, never row content. A missing named table
-    or a failed read is `:database_not_fresh`.
+    `:ok` when the public schema's base tables other than `schema_migrations`
+    are exactly `public_tables/0`, no more and no fewer (an extra public
+    table refuses as well as a missing one), and none of them holds a row.
+    It reads the catalog and row presence only, never row content. Any
+    other outcome, including a failed read, is `:database_not_fresh`.
     """
     @spec check_fresh() :: :ok | {:error, :database_not_fresh}
     def check_fresh, do: if(rowless?(), do: :ok, else: {:error, :database_not_fresh})
@@ -777,19 +812,37 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         else: {:error, :database_not_resumable}
     end
 
+    # The catalog must equal the fixed inventory; only then is row presence
+    # read, over the fixed inventory. Each outcome is matched on its own;
+    # every one but `{:ok, exact, no row}` refuses.
     defp rowless? do
-      with {:ok, %{rows: rows}} <-
-             Repo.query(
-               "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
-                 "AND tablename <> 'schema_migrations' ORDER BY tablename",
-               []
-             ),
-           tables = Enum.map(rows, fn [table] -> table end),
-           [] <- @named_tables -- tables,
-           {:ok, %{rows: [[false]]}} <- Repo.query(any_row_sql(tables), []) do
-        true
-      else
-        _missing_or_populated -> false
+      case catalog_tables() do
+        {:ok, @public_tables} ->
+          case Repo.query(any_row_sql(@public_tables), []) do
+            {:ok, %{rows: [[false]]}} -> true
+            {:ok, %{rows: [[true]]}} -> false
+            {:error, _read_failed} -> false
+          end
+
+        {:ok, _missing_or_extra} ->
+          false
+
+        {:error, _read_failed} ->
+          false
+      end
+    end
+
+    defp catalog_tables do
+      case Repo.query(
+             "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+               "AND tablename <> 'schema_migrations' ORDER BY tablename",
+             []
+           ) do
+        {:ok, %{rows: rows}} ->
+          {:ok, Enum.sort(seam_catalog(Enum.map(rows, fn [table] -> table end)))}
+
+        {:error, _read_failed} = failed ->
+          failed
       end
     end
 
@@ -802,7 +855,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp migrated_exactly? do
-      case Repo.query("SELECT version FROM schema_migrations ORDER BY version", []) do
+      # Codex dd9c0f20 F3: qualified, as the row checks are, so no
+      # search_path or pg_temp shadow can answer for the public table.
+      case Repo.query("SELECT version FROM public.schema_migrations ORDER BY version", []) do
         {:ok, %{rows: rows}} ->
           Enum.map(rows, fn [version] -> version end) ==
             Enum.map(@pinned_migrations, &elem(&1, 0))
@@ -813,8 +868,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     @doc "The pinned public base-table inventory of the pinned migration set (F1)."
-    @spec public_tables() :: [String.t()] | {:error, atom()}
-    def public_tables, do: red({:error, :not_implemented})
+    @spec public_tables() :: [String.t()]
+    def public_tables, do: @public_tables
 
     @doc "The pinned migration set, `[{version, name}]` in version order."
     @spec pinned_migrations() :: [{integer(), String.t()}]
