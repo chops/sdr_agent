@@ -349,4 +349,125 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert Enum.map(rows, fn [v] -> v end) == Enum.map(pinned, &elem(&1, 0))
     end
   end
+
+  # Codex dd9c0f20 F1-F3: corrective REDs for the phase-0/1 helpers.
+  describe "setup F corrective coverage (F1-F3)" do
+    @catalog_seam {SdrAgent.Prototype.Authority, :catalog_tables}
+
+    defp observed_public_tables do
+      %{rows: rows} =
+        Repo.query!(
+          "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+            "AND tablename <> 'schema_migrations' ORDER BY tablename",
+          []
+        )
+
+      Enum.map(rows, fn [table] -> table end)
+    end
+
+    # The synthetic transactional seam (test builds only): this process's
+    # one-argument function is applied to the observed public-table list.
+    # No schema object is created, altered or dropped.
+    defp with_catalog(fun, body) do
+      Process.put(@catalog_seam, fun)
+
+      try do
+        body.()
+      after
+        Process.delete(@catalog_seam)
+      end
+    end
+
+    defp fresh_and_resumable,
+      do: {call(@authority, :check_fresh, []), call(@authority, :check_resumable, [])}
+
+    test "F1: the pinned public-table inventory equals this migration set's catalog" do
+      pinned = call(@authority, :public_tables, [])
+      observed = observed_public_tables()
+      assert pinned == observed, "pinned #{inspect(pinned)}; observed #{inspect(observed)}"
+    end
+
+    test "F1: a missing non-named table refuses both, with exact version rows" do
+      assert fresh_and_resumable() == {:ok, :ok},
+             "prerequisite: exact versions and no rows"
+
+      result = with_catalog(&(&1 -- ["contacts"]), &fresh_and_resumable/0)
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: a missing named table refuses both" do
+      result = with_catalog(&(&1 -- ["users"]), &fresh_and_resumable/0)
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: an unexpected extra public table refuses both" do
+      result =
+        with_catalog(&Enum.sort(["d237_unexpected" | &1]), &fresh_and_resumable/0)
+
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: the identity seam keeps both passing (control)" do
+      assert with_catalog(& &1, &fresh_and_resumable/0) == {:ok, :ok}
+    end
+
+    test "F2: a configure callback, fun or MFA, refuses without being called" do
+      test_pid = self()
+
+      configure_fun = fn opts ->
+        send(test_pid, :configure_called)
+        Keyword.put(opts, :socket_dir, "/private/tmp/d237-elsewhere")
+      end
+
+      for configure <- [
+            configure_fun,
+            {Keyword, :put, [:socket_dir, "/private/tmp/d237-elsewhere"]}
+          ] do
+        result =
+          call(@authority, :check_repo_target, [Keyword.put(@exact_repo, :configure, configure)])
+
+        assert result == {:error, :repo_target_mismatch},
+               "configure #{inspect(configure)} gave #{inspect(result)}"
+      end
+
+      refute_received :configure_called
+    end
+
+    test "F2: a nil configure and plain non-selector pool options pass (control)" do
+      assert call(@authority, :check_repo_target, [Keyword.put(@exact_repo, :configure, nil)]) ==
+               :ok
+
+      plain =
+        @exact_repo ++
+          [
+            hostname: "localhost",
+            username: "postgres",
+            pool_size: 2,
+            timeout: 15_000,
+            show_sensitive_data_on_connection_error: false
+          ]
+
+      assert call(@authority, :check_repo_target, [plain]) == :ok
+    end
+
+    test "F3: resume reads public.schema_migrations, never a search_path shadow" do
+      # Synthetic negative: a transaction-scoped TEMP shadow (pg_temp is
+      # searched first for unqualified names) holding every pinned version,
+      # rolled back with the test.
+      Repo.query!(
+        "CREATE TEMP TABLE schema_migrations ON COMMIT DROP AS " <>
+          "SELECT version, inserted_at FROM public.schema_migrations",
+        []
+      )
+
+      assert call(@authority, :check_resumable, []) == :ok,
+             "control: an identical shadow with an intact public table"
+
+      # Labelled negative tamper (rolled back): one pinned version removed
+      # from the PUBLIC table only; the shadow still holds all of them.
+      Repo.query!("DELETE FROM public.schema_migrations WHERE version = 20261028052425", [])
+
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+  end
 end

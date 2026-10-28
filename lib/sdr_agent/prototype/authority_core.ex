@@ -812,6 +812,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    @doc "The pinned public base-table inventory of the pinned migration set (F1)."
+    @spec public_tables() :: [String.t()] | {:error, atom()}
+    def public_tables, do: red({:error, :not_implemented})
+
     @doc "The pinned migration set, `[{version, name}]` in version order."
     @spec pinned_migrations() :: [{integer(), String.t()}]
     def pinned_migrations, do: @pinned_migrations
