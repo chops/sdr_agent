@@ -29,6 +29,15 @@ defmodule SdrAgent.Prototype.BootCheck do
   - `start_link/1` (the supervision child) runs `verify!/0` and returns
     `:ignore` on success or `{:error, code}`, which fails the start.
 
+  `check/1`, `verify!/0`, `verify!/1` and `start_link/1` are supported only
+  outside an already-open caller transaction (Codex 3f7d6c86). Task
+  callers must use `SdrAgent.Prototype.Session.enter/1`; the supervision
+  start and setup-after-phase-2-commit paths must likewise run top level.
+  Direct calls inside a foreign transaction are unsupported: a failed
+  data-layer read can roll back that caller's transaction by throw, rather
+  than returning a boot code. These functions do not catch rollback throws
+  or provide nested rollback isolation.
+
   The runtime is fixed ONCE (G1, Codex 23b4603a): unfixed, then `:ordinary`
   or `{:prototype, snapshot}`. An exact repeat of the fixed result is
   idempotent; ordinary → prototype, prototype → another prototype and an
