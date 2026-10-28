@@ -465,7 +465,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
              %{database: String.t(), database_oid: pos_integer(), system_identifier: integer()}}
             | {:error, :live_identity_unavailable}
     def live_identity do
-      case Repo.query(@identity_sql, []) do
+      case identity_query() do
         {:ok, %{rows: [[name, oid, system_identifier]]}}
         when is_binary(name) and is_integer(oid) and oid > 0 and is_integer(system_identifier) ->
           {:ok,
@@ -580,11 +580,64 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       _error -> false
     end
 
-    defp read_bindings do
+    defp read_bindings_real do
       PrototypeDatabaseBinding
       |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
       |> Ash.Query.limit(2)
       |> Ash.read()
+    end
+
+    defp delegation_read_real(uuid) do
+      PrototypeDelegation
+      |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
+      |> Ash.Query.filter(id == ^uuid)
+      |> Ash.read_one()
+    end
+
+    # The three live reads (the binding read, the identity query, the
+    # delegation read). In a test-seam build each consults
+    # `TestSeam.claim_live_fault/1` immediately before its real read
+    # (proposal r2, Codex 382437da): `:returned_error` replaces the read's
+    # result and `:raise` raises in its place (no target SQL; the caller's
+    # own handling and rescue are unchanged), `:abort` runs one tagged real
+    # `SELECT 1 / 0` and then the REAL read. Any other build is the plain
+    # read, with no reference to the seam.
+    if @test_seams do
+      defp read_bindings,
+        do: live_fault(:binding_read, &ash_fault/0, &read_bindings_real/0)
+
+      defp identity_query,
+        do: live_fault(:identity_read, &query_fault/0, fn -> Repo.query(@identity_sql, []) end)
+
+      defp delegation_read(uuid),
+        do: live_fault(:delegation_read, &ash_fault/0, fn -> delegation_read_real(uuid) end)
+
+      defp live_fault(stage, synthetic, read) do
+        case SdrAgent.Prototype.Authority.TestSeam.claim_live_fault(stage) do
+          nil ->
+            read.()
+
+          :returned_error ->
+            synthetic.()
+
+          :raise ->
+            raise ArgumentError, "test seam: live-stage fault"
+
+          :abort ->
+            _ = Repo.query("SELECT 1 / 0", [], telemetry_options: [d237_live_fault: stage])
+            read.()
+        end
+      end
+
+      defp ash_fault,
+        do:
+          {:error, Ash.Error.Unknown.UnknownError.exception(error: "test seam: live-stage fault")}
+
+      defp query_fault, do: {:error, %Postgrex.Error{message: "test seam: live-stage fault"}}
+    else
+      defp read_bindings, do: read_bindings_real()
+      defp identity_query, do: Repo.query(@identity_sql, [])
+      defp delegation_read(uuid), do: delegation_read_real(uuid)
     end
 
     @doc """
@@ -608,10 +661,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp read_delegation(id) do
       case Ecto.UUID.cast(id) do
         {:ok, uuid} ->
-          PrototypeDelegation
-          |> Ash.Query.for_read(:read, %{}, AuditKernel.opts())
-          |> Ash.Query.filter(id == ^uuid)
-          |> Ash.read_one()
+          uuid
+          |> delegation_read()
           |> case do
             {:ok, delegation} -> {:ok, delegation}
             {:error, _error} -> {:error, :binding_mismatch}
@@ -1069,11 +1120,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       - `leave_runtime/0` returns the process to ordinary runtime;
         `clear/0` removes every seam key of the process (deterministic
         cleanup).
-      - `with_live_fault/3` and `live_fault_hits/1` (the live-read fault
-        seam, proposal r2, Codex 7ba6d116): RED declarations only. The
-        scope runs its function and never arms or fires a fault, and the
-        hit count is always 0, so the RED reaches its behavioural
-        assertions. No read site consults them yet.
+      - `with_live_fault/3` and `live_fault_hits/1`: the live-read fault
+        seam (proposal r2; Codex 7ba6d116, 382437da). A scope arms ONE
+        fault of a kind at one live-read stage (`:binding_read`,
+        `:identity_read`, `:delegation_read`) for the calling process and
+        every process that inherits it through `$callers`; the first read
+        at that stage that wins the scope's shared atomic claim fires it,
+        exactly once per scope. The scope's prior binding is restored on
+        return, raise, throw and exit. `clear/0` never touches a live-fault
+        scope. A copied scope is not revoked from work still running after
+        its scope ends: join inheriting work inside the scope.
 
       Keys are `{SdrAgent.Prototype, atom}` in the calling process's
       dictionary; `lookup/1` reads them.
@@ -1136,21 +1192,69 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       def boot_switch, do: Process.get(@boot_switch_key)
 
       @doc """
-      RED declaration of the live-read fault scope: runs `fun` and returns
-      its result. It never arms or fires a fault (no read site consults it).
+      Runs `fun` inside a live-fault scope and returns its result; a raise,
+      throw or exit of `fun` passes through unchanged.
+
+      The scope binds `{kind, ref}` (`ref` a fresh one-slot atomics array)
+      to `stage` in the calling process, shadowing any outer scope of the
+      same stage; scopes of other stages compose. The first read at
+      `stage`, in this process or in one that finds this scope through its
+      `$callers`, whose claim (`compare_exchange` 0 -> 1) succeeds fires the
+      fault: `:returned_error` replaces the read's result, `:raise` raises
+      in its place, `:abort` runs one real `SELECT 1 / 0` and then the real
+      read. Every later read at `stage` in the scope is real (a claimed
+      scope never falls through to an outer one). On exit, the prior
+      binding of `stage` is restored, or removed when there was none.
       """
       @spec with_live_fault(live_stage(), live_kind(), (-> result)) :: result when result: term()
       def with_live_fault(stage, kind, fun)
-          when stage in @live_stages and kind in @live_kinds and is_function(fun, 0),
-          do: fun.()
+          when stage in @live_stages and kind in @live_kinds and is_function(fun, 0) do
+        key = live_key(stage)
+        previous = Process.put(key, {kind, :atomics.new(1, signed: false)})
 
-      @doc "RED declaration of the live-fault hit count: always 0."
-      @spec live_fault_hits(live_stage()) :: 0
-      def live_fault_hits(stage) when stage in @live_stages, do: 0
+        try do
+          fun.()
+        after
+          restore(key, previous)
+        end
+      end
+
+      @doc """
+      The fired count (0 or 1) of the innermost `stage` scope visible to the
+      calling process (itself, then its `$callers`), or 0 when none is.
+      """
+      @spec live_fault_hits(live_stage()) :: 0 | 1
+      def live_fault_hits(stage) when stage in @live_stages do
+        case lookup(live_key(stage)) do
+          {_kind, ref} -> :atomics.get(ref, 1)
+          nil -> 0
+        end
+      end
+
+      @doc false
+      # The live read's claim (`SdrAgent.Prototype.Authority`'s read sites
+      # only): the kind of the innermost visible `stage` scope when this
+      # call wins its claim, else nil.
+      @spec claim_live_fault(live_stage()) :: live_kind() | nil
+      def claim_live_fault(stage) when stage in @live_stages do
+        case lookup(live_key(stage)) do
+          {kind, ref} -> if :atomics.compare_exchange(ref, 1, 0, 1) == :ok, do: kind
+          nil -> nil
+        end
+      end
+
+      defp live_key(:binding_read), do: {SdrAgent.Prototype, :live_fault_binding_read}
+      defp live_key(:identity_read), do: {SdrAgent.Prototype, :live_fault_identity_read}
+      defp live_key(:delegation_read), do: {SdrAgent.Prototype, :live_fault_delegation_read}
+
+      defp restore(key, nil), do: Process.delete(key)
+      defp restore(key, previous), do: Process.put(key, previous)
 
       @doc """
       Removes the seam's keys (runtime, live identity and boot switch) from
-      the calling process only; no caller or other process is touched.
+      the calling process only; no caller or other process is touched. A
+      live-fault scope is left alone: it belongs to its `with_live_fault/3`
+      call, which alone restores it, and its shared claim is never reset.
       """
       @spec clear() :: :ok
       def clear do
