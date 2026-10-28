@@ -15,7 +15,9 @@ defmodule SdrAgentWeb.Layouts do
   The operator console shell (S10): a sidebar (a top bar on small screens)
   with the views the signed-in role may use, the operator's name and role,
   sign-out, and — for the auditor — a read-only notice. The role only shapes
-  navigation; every action is authorized by the domain.
+  navigation; every action is authorized by the domain. In D-237 prototype
+  runtime a fixed `UNVERIFIED (PROTOTYPE)` banner (`#prototype-banner`,
+  `role="status"`) heads every page; ordinary runtime shows none.
 
   ## Examples
 
@@ -35,9 +37,21 @@ defmodule SdrAgentWeb.Layouts do
   slot :inner_block, required: true
 
   def app(assigns) do
-    assigns = assign(assigns, :nav, nav_items(assigns.current_scope))
+    assigns =
+      assigns
+      |> assign(:nav, nav_items(assigns.current_scope))
+      |> assign(:prototype_label, prototype_label())
 
     ~H"""
+    <div
+      :if={@prototype_label}
+      id="prototype-banner"
+      role="status"
+      class="flex items-center justify-center gap-2 border-b border-rose-300 bg-rose-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-rose-900"
+    >
+      <.icon name="hero-exclamation-triangle" class="size-4" />
+      <span>{@prototype_label}</span>
+    </div>
     <div class="min-h-dvh bg-zinc-50 text-zinc-900 antialiased lg:flex">
       <aside class="border-b border-zinc-200 bg-white lg:sticky lg:top-0 lg:flex lg:h-dvh lg:w-64 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
         <div class="flex items-center justify-between gap-3 px-4 py-3 lg:px-5 lg:py-5">
@@ -147,6 +161,14 @@ defmodule SdrAgentWeb.Layouts do
 
     <.flash_group flash={@flash} />
     """
+  end
+
+  # D-237 (amendment item 8 "UI"): in prototype runtime every console page
+  # shows the fixed `UNVERIFIED (PROTOTYPE)` banner; ordinary runtime shows
+  # none. `runtime/0` is `:ordinary | :prototype`; asking "not ordinary"
+  # compiles without a type warning in the production build.
+  defp prototype_label do
+    if SdrAgent.Prototype.runtime() != :ordinary, do: SdrAgent.Prototype.label()
   end
 
   @doc "The navigation items `scope` may use, in menu order."
