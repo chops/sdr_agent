@@ -290,8 +290,11 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     # rolls everything else back and the one queued denial is flushed after it.
     test "a policy denial mid-row: exactly one authz.denied survives, nothing else", ctx do
       [row] = rows!([F.company(1)], ["row-1"])
+      # audit_accesses is counted for completeness only: nothing on this path
+      # creates an access, so its equality proves nothing (Codex 3b2a6b6f).
       tables = ~w(accounts contacts leads dossier_entries dossier_sources payloads audit_accesses)
       before = Map.new(tables, &{&1, count(&1)})
+      events = count("audit_events", @business_events)
       denials = length(events_of_type(ctx.tenant, "authz.denied"))
 
       # Test-seam build: the live database identity drifts after the Sales
@@ -300,10 +303,12 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       result = call(@import, :import_row, [row, ctx.actor, [after_sales: drift]])
       :ok = SdrAgent.PrototypeFixtures.put_live_identity(%{})
 
-      assert match?({:error, code} when is_atom(code), result),
-             "import_row/3 returned #{inspect(result)}"
+      # The injected refusal is exactly the Research gate's Forbidden.
+      assert result == {:error, :forbidden}, "import_row/3 returned #{inspect(result)}"
 
       assert Map.new(tables, &{&1, count(&1)}) == before
+      # The Sales writes' sales.* events (account, contact, lead) were rolled back.
+      assert count("audit_events", @business_events) == events
 
       new = Enum.drop(events_of_type(ctx.tenant, "authz.denied"), denials)
       assert [denial] = new, "expected exactly one new authz.denied, got #{length(new)}"
