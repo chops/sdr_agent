@@ -42,6 +42,9 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
   alias SdrAgent.GateFixtures
   alias SdrAgent.PrototypeGateFixtures, as: G
 
+  # RED-b2c: a frozen decision instant inside the window.
+  @at ~U[2026-11-01 00:00:00.000000Z]
+
   describe "the release pairs" do
     test "released_unverified pairs only with owner_prototype_unverified" do
       assert ModelResultRelease.allowed_pair?(:released_unverified, :owner_prototype_unverified),
@@ -355,6 +358,128 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
     end
   end
 
+  describe "the own-context basis validator (RED-b2c; Codex 3122b0d4 G1-G3, R5)" do
+    # A NEW decision (no release yet) inside the prototype gate's own
+    # Prelocked context, on a call reserved, launched and completed through
+    # the prototype path at a frozen instant inside the window: the action
+    # rebuilds the basis from the locked rows and its own decision instant
+    # and only compares the caller's (Q3). Each refusal writes nothing.
+    # Messages are value-free (G.summary/1): no basis or raw error dump.
+    setup do
+      SdrAgent.Clock.freeze(@at)
+      fx = G.prototype!()
+      run = G.run!(fx)
+      invocation = G.completed!(fx, run)
+      %{fx: fx, run: run, invocation: invocation, basis: G.expected_basis(fx, invocation, @at)}
+    end
+
+    test "G0: exactly the rebuilt basis and its digest is decided released_unverified, with one event",
+         ctx do
+      sha = G.canonical_hex(ctx.basis)
+
+      result =
+        G.decide_own(ctx.fx, ctx.run, ctx.invocation, %{basis: ctx.basis, basis_sha256: sha})
+
+      assert match?({:ok, %ModelResultRelease{disposition: :released_unverified}}, result),
+             "decided: #{inspect(G.summary(result))}"
+
+      {:ok, release} = result
+      assert [event] = G.release_events(ctx.fx, "model.result.released_unverified", release)
+      assert event.payload["arguments"] == %{"basis" => ctx.basis, "basis_sha256" => sha}
+    end
+
+    test "G1: a well-formed basis with its own digest that differs from the rebuilt one is refused on :basis",
+         ctx do
+      different = put_in(ctx.basis, ["funding", "grant_revision"], ctx.fx.grant.revision + 1)
+
+      result =
+        G.decide_own(ctx.fx, ctx.run, ctx.invocation, %{
+          basis: different,
+          basis_sha256: G.canonical_hex(different)
+        })
+
+      assert refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
+             "decided: #{inspect(G.summary(result))}"
+
+      assert nothing_written?(ctx)
+    end
+
+    test "G2: the rebuilt basis with a wrong digest is refused on :basis", ctx do
+      result =
+        G.decide_own(ctx.fx, ctx.run, ctx.invocation, %{
+          basis: ctx.basis,
+          basis_sha256: String.duplicate("0", 64)
+        })
+
+      assert refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
+             "decided: #{inspect(G.summary(result))}"
+
+      assert nothing_written?(ctx)
+    end
+
+    test "G3/R5: an extra key, a missing key, a null and an oversize value are refused on :basis, value-free",
+         ctx do
+      marker = "D237-S2-UNTRUSTED-MARKER"
+
+      cases = [
+        extra_key: Map.put(ctx.basis, "extra", marker),
+        missing_key: Map.delete(ctx.basis, "label"),
+        null: put_in(ctx.basis, ["identity", "cli_version"], nil),
+        oversize:
+          put_in(ctx.basis, ["identity", "cli_version"], marker <> String.duplicate("x", 9000))
+      ]
+
+      # Every case runs before any assertion; each digest is the case's own,
+      # so the refusal is the shape or size, never the digest.
+      outcomes =
+        for {label, basis} <- cases do
+          result =
+            G.decide_own(ctx.fx, ctx.run, ctx.invocation, %{
+              basis: basis,
+              basis_sha256: G.canonical_hex(basis)
+            })
+
+          {label, refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
+           match?({:error, _}, result) and not String.contains?(inspect(result), marker),
+           G.summary(result)}
+        end
+
+      refused =
+        for {label, refused?, _free?, summary} <- outcomes, not refused?, do: {label, summary}
+
+      assert refused == [], "not refused on :basis: #{inspect(refused)}"
+
+      leaking = for {label, _refused?, free?, _summary} <- outcomes, not free?, do: label
+      assert leaking == [], "the refusal shows the caller's value: #{inspect(leaking)}"
+
+      assert nothing_written?(ctx)
+    end
+
+    # The deny-only declaration's control (RED-b2c): a basis supplied on any
+    # decision other than released_unverified is refused on :basis.
+    test "a basis on a withheld decision is refused on :basis (deny-only control)", ctx do
+      sha = G.canonical_hex(ctx.basis)
+
+      result =
+        Agents.decide_result_release(
+          %{
+            model_invocation_id: ctx.invocation.id,
+            disposition: :withheld,
+            reason: :prototype_authority_refused,
+            prototype_refusal: :authority_mismatch,
+            basis: ctx.basis,
+            basis_sha256: sha
+          },
+          actor: ctx.fx.agent
+        )
+
+      assert refused_on?(result, :basis, "is recorded only for a released_unverified decision"),
+             "decided: #{inspect(G.summary(result))}"
+
+      assert nothing_written?(ctx)
+    end
+  end
+
   # A finalizer stand-in: the invocation FOR SHARE, the head, then a
   # released_unverified decision under a Prelocked context with `finalizer`.
   defp decide_under(ctx, finalizer) do
@@ -391,6 +516,14 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
       {:ok, release} -> release
       {:error, error} -> SdrAgent.Repo.rollback(error)
     end
+  end
+
+  # Nothing decided for the invocation: no release row, no released or
+  # withheld event (RED-b2c).
+  defp nothing_written?(ctx) do
+    G.release(ctx.invocation) == nil and
+      events_of_type(ctx.fx.tenant, "model.result.released_unverified") == [] and
+      events_of_type(ctx.fx.tenant, "model.result.withheld") == []
   end
 
   # The transaction rolled back with an Invalid error on `field` with `message`.

@@ -309,4 +309,152 @@ defmodule SdrAgent.PrototypeGateFixtures do
     |> Ash.Query.filter(grant_id == ^fx.grant.id)
     |> Ash.count!(SdrAgent.Audit.Kernel.opts(fx.tenant.id))
   end
+
+  ## RED-b2c (Codex 3122b0d4): the own-context basis and value-free results
+
+  @doc "The lowercase hex `sdr-canonical-json/1` SHA256 of `term`."
+  def canonical_hex(term),
+    do: Base.encode16(SdrAgent.Audit.Canonical.sha256(term), case: :lower)
+
+  @doc """
+  The `d237-basis/1` the gate would build for the completed `invocation` of
+  `fx` decided at `decided_at`: the dictionary pinned by
+  `ProvisionedReleaseTest` (the boot snapshot, the compiled entries, the
+  charged grant and the stored invocation and run), recomputed here from the
+  stored rows. Test data only: it never decides anything by itself.
+  """
+  def expected_basis(fx, invocation, decided_at) do
+    inv = Ash.get!(ModelInvocation, invocation.id, authorize?: false)
+    run = Ash.get!(SdrAgent.Agents.AgentRun, inv.agent_run_id, authorize?: false)
+    s = fx.snapshot
+    hex = &Base.encode16(&1, case: :lower)
+
+    %{
+      "schema" => "d237-basis/1",
+      "policy" => %{
+        "id" => "d237-prototype/1",
+        "acceptance_ref" => "D-249",
+        "entry_sha256" => s.policy_entry_sha256
+      },
+      "funding" => %{
+        "id" => "d237-funding/1",
+        "sha256" => "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a",
+        "grant_id" => fx.grant.id,
+        "grant_revision" => fx.grant.revision,
+        "allocation_id" => inv.allocation_id,
+        "operator_user_id" => s.operator_user_id
+      },
+      "prototype" => %{
+        "binding_id" => s.id,
+        "instance_id" => s.instance_id,
+        "tenant_id" => s.tenant_id,
+        "dataset_class" => s.dataset_class,
+        "database" => s.database,
+        "database_oid" => s.database_oid,
+        "system_identifier" => Integer.to_string(s.system_identifier)
+      },
+      "window" => %{
+        "starts_at" => "2026-10-28T02:38:32.000000Z",
+        "expires_at" => "2026-11-07T07:00:00.000000Z",
+        "decided_at" => Calendar.strftime(decided_at, "%Y-%m-%dT%H:%M:%S.%fZ")
+      },
+      "invocation" => %{
+        "id" => inv.id,
+        "run_id" => inv.agent_run_id,
+        "lead_id" => run.lead_id,
+        "usage_origin" => Atom.to_string(run.usage_origin),
+        "purpose" => Atom.to_string(inv.purpose),
+        "request_sha256" => hex.(inv.request_sha256),
+        "response_sha256" => hex.(inv.response_sha256),
+        "output_schema_sha256" => hex.(inv.output_schema_sha256)
+      },
+      "identity" => %{
+        "provider" => "claude_cli",
+        "cli_version" => inv.provider_version,
+        "profile_id" => Atom.to_string(inv.profile_id),
+        "model_id" => inv.model_id,
+        "prompt_builder" => inv.model_catalog_entry["prompt_builder"],
+        "ledger_generation" => inv.ledger_generation
+      },
+      "observation" => %{"witness_mode" => "absent", "classification" => "store_unconfigured"},
+      "assurance" => "unverified",
+      "label" => "UNVERIFIED (PROTOTYPE)"
+    }
+  end
+
+  @doc """
+  A `released_unverified` decision of `invocation` with the caller-built
+  `extra` (`basis:`, `basis_sha256:`) under a Prelocked context with the
+  prototype gate's finalizer, taking the gate's release-branch locks first
+  (the run `FOR UPDATE`, its Operation, the invocation `FOR SHARE`, the
+  charged grant and allocation, then the head). A finalizer stand-in for
+  the action's own contract; it never stands in for the gate's decision.
+  The transaction's result: `{:ok, release}` or `{:error, error}`.
+  """
+  def decide_own(fx, run, invocation, extra) do
+    tenant_id = invocation.tenant_id
+
+    SdrAgent.Audit.transaction(fn ->
+      {:ok, locked_run} =
+        ResultGate.lock(SdrAgent.Agents.AgentRun, run.id, tenant_id, "FOR UPDATE")
+
+      :ok = ResultGate.lock_operation(locked_run, tenant_id)
+      {:ok, held} = ResultGate.lock(ModelInvocation, invocation.id, tenant_id, "FOR SHARE")
+      :ok = SdrAgent.Agents.Admission.lock_charge(held)
+      {:ok, _head} = SdrAgent.Audit.Kernel.lock_head(tenant_id)
+
+      bindings = %{
+        tenant_id: tenant_id,
+        model_invocation_id: invocation.id,
+        finalizer: :prototype_gate
+      }
+
+      SdrAgent.Agents.ReleaseDecision.Prelocked.run(
+        bindings,
+        &unverified_or_rollback(fx, invocation, extra, &1)
+      )
+    end)
+  end
+
+  defp unverified_or_rollback(fx, invocation, extra, prelocked) do
+    attrs =
+      Map.merge(
+        %{
+          model_invocation_id: invocation.id,
+          disposition: :released_unverified,
+          reason: :owner_prototype_unverified
+        },
+        extra
+      )
+
+    case Agents.decide_result_release(attrs, actor: fx.agent, prelocked: prelocked) do
+      {:ok, release} -> release
+      {:error, error} -> SdrAgent.Repo.rollback(error)
+    end
+  end
+
+  @doc """
+  A value-free summary of a result for assertion messages (Codex 3122b0d4
+  R5: no basis, output or raw error dumps): the result's tag and, for an
+  error, each error's module and field. Never a value or a message.
+  """
+  def summary({:ok, %{__struct__: module}}), do: {:ok, module}
+  def summary({:ok, _value}), do: {:ok, :value}
+
+  def summary({:error, error}) do
+    errors =
+      case error do
+        %{errors: errors} when is_list(errors) -> errors
+        error -> [error]
+      end
+
+    {:error, Enum.map(errors, &{error_module(&1), Map.get(&1, :field)})}
+  end
+
+  def summary({tag, %{__struct__: module}, _rest}) when is_atom(tag), do: {tag, module}
+  def summary(other) when is_atom(other), do: other
+  def summary(_other), do: :other
+
+  defp error_module(%{__struct__: module}), do: module
+  defp error_module(_term), do: :term
 end

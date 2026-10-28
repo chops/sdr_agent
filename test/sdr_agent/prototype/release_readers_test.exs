@@ -386,6 +386,75 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       assert verify.(scope) == {:error, :scope_invalid}
     end
 
+    # RED-b2c (Codex 3122b0d4 R4): no scope is registered before the trust
+    # checks pass, and the function never runs on a refusal.
+    test "a refused run/3 never calls its function and leaves no scope", ctx do
+      run = scope_api!(:run, 3)
+      G.drift!()
+
+      result = run.(ctx.invocation, ctx.fx.agent, fn scope -> send(self(), {:called, scope}) end)
+
+      assert result == {:error, :binding_mismatch}, inspect(G.summary(result))
+      refute_received {:called, _scope}
+    end
+
+    # R4: the function's own result is passed through inside {:ok, _}, never
+    # read as a refusal; a programming error in it is re-raised unchanged.
+    test "the function's error result is passed through and its raise is not a refusal", ctx do
+      run = scope_api!(:run, 3)
+
+      passed = run.(ctx.invocation, ctx.fx.agent, fn _scope -> {:error, :binding_mismatch} end)
+      assert passed == {:ok, {:error, :binding_mismatch}}, inspect(G.summary(passed))
+
+      assert_raise ArgumentError, "d237-s2 synthetic programming error", fn ->
+        run.(ctx.invocation, ctx.fx.agent, fn _scope ->
+          raise ArgumentError, "d237-s2 synthetic programming error"
+        end)
+      end
+    end
+
+    # R4: a nested run/3 keeps the outer scope; both end with their calls.
+    test "a nested run/3 preserves the outer scope until its own call returns", ctx do
+      run = scope_api!(:run, 3)
+      verify = scope_api!(:verify, 1)
+
+      result =
+        run.(ctx.invocation, ctx.fx.agent, fn outer ->
+          inner = run.(ctx.invocation, ctx.fx.agent, &verify.(&1))
+          {inner, verify.(outer), outer}
+        end)
+
+      assert match?({:ok, {{:ok, {:ok, _inner}}, {:ok, _outer}, _scope}}, result),
+             inspect(G.summary(result))
+
+      {:ok, {_inner, _outer_valid, outer}} = result
+      assert verify.(outer) == {:error, :scope_invalid}
+    end
+
+    # R4: an actual SQL failure in the caller's transaction is a technical
+    # error, never one of the closed refusals, and the function never runs.
+    # (No typed DB identity is assumed: Codex 6d1ead6d.)
+    test "after the caller's transaction aborted, run/3 is a technical error, not a refusal",
+         ctx do
+      run = scope_api!(:run, 3)
+
+      result =
+        SdrAgent.Audit.transaction(fn ->
+          {:error, _aborted} = SdrAgent.Repo.query("SELECT 1/0")
+
+          inside =
+            run.(ctx.invocation, ctx.fx.agent, fn scope -> send(self(), {:called, scope}) end)
+
+          SdrAgent.Repo.rollback({:inside, inside})
+        end)
+
+      assert {:error, {:inside, inside}} = result
+      assert match?({:error, _}, inside), inspect(G.summary(inside))
+      {:error, reason} = inside
+      refute reason in [:not_found, :not_released, :basis_invalid, :binding_mismatch]
+      refute_received {:called, _scope}
+    end
+
     test "the caller's row policy holds: another tenant's actor gets not_found", ctx do
       run = scope_api!(:run, 3)
       foreign = SdrAgent.Actor.system(:agent_runtime, Ecto.UUID.generate())
@@ -420,6 +489,20 @@ defmodule SdrAgent.Prototype.ReleaseReadersTest do
       appended = duplicate_original!(ctx)
       assert match?({:ok, _}, appended), "prerequisite: duplicate event: #{inspect(appended)}"
       assert_fails_closed!(ctx, "duplicate")
+    end
+
+    # RED-b2c (Codex 3122b0d4 R3): the original event's identity is its
+    # tenant, resource, action, subject (the release) and invocation/run
+    # correlation, not its type alone. Labelled tampers of the event row.
+    for {label, column} <- [wrong_subject: "subject_id", wrong_correlation: "model_invocation_id"] do
+      test "with the original event's #{label} (labelled tamper)", ctx do
+        tamper!(
+          "UPDATE audit_events SET #{unquote(column)} = $2 WHERE id = $1",
+          [Ecto.UUID.dump!(ctx.event.id), Ecto.UUID.dump!(Ecto.UUID.generate())]
+        )
+
+        assert_fails_closed!(ctx, unquote(Atom.to_string(label)))
+      end
     end
 
     for variant <- [

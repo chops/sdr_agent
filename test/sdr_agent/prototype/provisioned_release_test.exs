@@ -442,6 +442,140 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
 
       assert Process.get(:repeat_calls) == 2
       assert released_events(ctx.fx) == []
+      # G5 (Codex 3122b0d4 Q2): the carried code is attempt 1's under-head
+      # failure (the repeat's own checks all hold again), and only the final
+      # decision survives.
+      assert refused_code(ctx.fx, result, :outside_window), inspect(result)
+      assert length(events_of_type(ctx.fx.tenant, "model.result.withheld")) == 1
+      assert release_count(ctx) == 1
+    end
+
+    # Q2 control (Codex 3122b0d4): a CURRENT refusal on the repeat wins over
+    # the carried code. Attempt 1 fails its under-head recheck at the end;
+    # before the repeat's head the binding drifts (process state survives the
+    # rollback, unlike rows) while the clock recovers.
+    test "a current refusal on the repeat wins over the carried code", ctx do
+      Clock.freeze(@last)
+
+      hook!(fn
+        1 ->
+          Clock.freeze(@end_)
+
+        _repeat ->
+          Clock.freeze(@last)
+          G.drift!()
+      end)
+
+      result = G.finalize(ctx.invocation, ctx.run)
+
+      assert match?({:withheld, %{reason: :prototype_authority_refused}, _}, result),
+             inspect(G.summary(result))
+
+      assert Process.get(:repeat_calls) == 2
+      assert refused_code(ctx.fx, result, :binding_mismatch), inspect(G.summary(result))
+      assert released_events(ctx.fx) == []
+      assert length(events_of_type(ctx.fx.tenant, "model.result.withheld")) == 1
+      assert release_count(ctx) == 1
+    end
+  end
+
+  ## RED-b2c: existing-first inside the action (Codex 3122b0d4 R2, G4)
+
+  describe "an own-context request on an existing release (G4)" do
+    test "the identical original basis is a replay: the same row and one event", ctx do
+      {:released, release, _output} = released!(ctx)
+      original = basis_event!(ctx.fx, release).payload["arguments"]
+
+      result =
+        decide_under_gate(ctx, %{basis: original["basis"], basis_sha256: original["basis_sha256"]})
+
+      assert match?({:ok, %{id: id}} when id == release.id, result), inspect(G.summary(result))
+      assert [event] = released_events(ctx.fx)
+      assert event.payload["arguments"] == original
+    end
+
+    # Historical: an existing release is compared with its ORIGINAL event,
+    # never re-derived from the current grant or window.
+    for {label, change} <- [revoked: :revoke, window_end: :window_end] do
+      test "after #{label} the identical original basis is still a replay", ctx do
+        {:released, release, _output} = released!(ctx)
+        original = basis_event!(ctx.fx, release).payload["arguments"]
+        own_context_change!(ctx, unquote(change))
+
+        result =
+          decide_under_gate(ctx, %{
+            basis: original["basis"],
+            basis_sha256: original["basis_sha256"]
+          })
+
+        assert match?({:ok, %{id: id}} when id == release.id, result),
+               "#{unquote(label)}: #{inspect(G.summary(result))}"
+
+        assert [_event] = released_events(ctx.fx)
+        assert events_of_type(ctx.fx.tenant, "model.result.withheld") == []
+      end
+    end
+
+    # The exact contract (R2): a requested basis is identical only when its
+    # body AND digest equal the original's; a changed body carrying the
+    # original digest is not self-consistent, so it is refused on :basis
+    # (never called identical, never a ReleaseConflict), writing nothing.
+    test "a changed body carrying the original digest is refused on :basis", ctx do
+      {:released, release, _output} = released!(ctx)
+      original = basis_event!(ctx.fx, release).payload["arguments"]
+      changed = put_in(original["basis"], ["window", "decided_at"], "2026-11-01T00:00:00.000000Z")
+
+      result = decide_under_gate(ctx, %{basis: changed, basis_sha256: original["basis_sha256"]})
+
+      assert refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
+             inspect(G.summary(result))
+
+      assert [event] = released_events(ctx.fx)
+      assert event.payload["arguments"] == original
+    end
+  end
+
+  ## RED-b2c: identity and the recorded authority at release (G6, G7, Q4)
+
+  describe "identity and the recorded authority at release" do
+    test "G6: an invocation whose profile is not the compiled identity's is identity_mismatch (labelled tamper)",
+         ctx do
+      tamper_profile!(ctx.invocation)
+      result = G.finalize(ctx.invocation, ctx.run)
+      assert refused_code(ctx.fx, result, :identity_mismatch), inspect(G.summary(result))
+      assert released_events(ctx.fx) == []
+    end
+
+    # Q4 double defect: identity is checked before the recorded authority.
+    test "identity and a recorded key both wrong: identity_mismatch first (labelled tamper)",
+         ctx do
+      tamper_profile!(ctx.invocation)
+      G.forge_authority!(ctx.fx, ctx.invocation, "policy_id", "tampered-policy_id")
+      result = G.finalize(ctx.invocation, ctx.run)
+      assert refused_code(ctx.fx, result, :identity_mismatch), inspect(G.summary(result))
+    end
+
+    # The shared comparator at release, one fresh completed call per key.
+    # The general key also passes under the b1 refusal (authority_mismatch
+    # for every present record): no credit for it until GREEN.
+    test "G7: a recorded key rewritten after launch refuses with its code (labelled tamper)",
+         ctx do
+      outcomes =
+        for {key, code} <- [
+              {"policy_id", :authority_mismatch},
+              {"operator_user_id", :operator_mismatch},
+              {"witness_mode", :witness_mode_mismatch}
+            ] do
+          run = G.run!(ctx.fx)
+          invocation = G.completed!(ctx.fx, run)
+          G.forge_authority!(ctx.fx, invocation, key, "tampered-#{key}")
+          result = G.finalize(invocation, run)
+          {key, refused_code(ctx.fx, result, code), G.summary(result)}
+        end
+
+      wrong = for {key, false, summary} <- outcomes, do: {key, summary}
+      assert wrong == [], "release outcomes: #{inspect(wrong)}"
+      assert released_events(ctx.fx) == []
     end
   end
 
@@ -574,4 +708,34 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
   end
 
   defp conflict?(_result), do: false
+
+  ## RED-b2c helpers
+
+  defp release_count(ctx) do
+    SdrAgent.Agents.ModelResultRelease
+    |> Ash.Query.filter(model_invocation_id == ^ctx.invocation.id)
+    |> Ash.count!(SdrAgent.Audit.Kernel.opts(ctx.invocation.tenant_id))
+  end
+
+  defp own_context_change!(ctx, :revoke), do: historical_change!(ctx, :revoke)
+  defp own_context_change!(_ctx, :window_end), do: Clock.freeze(@end_)
+
+  # Labelled tamper: the stored invocation's profile rewritten behind the
+  # application to a catalog profile outside the compiled identity.
+  defp tamper_profile!(invocation) do
+    tamper!(
+      "UPDATE model_invocations SET profile_id = 'claude_cli_sonnet' WHERE id = $1",
+      [Ecto.UUID.dump!(invocation.id)]
+    )
+  end
+
+  # The decision was refused with an error on `field` with `message`.
+  defp refused_on?({:error, error}, field, message) do
+    error
+    |> Ash.Error.to_error_class()
+    |> Map.get(:errors, [])
+    |> Enum.any?(&(Map.get(&1, :field) == field and Map.get(&1, :message) == message))
+  end
+
+  defp refused_on?(_result, _field, _message), do: false
 end
