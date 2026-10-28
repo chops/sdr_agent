@@ -197,6 +197,8 @@ defmodule SdrAgent.Agents.ResultGate do
   run}`, or `{:error, reason}` — no business output, the run left
   recoverable by `SdrAgent.SDR.StaleRunSweeper`.
 
+  In prototype runtime a refused finalization is returned unchanged (D-237 TF-1).
+
   C2* operation snapshot entry `:result_gate` (ADR-0005 C2* item 2): it
   inherits from the owning action, or owns when top-level.
   """
@@ -217,9 +219,22 @@ defmodule SdrAgent.Agents.ResultGate do
   defp finalized(invocation, gate, outcome, opts) do
     case finalize(invocation, gate, outcome, opts) do
       {:error, reason} when reason in @final -> {:error, reason}
-      {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
+      {:error, _refused} = refused -> after_refused(refused, invocation, gate, opts)
       result -> result
     end
+  end
+
+  if @prototype_compiled do
+    # D-237 TF-1 (Codex eff38bd0): in prototype runtime a refused or failed
+    # finalization (recheck_failed included) is returned unchanged.
+    defp after_refused(refused, invocation, gate, opts) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: refused,
+        else: __MODULE__.Recovery.run(invocation, gate, opts)
+    end
+  else
+    defp after_refused(_refused, invocation, gate, opts),
+      do: __MODULE__.Recovery.run(invocation, gate, opts)
   end
 
   @doc """

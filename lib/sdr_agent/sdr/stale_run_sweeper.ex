@@ -50,6 +50,11 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     * a refused finalization gets one recovery attempt; an existing
       release is authoritative.
 
+  In prototype runtime an unreleased invocation is always reconciled and
+  finalized by the prototype gate, a refused finalization is returned (an
+  exhausted recheck is retried by the next pass), and Recovery decides
+  nothing new (D-237 TF-1).
+
   The run's staleness and its job's liveness are decided again under
   finalization's own locks (run, Operation, job). The run stops
   `:witness_mismatch` or `:witness_unreconciled` on its gate cause, and
@@ -138,6 +143,8 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   @live_states ~w(available scheduled executing retryable)
   @terminal [:succeeded, :failed, :budget_exhausted, :cancelled]
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
+  @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
   @impl Oban.Worker
   def perform(_job) do
@@ -280,6 +287,16 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
 
   # A stale observation is retried by the next pass.
   defp recovered({:error, :stale_observation}), do: :ok
+
+  if @prototype_compiled do
+    # D-237 TF-1 OD-2 (Codex cc688175): in PROTOTYPE runtime only, an
+    # exhausted recheck is retried on the next pass; ordinary runtime
+    # returns the original error, as today.
+    defp recovered({:error, :recheck_failed} = refused) do
+      if SdrAgent.Prototype.runtime() == :prototype, do: :ok, else: refused
+    end
+  end
+
   defp recovered({:ok, _}), do: :ok
   defp recovered(error), do: error
 
@@ -462,10 +479,10 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
   defp gate_recovery(invocation, run, guard) do
     gate = %{run_id: run.id, operation_id: run.operation_id}
 
-    if nothing_persisted?(invocation) do
+    if reconcile_first?(invocation) do
       rec = Actor.system(:reconciler, invocation.tenant_id)
 
-      case Witness.reconcile(invocation.id, actor: rec, gate: gate) do
+      case reconcile(invocation, rec, gate) do
         {:ok, %{receipt: receipt}} -> finalize(invocation, gate, receipt, guard)
         {:ok, _no_receipt} -> Recovery.run(invocation, gate, guard: guard)
         {:error, error} -> {:error, error}
@@ -475,14 +492,100 @@ defmodule SdrAgent.SDR.StaleRunSweeper do
     end
   end
 
+  if @prototype_compiled do
+    # D-237 TF-1 (Codex eff38bd0): in prototype runtime an unreleased
+    # invocation is always finalized by the prototype gate (reconcile first,
+    # then {:interrupted, receipt}); an existing release goes to Recovery.
+    defp reconcile_first?(invocation) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: not released?(invocation),
+        else: nothing_persisted?(invocation)
+    end
+
+    # An unlocked routing prefilter only: the locked finalize decides again.
+    # `Ash.exists?/2` raises on a read error; nothing reads it as false.
+    defp released?(invocation),
+      do: routing_read(invocation, fn -> release_exists?(invocation) end)
+
+    defp release_exists?(invocation) do
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(model_invocation_id == ^invocation.id)
+      |> Ash.exists?()
+    end
+  else
+    defp reconcile_first?(invocation), do: nothing_persisted?(invocation)
+  end
+
+  # D-237 TF-1 RED seams (plan r3 SW-6; Codex 5ec3911b). Test-seam builds
+  # with the prototype authority only, consulted in prototype runtime only.
+  # `released_read: fun/1` replaces the routing read with a boolean (a raise
+  # or a throw of the fun propagates unchanged); `reconcile_result: fun/1`
+  # injects `{:error, _}` in place of the gated reconcile, or `:passthrough`
+  # (the real reconcile). Any other value raises a fixed, value-free
+  # ArgumentError, so no receipt, release or success can be manufactured.
+  # Every other build, and the ordinary runtime, has no callback path.
+  if @prototype_compiled do
+    if @test_seams do
+      # Reached only from `released?/1`, which only the prototype-runtime
+      # branch of `reconcile_first?/1` calls.
+      defp routing_read(invocation, real) do
+        case Keyword.get(Application.get_env(:sdr_agent, __MODULE__, []), :released_read) do
+          fun when is_function(fun, 1) ->
+            case fun.(invocation) do
+              routed when is_boolean(routed) -> routed
+              _other -> raise ArgumentError, "released_read returns a boolean only"
+            end
+
+          _none ->
+            real.()
+        end
+      end
+    else
+      defp routing_read(_invocation, real), do: real.()
+    end
+  end
+
+  # `@test_seams` first: the production build reads it here (WAE).
+  if @test_seams and @prototype_compiled do
+    defp reconcile(invocation, rec, gate) do
+      real = fn -> Witness.reconcile(invocation.id, actor: rec, gate: gate) end
+      hook = Keyword.get(Application.get_env(:sdr_agent, __MODULE__, []), :reconcile_result)
+
+      if SdrAgent.Prototype.runtime() == :prototype and is_function(hook, 1) do
+        case hook.(invocation) do
+          {:error, _error} = injected -> injected
+          :passthrough -> real.()
+          _other -> raise ArgumentError, "reconcile_result injects {:error, _} only"
+        end
+      else
+        real.()
+      end
+    end
+  else
+    defp reconcile(invocation, rec, gate),
+      do: Witness.reconcile(invocation.id, actor: rec, gate: gate)
+  end
+
   @final [:not_running, :job_live, :not_terminal, :job_unbound, :mismatch_cause_unbound]
 
   defp finalize(invocation, gate, receipt, guard) do
     case ResultGate.finalize(invocation, gate, {:interrupted, receipt}, guard: guard) do
       {:error, reason} when reason in @final -> {:error, reason}
-      {:error, _refused} -> Recovery.run(invocation, gate, guard: guard)
+      {:error, _refused} = refused -> after_refused(refused, invocation, gate, guard)
       decided -> decided
     end
+  end
+
+  if @prototype_compiled do
+    defp after_refused(refused, invocation, gate, guard) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: refused,
+        else: Recovery.run(invocation, gate, guard: guard)
+    end
+  else
+    defp after_refused(_refused, invocation, gate, guard),
+      do: Recovery.run(invocation, gate, guard: guard)
   end
 
   # No link, no reconciliation_required Failure on it (live or resolved),

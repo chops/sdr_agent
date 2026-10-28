@@ -29,8 +29,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     preferred bound cause, nothing is written: the transaction rolls back
     and the gate decides once more, refusal-only, taking its locks before
     the head again. A second change returns `{:error, :recheck_failed}` with
-    nothing written (the facade then runs `ResultGate.Recovery`, which never
-    releases); there is no third attempt.
+    nothing written; the facade returns it unchanged and the sweeper leaves
+    it to its next pass (D-237 TF-1). There is no third attempt and no
+    fallback.
 
     **Outcomes** (the existing `finalize/4` shapes; this increment never
     releases):
