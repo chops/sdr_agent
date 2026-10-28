@@ -22,6 +22,12 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   malformed (the callback's effects stay, exactly once, then
   `{:unexpected, 1}`), including a wrapper that replays the callback.
 
+  PARKED Q-C draft (contract r4 Q-C, not committed): the early
+  `repo_state/0` effect runs first in phase 1, before any storage effect;
+  `{:started, true}` refuses there (the query-free nested refusal), the
+  two proceeding states are controls, and every other shape is
+  `{:unexpected, 1}`; `repo_state_check/1` is its pure decision.
+
   RED at the declarations (every function `{:error, :not_implemented}`, no
   effect called): each failure exposes a missing declaration, not an
   executed effect scenario (Codex 57fc6bb4).
@@ -40,6 +46,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     :maintenance_identity,
     :app_stopped,
     :read_seed,
+    :repo_state,
     :storage_status,
     :storage_up,
     :with_repo,
@@ -62,6 +69,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     :maintenance_identity,
     :app_stopped,
     :read_seed,
+    :repo_state,
     :storage_status,
     :with_repo,
     :in_transaction,
@@ -124,6 +132,14 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:fresh_up_error, :fresh, :storage_up},
     {:resume_database_down, :resume, :storage_status},
     {:resume_status_error, :resume, :storage_status},
+    {:repo_state_started_in_transaction, :fresh, :repo_state},
+    {:repo_state_started_not_boolean, :fresh, :repo_state},
+    {:repo_state_started_bare, :fresh, :repo_state},
+    {:repo_state_one_tuple, :fresh, :repo_state},
+    {:repo_state_three_tuple, :fresh, :repo_state},
+    {:repo_state_not_started_tuple, :fresh, :repo_state},
+    {:repo_state_nil, :fresh, :repo_state},
+    {:repo_state_resume_in_transaction, :resume, :repo_state},
     {:with_repo_error, :fresh, :with_repo},
     {:with_repo_forged_success, :fresh, :with_repo},
     {:nested_transaction, :fresh, :in_transaction},
@@ -171,6 +187,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:maintenance_identity, 0, :fresh},
     {:app_stopped, 0, :fresh},
     {:read_seed, 0, :fresh},
+    {:repo_state, 1, :fresh},
     {:storage_status, 1, :fresh},
     {:storage_up, 1, :fresh},
     {:with_repo, 1, :fresh},
@@ -333,11 +350,59 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     test "prepare_storage: fresh checks absence then creates; resume only checks presence" do
       {effects, observer} = E.stub(%{})
       assert Setup.prepare_storage(effects, %Setup.Context{mode: :fresh}) == :ok
-      assert E.names(observer.log.()) == [:storage_status, :storage_up]
+      assert E.names(observer.log.()) == [:repo_state, :storage_status, :storage_up]
 
       {effects, observer} = E.stub(%{storage_status: :up})
       assert Setup.prepare_storage(effects, %Setup.Context{mode: :resume}) == :ok
-      assert E.names(observer.log.()) == [:storage_status]
+      assert E.names(observer.log.()) == [:repo_state, :storage_status]
+    end
+  end
+
+  describe "Q-C draft: the early repo_state/0 check (PARKED, contract r4)" do
+    test "{:started, false} proceeds through the whole fresh and resume flows (control)" do
+      {effects, observer} = E.stub(%{repo_state: {:started, false}})
+      assert Setup.run(effects, E.args()) == {:ok, success()}
+      assert E.names(observer.log.()) == @fresh_log
+
+      {effects, observer} = E.stub(%{repo_state: {:started, false}, storage_status: :up})
+      assert Setup.run(effects, E.args(%{mode: :resume})) == {:ok, success()}
+      assert E.names(observer.log.()) == @resume_log
+    end
+
+    test "repo_state runs after phase 0 and before every storage effect" do
+      {effects, observer} = E.stub(%{})
+      assert Setup.run(effects, E.args()) == {:ok, success()}
+      log = E.names(observer.log.())
+      at = Enum.find_index(log, &(&1 == :repo_state))
+      assert Enum.at(log, at - 1) == :read_seed
+      assert Enum.at(log, at + 1) == :storage_status
+    end
+
+    test "{:started, true} refuses with zero storage effects" do
+      {effects, observer} = E.stub(%{repo_state: {:started, true}})
+      assert Setup.run(effects, E.args()) == {:error, refused(1, :bootstrap_failed)}
+      log = E.names(observer.log.())
+      refute :storage_status in log
+      refute :storage_up in log
+      refute :with_repo in log
+    end
+
+    test "repo_state_check/1: the two proceeding states, the refusal, and unknown shapes" do
+      assert Setup.repo_state_check(:not_started) == :ok
+      assert Setup.repo_state_check({:started, false}) == :ok
+      assert Setup.repo_state_check({:started, true}) == {:error, :nested}
+
+      for state <- [
+            :maybe,
+            :started,
+            {:started},
+            {:started, :yes},
+            {:started, false, :x},
+            nil,
+            {:not_started}
+          ] do
+        assert Setup.repo_state_check(state) == {:error, :unexpected}, inspect(state)
+      end
     end
   end
 
@@ -498,6 +563,30 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     do:
       {%{}, %{read_seed: fn _dir, _pins -> {:error, {"campaign.json", :invalid}} end},
        refused(0, :seed_invalid)}
+
+  # Q-C draft (contract r4 §Q-C, PARKED): the early repo_state/0 check runs
+  # before any storage effect; {:started, true} is the explicit query-free
+  # nested refusal (Q-A semantics); any other shape is unexpected, never a
+  # guessed :not_started or false.
+  defp scenario(:repo_state_started_in_transaction),
+    do: {%{}, %{repo_state: {:started, true}}, refused(1, :bootstrap_failed)}
+
+  defp scenario(:repo_state_resume_in_transaction),
+    do: {%{}, %{repo_state: {:started, true}, storage_status: :up}, refused(1, :bootstrap_failed)}
+
+  defp scenario(:repo_state_started_not_boolean),
+    do: {%{}, %{repo_state: {:started, :yes}}, {:unexpected, 1}}
+
+  defp scenario(:repo_state_started_bare), do: {%{}, %{repo_state: :started}, {:unexpected, 1}}
+  defp scenario(:repo_state_one_tuple), do: {%{}, %{repo_state: {:started}}, {:unexpected, 1}}
+
+  defp scenario(:repo_state_three_tuple),
+    do: {%{}, %{repo_state: {:started, false, :extra}}, {:unexpected, 1}}
+
+  defp scenario(:repo_state_not_started_tuple),
+    do: {%{}, %{repo_state: {:not_started}}, {:unexpected, 1}}
+
+  defp scenario(:repo_state_nil), do: {%{}, %{repo_state: nil}, {:unexpected, 1}}
 
   defp scenario(:fresh_database_exists),
     do: {%{}, %{storage_status: :up}, refused(1, :database_exists)}

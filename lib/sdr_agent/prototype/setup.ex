@@ -9,16 +9,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     orchestrator over a map of closed, injected effects (`real_effects/1`
     in the task, a recording stub in tests).
 
-    - `run/2` runs phase 0 (preflight), phase 1 (storage before
-      `with_repo`, then inside its callback the no-inherited-transaction
-      guard, the target identity, the migration or resume checks and the
-      freshness check), phase 2 (`bootstrap/1`, which commits) and phase 3
-      (`BootCheck.verify!/0`, the operator actor and the seed, all at top
-      level), each step stopping on its refusal.
+    - `run/2` runs phase 0 (preflight), phase 1 (the early `repo_state/0`
+      check, storage before `with_repo`, then inside its callback the
+      no-inherited-transaction guard, the target identity, the migration
+      or resume checks and the freshness check), phase 2 (`bootstrap/1`,
+      which commits) and phase 3 (`BootCheck.verify!/0`, the operator actor
+      and the seed, all at top level), each step stopping on its refusal.
     - `preflight/2` (phase 0) returns the internal `Setup.Context` (the
       marker's identifier and the exact validated seed, handed on to the
       seed unchanged); `prepare_storage/2` is phase 1's storage steps;
-      `cluster_identity_check/2` is phase 0's pure identity decision.
+      `cluster_identity_check/2` is phase 0's pure identity decision;
+      `repo_state_check/1` is phase 1's pure decision on `repo_state/0`.
 
     Results are `{:ok, %{binding_id:, delegation_id:}}` or `{:error, f}`,
     with `f` the exact three-key `setup_phase` map (a reason of
@@ -29,8 +30,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     normalized agent atom. Every returned bootstrap or Seed code is
     presented as `:refused` (no code establishes a rollback). Effects are
     supplied by trusted internal task code only. Supported entry is the
-    top-level task process: the storage effects run before the
-    nested-transaction guard (setup contract r3 §4).
+    top-level task process: a positively established Repo transaction
+    refuses before any storage effect (setup contract r4 Q-C), and the
+    nested-transaction guard inside the callback is kept.
 
     Stage (D-237 S1): RED declarations only (Codex 85ab1090 bounded GO).
     Every function is non-permissive: it calls no effect and returns
@@ -87,6 +89,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec cluster_identity_check(term(), term()) ::
             :ok | {:error, :cluster_identity_mismatch | :unexpected | :not_implemented}
     def cluster_identity_check(_marker, _identity), do: red({:error, :not_implemented})
+
+    @doc """
+    Phase 1's pure decision on the early `repo_state/0` effect (setup
+    contract r4 Q-C), before any storage effect: `:not_started` and
+    `{:started, false}` proceed, `{:started, true}` is the explicit nested
+    refusal, anything else is unexpected. RED: not implemented.
+    """
+    @spec repo_state_check(term()) :: :ok | {:error, :nested | :unexpected | :not_implemented}
+    def repo_state_check(_state), do: red({:error, :not_implemented})
 
     @doc "The real effects for one run's `args` (held). RED: an empty map."
     @spec real_effects(args()) :: effects()
