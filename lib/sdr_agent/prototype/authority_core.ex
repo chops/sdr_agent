@@ -49,16 +49,30 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       fixes the VM runtime (increment G, not implemented).
 
     Stage (D-237 S1): the four entry accessors (Codex bd3eb9e1, constants
-    only) and B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d)
+    only), B1a's self-only `runtime/0` and `binding/0` (Codex b743eb5d), and
+    B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read)
     are implemented. Every other
     function is still a non-permissive RED declaration returning
     `{:error, :not_implemented}`; none fabricates success.
     """
 
+    alias SdrAgent.Accounts.User
+    alias SdrAgent.Actor
+    alias SdrAgent.Audit
     alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Operations.PrototypeDatabaseBinding
+    alias SdrAgent.Operations.PrototypeDelegation
     alias SdrAgent.Prototype.Binding
+    alias SdrAgent.Prototype.Checks.KernelMarker
+    alias SdrAgent.Repo
 
     @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
+    @database "sdr_agent_prototype"
+    @agents [:claude_code, :codex_cli]
+    @correlation ~r/\A[A-Za-z0-9._:-]{8,128}\z/
+    @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
+                    "(pg_control_system()).system_identifier FROM pg_database d " <>
+                    "WHERE d.datname = current_database()"
 
     # Amendment item 1 (D-249: accepted interior text 54769 B), exact.
     @policy_entry %{
@@ -134,8 +148,143 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     @doc "Setup phase 2; see the moduledoc."
-    @spec bootstrap(keyword()) :: {:ok, map()} | {:error, atom()}
-    def bootstrap(_opts), do: red({:error, :not_implemented})
+    @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
+    def bootstrap(opts) do
+      with {:ok, agent} <- setup_agent(Keyword.get(opts, :agent)),
+           {:ok, correlation} <- setup_correlation(Keyword.get(opts, :session_correlation)),
+           {:ok, created} <-
+             Audit.transaction(fn -> bootstrap_steps(opts, agent, correlation) end) do
+        {:ok, created}
+      else
+        _failed -> {:error, :bootstrap_failed}
+      end
+    rescue
+      _error -> {:error, :bootstrap_failed}
+    end
+
+    # Inside the transaction: any error rolls every write back.
+    defp bootstrap_steps(opts, agent, correlation) do
+      with {:ok, tenant} <- Audit.bootstrap(slug: "d237", name: "D-237 prototype"),
+           setup = [
+             actor: Actor.system(:kernel, tenant.id),
+             context: KernelMarker.context(:setup)
+           ],
+           {:ok, anchor} <- create(User, :create_prototype_anchor, %{}, setup),
+           {:ok, auditor} <- create_auditor(Keyword.get(opts, :auditor_password), setup),
+           {:ok, identity} <- prototype_identity(),
+           {:ok, binding} <-
+             create(
+               PrototypeDatabaseBinding,
+               :create,
+               %{
+                 instance_id: Keyword.get_lazy(opts, :instance_id, &Ecto.UUID.generate/0),
+                 operator_user_id: anchor.id,
+                 auditor_user_id: auditor && auditor.id,
+                 policy_entry_sha256: policy_entry_sha256(),
+                 database_oid: identity.database_oid,
+                 system_identifier: identity.system_identifier
+               },
+               setup
+             ),
+           created = %{
+             tenant: tenant,
+             anchor: anchor,
+             auditor: auditor,
+             binding: binding,
+             delegation: nil
+           },
+           :ok <- seam(:before_delegation, created),
+           {:ok, delegation} <-
+             create(
+               PrototypeDelegation,
+               :create_setup,
+               %{agent: agent, session_correlation: correlation},
+               setup
+             ) do
+        %{created | delegation: delegation}
+      else
+        _failed -> Repo.rollback(:bootstrap_failed)
+      end
+    end
+
+    defp setup_agent(agent) when agent in @agents, do: {:ok, Atom.to_string(agent)}
+    defp setup_agent(_agent), do: {:error, :invalid_agent}
+
+    defp setup_correlation(correlation) when is_binary(correlation) do
+      if Regex.match?(@correlation, correlation),
+        do: {:ok, correlation},
+        else: {:error, :invalid_correlation}
+    end
+
+    defp setup_correlation(_correlation), do: {:error, :invalid_correlation}
+
+    defp create_auditor(nil, _setup), do: {:ok, nil}
+
+    defp create_auditor(password, setup),
+      do: create(User, :create_prototype_auditor, %{password: password}, setup)
+
+    defp create(resource, action, params, opts) do
+      resource
+      |> Ash.Changeset.for_create(action, params, opts)
+      |> Ash.create()
+    end
+
+    # The live identity, read inside the open transaction; the database must
+    # be the prototype database.
+    defp prototype_identity do
+      case live_identity() do
+        {:ok, %{database: @database} = identity} -> {:ok, identity}
+        _other -> {:error, :not_the_prototype_database}
+      end
+    end
+
+    @doc """
+    The live database name, its `pg_database` oid and the cluster's
+    `system_identifier`, in one plain read; any failure is
+    `{:error, :live_identity_unavailable}`. In a test-seam build the test
+    database's own name reads as `sdr_agent_prototype` (every other value is
+    the real one).
+    """
+    @spec live_identity() ::
+            {:ok,
+             %{database: String.t(), database_oid: pos_integer(), system_identifier: integer()}}
+            | {:error, :live_identity_unavailable}
+    def live_identity do
+      case Repo.query(@identity_sql, []) do
+        {:ok, %{rows: [[name, oid, system_identifier]]}}
+        when is_binary(name) and is_integer(oid) and oid > 0 and is_integer(system_identifier) ->
+          {:ok,
+           test_alias(%{database: name, database_oid: oid, system_identifier: system_identifier})}
+
+        _other ->
+          {:error, :live_identity_unavailable}
+      end
+    rescue
+      _error -> {:error, :live_identity_unavailable}
+    end
+
+    if @test_seams do
+      # The test database reads as the prototype database (the binding's
+      # CHECK fixes `database` to it); only the name is aliased.
+      defp test_alias(%{database: name} = identity) do
+        test_database = Keyword.get(Application.get_env(:sdr_agent, Repo, []), :database)
+        if name == test_database, do: %{identity | database: @database}, else: identity
+      end
+
+      # A one-argument hook from the calling process's dictionary at a named
+      # boundary (the rollback proof's late-failure point).
+      defp seam(name, arg) do
+        case Process.get({__MODULE__, name}) do
+          hook when is_function(hook, 1) -> hook.(arg)
+          _none -> nil
+        end
+
+        :ok
+      end
+    else
+      defp test_alias(identity), do: identity
+      defp seam(_name, _arg), do: :ok
+    end
 
     @doc "The boot snapshot of a binding row."
     @spec snapshot(struct()) :: {:ok, SdrAgent.Prototype.Binding.t()} | {:error, atom()}
