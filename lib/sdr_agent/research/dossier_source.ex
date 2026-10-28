@@ -17,8 +17,9 @@ defmodule SdrAgent.Research.DossierSource do
   APPEND-ONLY (trigger). The schema is frozen by S1 (D-237 freeze). The
   `:import` shell (its name, server-derived tenant, trace ids and the
   `OperatorAction(:import_dossier)` policy) is S1's; its body (the accepted
-  inputs and the `research.dossier_source.imported` event) is S3's. Reads
-  here: the audit kernel.
+  inputs, the entry consistency check `SdrAgent.Research.Validations.SourceEntry`
+  and the `research.dossier_source.imported` event) is S3's. Reads here:
+  the audit kernel.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -103,6 +104,10 @@ defmodule SdrAgent.Research.DossierSource do
         :checked_at,
         :content_sha256
       ]
+
+      # The entry is of this tenant, this lead and this importing delegation
+      # (Codex 9ada21de), re-read through the kernel; never trusted from input.
+      validate SdrAgent.Research.Validations.SourceEntry
 
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
