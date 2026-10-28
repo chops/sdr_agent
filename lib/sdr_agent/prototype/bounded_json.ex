@@ -192,6 +192,40 @@ defmodule SdrAgent.Prototype.BoundedJson do
   end
 
   @doc """
+  Reads the private evidence file at the relative `path` under `root`
+  (Codex a6850b13 D4, S1's IF-2 worksheet evidence), in one pass:
+
+  - `path` matches `^[A-Za-z0-9._/-]{1,200}$`, is relative and has no
+    empty, `.` or `..` segment (`:invalid_path`); it is walked lexically
+    and never resolved;
+  - `root` is absolute and, by `lstat`, a real directory (not a symlink)
+    of mode 0700 (`:root_mode`); its own ancestors are not checked;
+  - each intermediate directory of `path`, by `lstat`, is a real directory
+    (`:not_directory`) that neither group nor other can write (`:dir_mode`);
+  - the leaf, by `lstat`, is a regular file (`:not_regular`; absent:
+    `:unreadable`) of mode 0600 (`:file_mode`) within `max_bytes`
+    (`:too_large`);
+  - then ONE raw handle: before any byte is read, the opened object (fstat)
+    must be that checked leaf (`:changed`), still 0600 (`:file_mode`) and
+    within the bound (`:too_large`), and the root and every intermediate
+    directory must still be the checked objects (`:changed`) meeting their
+    requirements; the read stops at `max_bytes` plus one sentinel byte;
+    the sha256 of exactly those bytes must equal `sha256_hex`
+    (`:digest_mismatch`); the handle is closed on every path.
+
+  Refusals are `{"(file)", rule}`, value-free. Nothing is chmod-ed,
+  repaired or adopted. Residuals: the open blocks on a FIFO substituted
+  after the checks; after the final check a same-uid process can still
+  change a mode or an entry (no atomic guarantee); the owner uid is not
+  checked. Test builds call the same hooks as `read_file/3`.
+
+  RED stage (D-237 S1b): returns `{:error, :not_implemented}`.
+  """
+  @spec read_private(Path.t(), String.t(), String.t(), pos_integer()) ::
+          {:ok, binary()} | error() | {:error, :not_implemented}
+  def read_private(_root, _path, _sha256_hex, _max_bytes), do: {:error, :not_implemented}
+
+  @doc """
   Decodes `bin` under rules 1-4 and 7 (`max_bytes:`, `max_depth:`,
   `known_keys:`); returns plain maps and lists.
   """
