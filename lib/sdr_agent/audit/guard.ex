@@ -64,7 +64,7 @@ defmodule SdrAgent.Audit.Guard do
   @doc """
   Refuses a call for `meta` before it runs: `{:error, Ash.Error.Forbidden}`.
   For a well-formed `SdrAgent.Actor` (a known type, a nil or non-empty
-  UTF-8 id of at most 128 bytes) or `SdrAgent.Accounts.User` (a canonical
+  UTF-8 id of at most 128 bytes with no NUL) or `SdrAgent.Accounts.User` (a canonical
   UUID id, a role an audit event can record) whose canonical tenant UUID
   has an initialized audit chain, the refusal goes through `run/3` (one
   `authz.denied` when `meta` is guarded or the actor is an auditor);
@@ -91,9 +91,13 @@ defmodule SdrAgent.Audit.Guard do
   defp destination?(_actor), do: false
 
   # The kernel records a system actor id as `to_string(id || type)`: nil, or
-  # a non-empty valid UTF-8 string of at most 128 bytes.
+  # a non-empty valid UTF-8 string of at most 128 bytes with no NUL
+  # (PostgreSQL text and jsonb cannot store U+0000; Codex 67ff29f5 R1a).
   defp actor_id?(nil), do: true
-  defp actor_id?(id) when is_binary(id), do: byte_size(id) in 1..128 and String.valid?(id)
+
+  defp actor_id?(id) when is_binary(id),
+    do: byte_size(id) in 1..128 and String.valid?(id) and not String.contains?(id, <<0>>)
+
   defp actor_id?(_id), do: false
 
   # The roles an audit event can record (`AuditEvent.actor_role`).
