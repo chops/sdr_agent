@@ -21,7 +21,10 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
     opened object (fstat) must be that same file (device and inode) under
     the same root before any byte is read; a read bounded to 1 MiB plus one
     sentinel byte; UTF-8 text; its sha256 equal to the recorded one. The
-    handle is closed on every path.
+    handle is closed on every path. Known limitation (availability only): a
+    FIFO substituted after the precheck can block the open, since the raw
+    open has no no-follow or non-blocking flag; no content is read and the
+    call never succeeds.
 
   Refusals are `{:error, {path, rule}}`, value-free; every artifact refusal
   is `{:error, {"artifact", :artifact_invalid}}`.
@@ -74,10 +77,11 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
   # ONE handle (Codex GREEN-1 R1): before any content is read, the opened
   # object itself (fstat on the handle) must be the regular 0600 file of at
   # most 1 MiB that the precheck saw (same device and inode), and the root
-  # must still be the checked 0700 directory. A file or root substituted
-  # after the precheck is therefore never read. The read is bounded to the
-  # limit plus one sentinel byte, so growth after the identity check is
-  # refused without an unbounded read. The handle is closed on every path.
+  # must still be the checked directory, still 0700 (Codex GREEN-1b). A
+  # file or root substituted or widened after the precheck is therefore
+  # never read. The read is bounded to the limit plus one sentinel byte, so
+  # growth after the identity check is refused without an unbounded read.
+  # The handle is closed on every path. Nothing is chmod-ed or repaired.
   defp read_checked(dir, root, path, checked) do
     case :file.open(path, [:read, :raw, :binary]) do
       {:ok, handle} ->
@@ -87,7 +91,7 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
                true <-
                  opened.type == :regular and allowed?(opened) and same_object?(opened, checked),
                {:ok, %File.Stat{type: :directory} = root_now} <- File.lstat(dir),
-               true <- same_object?(root_now, root),
+               true <- same_object?(root_now, root) and (root_now.mode &&& 0o777) == 0o700,
                :ok <- seam(:after_open, handle),
                {:ok, bytes} <- read_at_most(handle, @artifact_max_bytes + 1, []),
                :ok <- seam(:after_read, bytes),
