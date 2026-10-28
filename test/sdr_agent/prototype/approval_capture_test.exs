@@ -203,10 +203,12 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
   end
 
   # A documented limit of the singleton schema (tenants are check-constrained
-  # to one row, so no initialized foreign tenant exists): the reachable
-  # row control is a draft id that is not in the operator's tenant. Negative
-  # synthetic tampering, not a domain-write success path.
-  test "a draft id outside the operator's tenant is refused as nonexistent, nothing written (control)" do
+  # to one row, so no initialized foreign tenant exists; Codex 21453441): the
+  # reachable row control is a draft id absent from the operator's tenant,
+  # refused as Invalid (nonexistent), paired with the current positive. It is
+  # not measured foreign-row behaviour and not a Forbidden. Negative synthetic
+  # tampering, not a domain-write success path.
+  test "an absent draft id is refused as Invalid (nonexistent) with nothing written; the real draft then approves" do
     ctx = prototype_drafted!()
     {_draft, input} = reviewed(ctx, ctx.draft)
     absent = %{id: Ecto.UUID.generate()}
@@ -220,6 +222,11 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     assert approvals!(ctx, ctx.draft) == []
     assert draft!(ctx, ctx.draft).status == :pending_review
     assert events_of(ctx.tenant, "outreach.approval.granted") == []
+
+    # The current positive: the same operator and input approve the real draft.
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    assert {approval.status, approval.draft_id} == {:granted, ctx.draft.id}
+    assert [_] = events_of(ctx.tenant, "outreach.approval.granted")
   end
 
   # ------------------------------------------------------------------ capture
