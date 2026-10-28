@@ -28,6 +28,11 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
       `verdict`, `status`, `approver_authored_revision`;
     * for a grant, the contact is active, neither its email nor its domain
       is suppressed, and the campaign is not completed or archived;
+    * the grant's delegated event arguments are server-derived: caller
+      values of `approval_mode`, `delegation_id` and `prototype` are
+      scrubbed; in D-237 prototype runtime the grant carries the assurance
+      block (refused as `prototype_assurance_unavailable` without one), and
+      the operator's grant also `"delegated_machine"` and its delegation id;
     * the audit arguments `revision_author` (`{type: user, user_id}` or
       `{type: agent, agent_run_id}`) and `diff_hashes` (sha256 hex of the
       revision's two diffs, or nil) are computed here, never taken as input.
@@ -202,7 +207,53 @@ defmodule SdrAgent.Outreach.Changes.BindApproval do
       from_ai_baseline: digest(revision.diff_from_ai_baseline),
       from_parent: digest(revision.diff_from_parent)
     })
+    |> delegated(verdict, actor)
   end
+
+  # The grant's delegated event arguments (interfaces r6 IF-3 / IF-5; Codex
+  # b84b0491), server-derived only: every caller value is scrubbed first. In
+  # prototype runtime the grant carries the assurance block (the label
+  # belongs to the runtime, not the actor, and is never authority), and the
+  # operator's grant also `approval_mode: "delegated_machine"` and its
+  # delegation id; a missing block refuses (`prototype_assurance_unavailable`),
+  # never an unlabelled grant. Ordinary runtime and every rejection carry none.
+  @delegated [:approval_mode, :delegation_id, :prototype]
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp delegated(changeset, :approved, actor) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> labelled(scrub(changeset), actor, SdrAgent.Prototype.assurance())
+        _ordinary -> scrub(changeset)
+      end
+    end
+
+    defp delegated(changeset, _verdict, _actor), do: scrub(changeset)
+
+    defp labelled(changeset, actor, {:ok, %{} = block}) do
+      changeset = Ash.Changeset.force_set_argument(changeset, :prototype, block)
+
+      case actor do
+        %SdrAgent.Actor{type: :prototype_operator, id: delegation_id} ->
+          changeset
+          |> Ash.Changeset.force_set_argument(:approval_mode, "delegated_machine")
+          |> Ash.Changeset.force_set_argument(:delegation_id, delegation_id)
+
+        _human ->
+          changeset
+      end
+    end
+
+    defp labelled(changeset, _actor, _unavailable) do
+      Ash.Changeset.add_error(changeset,
+        field: :approver_id,
+        message: "prototype_assurance_unavailable: no assurance block for the grant"
+      )
+    end
+  else
+    defp delegated(changeset, _verdict, _actor), do: scrub(changeset)
+  end
+
+  defp scrub(changeset), do: Ash.Changeset.force_delete_argument(changeset, @delegated)
 
   defp author(%{author_type: :human, author_user_id: id}), do: %{type: "user", user_id: id}
   defp author(%{author_type: :agent, agent_run_id: id}), do: %{type: "agent", agent_run_id: id}

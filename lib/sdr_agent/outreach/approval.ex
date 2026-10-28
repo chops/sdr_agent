@@ -128,13 +128,21 @@ defmodule SdrAgent.Outreach.Approval do
       argument :recipient_email, :ci_string, allow_nil?: false
       argument :revision_author, :map
       argument :diff_hashes, :map
+
+      # D-237 (interfaces r6 IF-3 / IF-5; Codex b84b0491): server-derived by
+      # BindApproval only; any caller value is scrubbed.
+      argument :approval_mode, :string
+      argument :delegation_id, :uuid
+      argument :prototype, :map
       change SdrAgent.Audit.Changes.SetTenant
       change {Changes.ActorUser, field: :approver_id, prototype_anchor: true}
       change {Changes.BindApproval, verdict: :approved}
       change SdrAgent.Audit.Changes.TraceIds
 
       change {AppendEvent,
-              event_type: "outreach.approval.granted", category: :domain_change, arguments: @bound}
+              event_type: "outreach.approval.granted",
+              category: :domain_change,
+              arguments: @bound ++ [:approval_mode, :delegation_id, :prototype]}
 
       change {Changes.MoveDraft, action: :queue}
       change Changes.RequestDelivery
