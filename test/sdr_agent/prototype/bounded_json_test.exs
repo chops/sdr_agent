@@ -127,7 +127,7 @@ defmodule SdrAgent.Prototype.BoundedJsonTest do
     end
 
     test "invalid JSON never returns Jason's error text (a canary key, an unterminated string)" do
-      for bin <- [~s({"#{@canary}" 1}), ~s({"a":"#{@canary}), ~s({"#{@canary}]
+      for bin <- [~s({"#{@canary}" 1}), ~s({"a":"#{@canary}), ~s({"#{@canary})] do
         assert value_free!(BoundedJson.decode(bin, max_bytes: 1_024, max_depth: 1)) ==
                  {:error, {"(root)", :invalid_json}}
       end
