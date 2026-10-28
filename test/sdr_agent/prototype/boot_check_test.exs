@@ -123,7 +123,153 @@ defmodule SdrAgent.Prototype.BootCheckTest do
     end
   end
 
+  describe "the users rule (G2)" do
+    test "the anchor turned into a password-bearing user refuses (labelled synthetic tamper)" do
+      fx = bound!(enter_runtime: false)
+
+      # SYNTHETIC TAMPER (a DBA simulation, triggers off): the users CHECK
+      # (role = agent_operator) = (hashed_password IS NULL) makes a credential
+      # on the agent_operator anchor unrepresentable, so the anchor must also
+      # change role to carry one. Not reachable through any action.
+      # Approved by Codex 026058ec for isolated runner scratch databases only.
+      # LIMITATION: this proves refusal of a WRONG-ROLE, password-bearing
+      # anchor; it cannot isolate the password from the role.
+      tamper!(
+        "UPDATE users SET role = 'admin', hashed_password = $1 WHERE id = $2",
+        ["synthetic-test-hash-not-a-credential", Ecto.UUID.dump!(fx.anchor.id)]
+      )
+
+      assert BootCheck.check(switch!(fx)) == {:error, :users_not_exact}
+    end
+  end
+
+  # G1 (Codex 23b4603a): the runtime is fixed once. In a test-seam build the
+  # fix is the calling process's TestSeam state: nil is unfixed, :ordinary
+  # is a fixed ordinary runtime, {:prototype, snapshot} a fixed prototype.
+  describe "write-once runtime transitions (G1)" do
+    alias SdrAgent.Prototype.Authority.TestSeam
+
+    defp state, do: TestSeam.lookup({SdrAgent.Prototype, :runtime})
+
+    defp verify(switch) do
+      BootCheck.verify!(switch: switch)
+    rescue
+      error in SdrAgent.Prototype.BootCheck.Refusal -> {:refused, error.code}
+    end
+
+    defp fabricated_snapshot do
+      fields = Map.new(SdrAgent.Prototype.Binding.fields(), &{&1, nil})
+      struct!(SdrAgent.Prototype.Binding, %{fields | id: Ecto.UUID.generate()})
+    end
+
+    test "unfixed: the exact switch fixes prototype; the same snapshot again is idempotent" do
+      fx = bound!(enter_runtime: false)
+      assert TestSeam.clear() == :ok
+      assert state() == nil
+
+      assert verify(switch!(fx)) == :ok
+      assert SdrAgent.Prototype.runtime() == :prototype
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+
+      assert verify(switch!(fx)) == :ok
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+    end
+
+    test "an initial refusal mutates nothing" do
+      fx = bound!(enter_runtime: false)
+      assert TestSeam.clear() == :ok
+      wrong = %{switch!(fx) | instance_id: Ecto.UUID.generate()}
+
+      assert verify(wrong) == {:refused, :instance_mismatch}
+      assert state() == nil, "an initial refusal fixed #{inspect(state())}"
+      assert verify(switch!(fx)) == :ok
+    end
+
+    test "after a prototype fix, a refused check or a different prototype never resets or rebinds" do
+      fx = bound!(enter_runtime: false)
+      assert TestSeam.clear() == :ok
+      assert verify(switch!(fx)) == :ok
+
+      wrong = %{switch!(fx) | instance_id: Ecto.UUID.generate()}
+      assert verify(wrong) == {:refused, :instance_mismatch}
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+
+      other = %{fx.snapshot | id: Ecto.UUID.generate()}
+      assert TestSeam.enter_runtime(other) == :ok
+      assert verify(switch!(fx)) == {:refused, :binding_not_exact}
+      assert SdrAgent.Prototype.binding() == {:ok, other}
+    end
+
+    test "a check returning ordinary after a prototype fix refuses and keeps the prototype" do
+      snapshot = fabricated_snapshot()
+      assert TestSeam.enter_runtime(snapshot) == :ok
+
+      assert verify(:off) == {:refused, :binding_not_exact}
+      assert SdrAgent.Prototype.runtime() == :prototype
+      assert SdrAgent.Prototype.binding() == {:ok, snapshot}
+    end
+
+    # Codex 026058ec: the boot-switch input (a test-build-only, process-local
+    # override) is independent of the fixed runtime it is verified against.
+    test "a changed boot-switch input refuses without rewriting the runtime; an explicit switch takes precedence" do
+      fx = bound!()
+      refusing = %{switch!(fx) | instance_id: Ecto.UUID.generate()}
+      assert PrototypeFixtures.put_boot_switch(refusing) == :ok
+
+      refused =
+        try do
+          BootCheck.verify!()
+        rescue
+          error in SdrAgent.Prototype.BootCheck.Refusal -> {:refused, error.code}
+        end
+
+      assert refused == {:refused, :instance_mismatch}
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+      assert verify(switch!(fx)) == :ok
+      assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+    end
+
+    test "TestSeam.clear/0 removes the boot-switch override" do
+      fx = bound!()
+      assert PrototypeFixtures.put_boot_switch(switch!(fx)) == :ok
+      assert TestSeam.lookup({SdrAgent.Prototype, :boot_switch}) == switch!(fx)
+      assert TestSeam.clear() == :ok
+      assert TestSeam.lookup({SdrAgent.Prototype, :boot_switch}) == nil
+    end
+
+    test "a fixed ordinary runtime never promotes" do
+      assert TestSeam.clear() == :ok
+      assert verify(:off) == :ok
+      assert state() == :ordinary, "the ordinary verify fixed #{inspect(state())}"
+
+      fx = bound!(enter_runtime: false)
+      assert verify(switch!(fx)) == {:refused, :binding_not_exact}
+      assert SdrAgent.Prototype.runtime() == :ordinary
+    end
+  end
+
   describe "verify!/0 and the child" do
+    test "the BootCheck child starts after the Repo and before the provider, Oban and the endpoint (structural)" do
+      children = SdrAgent.Application.children()
+
+      position = fn wanted ->
+        Enum.find_index(children, fn
+          {module, _arg} -> module == wanted
+          module -> module == wanted
+        end)
+      end
+
+      boot = position.(BootCheck)
+      assert is_integer(boot), "no BootCheck child in #{inspect(children)}"
+      assert position.(SdrAgent.Repo) < boot
+      assert boot < position.(Oban)
+      assert boot < position.(SdrAgentWeb.Endpoint)
+
+      for child <- SdrAgent.AI.ModelProvider.Runtime.children() do
+        assert boot < Enum.find_index(children, &(&1 == child))
+      end
+    end
+
     test "the refusal codes are the closed boot set" do
       assert Enum.sort(BootCheck.reasons()) ==
                Enum.sort([
@@ -147,6 +293,10 @@ defmodule SdrAgent.Prototype.BootCheckTest do
       switch = %{policy_id: "d237-prototype/1", instance_id: Ecto.UUID.generate()}
       assert BootCheck.start_link(switch: switch) == {:error, :binding_absent}
 
+      # The linked caller traps exits so that a refusing child's failed
+      # supervisor start returns {:error, _} instead of killing the test
+      # (observed at 0f0c4b9).
+      Process.flag(:trap_exit, true)
       result = Supervisor.start_link([{BootCheck, switch: switch}], strategy: :one_for_one)
       assert match?({:error, _}, result), "a refusing child started: #{inspect(result)}"
     end

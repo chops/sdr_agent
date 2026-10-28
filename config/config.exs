@@ -262,6 +262,10 @@ config :phoenix, :json_library, Jason
 # (`docs/product/r0/r0-05-interface.md` section 5).
 config :phoenix, :filter_parameters, ["password", "settings_content", "resolution_confirmation"]
 
+# D-237 (interfaces r6 IF-2): the prototype switch is off unless
+# config/runtime.exs accepts SDR_PROTOTYPE and SDR_PROTOTYPE_INSTANCE (dev only).
+config :sdr_agent, SdrAgent.Prototype, switch: :off
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

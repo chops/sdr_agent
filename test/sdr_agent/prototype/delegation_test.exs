@@ -114,6 +114,77 @@ defmodule SdrAgent.Prototype.DelegationTest do
       assert delegations(fx.binding.id) == rows_before
       assert created_events(fx.tenant) == events_before
     end
+
+    # Codex 54f4263b P0-1: only the SOLE expected conflict is recoverable.
+    # A failure that carries the session unique-constraint error together
+    # with any other error (an unexpected, audit or programming error), or
+    # more than one error, is never promoted to a recovered session. The
+    # failure is injected at the existing pre-create hook through the real
+    # rollback path, against an existing session and a forced lookup miss.
+    defp unique_session_error do
+      Ash.Error.Changes.InvalidAttribute.exception(
+        field: :session_correlation,
+        message: "has already been taken",
+        private_vars: [
+          constraint: "prototype_delegations_unique_session_index",
+          constraint_type: :unique
+        ]
+      )
+    end
+
+    defp programming_error,
+      do: Ash.Error.Unknown.UnknownError.exception(error: "injected programming error")
+
+    defp enter_with_injected_failure(correlation, failure) do
+      Process.put({@authority, :miss_session_lookup}, true)
+
+      Process.put({@authority, :before_session_create}, fn _snapshot -> Repo.rollback(failure) end)
+
+      try do
+        Prototype.enter_session(:codex_cli, correlation)
+      after
+        Process.delete({@authority, :miss_session_lookup})
+        Process.delete({@authority, :before_session_create})
+      end
+    end
+
+    test "a mixed or multiple error list is never taken for the recoverable conflict" do
+      fx = bound!()
+      correlation = "codex-session:race-0003"
+      first = Prototype.enter_session(:codex_cli, correlation)
+      assert match?({:ok, _id}, first), "prerequisite: first session: #{inspect(first)}"
+      rows_before = delegations(fx.binding.id)
+      events_before = created_events(fx.tenant)
+
+      failures = [
+        mixed_invalid:
+          Ash.Error.Invalid.exception(errors: [unique_session_error(), programming_error()]),
+        mixed_changeset: %Ash.Changeset{errors: [programming_error(), unique_session_error()]},
+        doubled_invalid:
+          Ash.Error.Invalid.exception(errors: [unique_session_error(), unique_session_error()])
+      ]
+
+      results =
+        for {name, failure} <- failures,
+            do: {name, enter_with_injected_failure(correlation, failure)}
+
+      promoted = for {name, result} <- results, result != {:error, :binding_mismatch}, do: name
+
+      assert promoted == [], "promoted to a recovered session: #{inspect(results)}"
+      assert delegations(fx.binding.id) == rows_before
+      assert created_events(fx.tenant) == events_before
+    end
+
+    test "the sole session unique-constraint error still recovers this session's id (control)" do
+      fx = bound!()
+      correlation = "codex-session:race-0004"
+      {:ok, id} = Prototype.enter_session(:codex_cli, correlation)
+      rows_before = delegations(fx.binding.id)
+
+      sole = Ash.Error.Invalid.exception(errors: [unique_session_error()])
+      assert enter_with_injected_failure(correlation, sole) == {:ok, id}
+      assert delegations(fx.binding.id) == rows_before
+    end
   end
 
   # Codex a95a89fb R1: a nested Audit.transaction is a plain nested

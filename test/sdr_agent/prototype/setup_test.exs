@@ -210,4 +210,336 @@ defmodule SdrAgent.Prototype.SetupTest do
       end
     end
   end
+
+  # Codex f3036a14 queue 2: success AND refusal coverage for each
+  # non-credential phase-0/1 helper, beyond the first REDs above.
+  describe "phase 0 and 1 helpers: success and refusal coverage" do
+    defmodule FreshProbeWorker do
+      @moduledoc "A test-only Oban worker; its jobs are inserted, never run (testing: :manual)."
+      use Oban.Worker, queue: :default
+
+      @impl Oban.Worker
+      def perform(_job), do: :ok
+    end
+
+    # Every base table of the public schema except schema_migrations, from
+    # the catalog, with its row presence.
+    defp public_tables_with_rows do
+      %{rows: rows} =
+        Repo.query!(
+          "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+            "AND tablename <> 'schema_migrations' ORDER BY tablename",
+          []
+        )
+
+      for [table] <- rows,
+          match?(
+            %{rows: [[true]]},
+            Repo.query!(~s[SELECT EXISTS (SELECT 1 FROM "public"."#{table}")], [])
+          ),
+          do: table
+    end
+
+    defp migration_files do
+      Path.wildcard("priv/repo/migrations/*.exs")
+      |> Enum.map(&Path.basename(&1, ".exs"))
+      |> Enum.map(fn base ->
+        [version, name] = String.split(base, "_", parts: 2)
+        {String.to_integer(version), name}
+      end)
+      |> Enum.sort()
+    end
+
+    test "conflicting or extra Repo target selectors refuse" do
+      for wrong <- [
+            [{:port, 5520} | @exact_repo],
+            [{:database, "sdr_agent_dev"} | @exact_repo],
+            [{:socket_dir, "/private/tmp/d237-pg-other"} | @exact_repo],
+            Keyword.put(@exact_repo, :endpoints, [{"localhost", 5541}]),
+            Keyword.put(@exact_repo, :hostname, "db.example.test"),
+            Keyword.put(@exact_repo, :socket_dir, "/private/tmp/d237-pg/"),
+            Map.new(@exact_repo)
+          ] do
+        result = call(@authority, :check_repo_target, [wrong])
+
+        assert result == {:error, :repo_target_mismatch},
+               "repo target #{inspect(wrong)} gave #{inspect(result)}"
+      end
+    end
+
+    test "the app-running names are exactly IF-2's: Oban, the endpoint and the provider tree" do
+      assert call(@authority, :app_names, []) == [
+               {:oban, Oban},
+               {:process, SdrAgentWeb.Endpoint},
+               {:process, SdrAgent.AI.ModelProvider.ProfileSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.ServerSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.Coordinator},
+               {:process, SdrAgent.AI.ModelProvider.OperationSupervisor},
+               {:process, SdrAgent.AI.ModelProvider.ClaudeCLI}
+             ]
+    end
+
+    test "names that are not alive pass; a live registered name or Oban instance refuses" do
+      n = System.unique_integer([:positive])
+      absent_process = :"d237_setup_absent_#{n}"
+      absent_oban = Module.concat(__MODULE__, "AbsentOban#{n}")
+
+      assert call(@authority, :check_app_stopped, [
+               [{:process, absent_process}, {:oban, absent_oban}]
+             ]) ==
+               :ok
+
+      live = :"d237_setup_live_#{n}"
+      Process.register(self(), live)
+
+      try do
+        assert call(@authority, :check_app_stopped, [
+                 [{:process, absent_process}, {:process, live}]
+               ]) ==
+                 {:error, :app_running}
+      after
+        Process.unregister(live)
+      end
+
+      oban = Module.concat(__MODULE__, "LiveOban#{n}")
+
+      start_supervised!(
+        {Oban,
+         [name: oban, repo: Repo, testing: :disabled] ++
+           SdrAgent.Prototype.Session.oban_insert_only_opts()}
+      )
+
+      assert call(@authority, :check_app_stopped, [[{:oban, oban}]]) == {:error, :app_running}
+    end
+
+    test "a row in any public table refuses freshness and resume: an Oban job alone" do
+      assert public_tables_with_rows() == [],
+             "prerequisite: the sandbox did not start empty: #{inspect(public_tables_with_rows())}"
+
+      assert call(@authority, :check_fresh, []) == :ok
+      assert call(@authority, :check_resumable, []) == :ok
+
+      assert {:ok, _job} = Oban.insert(FreshProbeWorker.new(%{}))
+      assert public_tables_with_rows() == ["oban_jobs"]
+
+      assert call(@authority, :check_fresh, []) == {:error, :database_not_fresh}
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+
+    test "resume refuses a missing migration version (labelled negative tamper)" do
+      assert call(@authority, :check_resumable, []) == :ok
+
+      # Synthetic negative tamper inside the sandbox transaction (rolled back):
+      # one pinned version row removed from schema_migrations.
+      Repo.query!("DELETE FROM schema_migrations WHERE version = 20261028052425", [])
+
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+
+    test "the pinned migration set is exactly the migration files, in version order" do
+      pinned = call(@authority, :pinned_migrations, [])
+      assert is_list(pinned), "pinned_migrations/0 returned #{inspect(pinned)}"
+      assert pinned == migration_files()
+      assert pinned == Enum.sort(pinned)
+      assert length(pinned) == 34
+
+      %{rows: rows} =
+        Repo.query!("SELECT version FROM schema_migrations ORDER BY version", [])
+
+      assert Enum.map(rows, fn [v] -> v end) == Enum.map(pinned, &elem(&1, 0))
+    end
+  end
+
+  # Codex dd9c0f20 F1-F3: corrective REDs for the phase-0/1 helpers.
+  describe "setup F corrective coverage (F1-F3)" do
+    @catalog_seam {SdrAgent.Prototype.Authority, :catalog_tables}
+
+    defp observed_public_tables do
+      %{rows: rows} =
+        Repo.query!(
+          "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' " <>
+            "AND tablename <> 'schema_migrations' ORDER BY tablename",
+          []
+        )
+
+      Enum.map(rows, fn [table] -> table end)
+    end
+
+    # The synthetic transactional seam (test builds only): this process's
+    # one-argument function is applied to the observed public-table list.
+    # No schema object is created, altered or dropped.
+    defp with_catalog(fun, body) do
+      Process.put(@catalog_seam, fun)
+
+      try do
+        body.()
+      after
+        Process.delete(@catalog_seam)
+      end
+    end
+
+    defp fresh_and_resumable,
+      do: {call(@authority, :check_fresh, []), call(@authority, :check_resumable, [])}
+
+    test "F1: the pinned public-table inventory equals this migration set's catalog" do
+      pinned = call(@authority, :public_tables, [])
+      observed = observed_public_tables()
+      assert pinned == observed, "pinned #{inspect(pinned)}; observed #{inspect(observed)}"
+    end
+
+    test "F1: a missing non-named table refuses both, with exact version rows" do
+      assert fresh_and_resumable() == {:ok, :ok},
+             "prerequisite: exact versions and no rows"
+
+      result = with_catalog(&(&1 -- ["contacts"]), &fresh_and_resumable/0)
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: a missing named table refuses both" do
+      result = with_catalog(&(&1 -- ["users"]), &fresh_and_resumable/0)
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: an unexpected extra public table refuses both" do
+      result =
+        with_catalog(&Enum.sort(["d237_unexpected" | &1]), &fresh_and_resumable/0)
+
+      assert result == {{:error, :database_not_fresh}, {:error, :database_not_resumable}}
+    end
+
+    test "F1: the identity seam keeps both passing (control)" do
+      assert with_catalog(& &1, &fresh_and_resumable/0) == {:ok, :ok}
+    end
+
+    test "F2: a configure callback, fun or MFA, refuses without being called" do
+      test_pid = self()
+
+      configure_fun = fn opts ->
+        send(test_pid, :configure_called)
+        Keyword.put(opts, :socket_dir, "/private/tmp/d237-elsewhere")
+      end
+
+      for configure <- [
+            configure_fun,
+            {Keyword, :put, [:socket_dir, "/private/tmp/d237-elsewhere"]}
+          ] do
+        result =
+          call(@authority, :check_repo_target, [Keyword.put(@exact_repo, :configure, configure)])
+
+        assert result == {:error, :repo_target_mismatch},
+               "configure #{inspect(configure)} gave #{inspect(result)}"
+      end
+
+      refute_received :configure_called
+    end
+
+    test "F2: a nil configure and plain non-selector pool options pass (control)" do
+      assert call(@authority, :check_repo_target, [Keyword.put(@exact_repo, :configure, nil)]) ==
+               :ok
+
+      plain =
+        @exact_repo ++
+          [
+            hostname: "localhost",
+            username: "postgres",
+            pool_size: 2,
+            timeout: 15_000,
+            show_sensitive_data_on_connection_error: false
+          ]
+
+      assert call(@authority, :check_repo_target, [plain]) == :ok
+    end
+
+    test "F3: resume reads public.schema_migrations, never a search_path shadow" do
+      # Synthetic negative: a transaction-scoped TEMP shadow (pg_temp is
+      # searched first for unqualified names) holding every pinned version,
+      # rolled back with the test.
+      Repo.query!(
+        "CREATE TEMP TABLE schema_migrations ON COMMIT DROP AS " <>
+          "SELECT version, inserted_at FROM public.schema_migrations",
+        []
+      )
+
+      assert call(@authority, :check_resumable, []) == :ok,
+             "control: an identical shadow with an intact public table"
+
+      # Labelled negative tamper (rolled back): one pinned version removed
+      # from the PUBLIC table only; the shadow still holds all of them.
+      Repo.query!("DELETE FROM public.schema_migrations WHERE version = 20261028052425", [])
+
+      assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
+    end
+  end
+
+  # Codex 54f4263b P0-2: bootstrap/1 is top-level only. Inside a caller's
+  # open transaction it refuses with its closed code before any query or
+  # write, and the caller's transaction stays usable: its own
+  # transaction-local work survives, SELECT 1 works, and no rollback is
+  # thrown through it.
+  describe "phase 2 bootstrap inside an open transaction (P0-2)" do
+    @doc false
+    def handle_query(_event, _measurements, metadata, pid),
+      do: send(pid, {:p02_query, metadata[:source]})
+
+    defp query_sources(fun) do
+      id = {__MODULE__, make_ref()}
+      :ok = :telemetry.attach(id, [:sdr_agent, :repo, :query], &__MODULE__.handle_query/4, self())
+
+      try do
+        result = fun.()
+        {result, drain_queries([])}
+      after
+        :telemetry.detach(id)
+      end
+    end
+
+    defp drain_queries(sources) do
+      receive do
+        {:p02_query, source} -> drain_queries([source | sources])
+      after
+        0 -> Enum.reverse(sources)
+      end
+    end
+
+    defp bootstrap_opts(correlation),
+      do: [
+        agent: :claude_code,
+        session_correlation: correlation,
+        auditor_password: String.duplicate("a", 43)
+      ]
+
+    test "a nested call is refused before any query or write; the caller's transaction is usable" do
+      before =
+        Enum.map(~w(tenants users prototype_database_bindings prototype_delegations), &count/1)
+
+      outer =
+        Repo.transaction(fn ->
+          Repo.query!("SELECT set_config('sdr.p02_caller', 'kept', true)", [])
+
+          {result, sources} =
+            query_sources(fn ->
+              call(@authority, :bootstrap, [bootstrap_opts("setup-nested-0001")])
+            end)
+
+          %{rows: [[marker]]} = Repo.query!("SELECT current_setting('sdr.p02_caller', true)", [])
+          %{rows: [[one]]} = Repo.query!("SELECT 1", [])
+          %{result: result, sources: sources, marker: marker, one: one}
+        end)
+
+      assert match?({:ok, %{}}, outer), "the caller's transaction gave #{inspect(outer)}"
+      {:ok, observed} = outer
+
+      assert observed.sources == [],
+             "bootstrap issued Repo queries with sources #{inspect(observed.sources)}"
+
+      assert observed.result == {:error, :bootstrap_failed}
+      assert {observed.marker, observed.one} == {"kept", 1}
+
+      assert Enum.map(
+               ~w(tenants users prototype_database_bindings prototype_delegations),
+               &count/1
+             ) ==
+               before
+    end
+  end
 end

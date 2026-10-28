@@ -30,7 +30,8 @@ defmodule SdrAgent.Prototype.TaskKindTest do
   end
 
   test "the task entry refuses an unknown agent and a missing correlation" do
-    bound!()
+    fx = bound!()
+    assert PrototypeFixtures.put_boot_switch(PrototypeFixtures.switch(fx)) == :ok
 
     assert Session.enter(agent: "other", session_correlation: "task-entry-0002") ==
              {:error, :invalid_agent}
@@ -38,8 +39,29 @@ defmodule SdrAgent.Prototype.TaskKindTest do
     assert Session.enter(agent: "codex_cli", session_correlation: nil) == {:error, :session_unset}
   end
 
+  # Codex 026058ec: the boot-switch input is independent of the fixed
+  # runtime. Only "no delegation is written" is claimed here, not "no
+  # business read" (the call order is not observed).
+  test "a refused boot check stops the task entry: no delegation, the runtime unchanged" do
+    fx = bound!()
+    refusing = %{PrototypeFixtures.switch(fx) | instance_id: Ecto.UUID.generate()}
+    assert PrototypeFixtures.put_boot_switch(refusing) == :ok
+
+    count = fn ->
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM prototype_delegations", [])
+      n
+    end
+
+    before = count.()
+    result = Session.enter(agent: "codex_cli", session_correlation: "task-entry-boot-0001")
+    assert result == {:error, :instance_mismatch}, "task entry: #{inspect(result)}"
+    assert count.() == before
+    assert SdrAgent.Prototype.binding() == {:ok, fx.snapshot}
+  end
+
   test "the task entry returns the operator actor of its own delegation" do
     fx = bound!()
+    assert PrototypeFixtures.put_boot_switch(PrototypeFixtures.switch(fx)) == :ok
     result = Session.enter(agent: "codex_cli", session_correlation: "task-entry-0003")
     assert match?({:ok, %{}}, result), "task entry: #{inspect(result)}"
     {:ok, entered} = result

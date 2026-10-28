@@ -22,7 +22,8 @@ defmodule SdrAgent.Accounts do
       user with a session token in `__metadata__.token`),
       `record_signed_out/1` — appends `auth.signed_out`;
     * reads: `get_user/2`, `list_users/2`; `current_operator/1` validates
-      a signed, stored, unrevoked user session and re-reads its active user.
+      a signed, stored, unrevoked user session and re-reads its active user
+      (never the D-237 `:agent_operator` anchor).
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -102,7 +103,8 @@ defmodule SdrAgent.Accounts do
              "jti" => jti,
              "purpose" => "user"
            }),
-         {:ok, %User{status: :active} = user} <-
+         # D-237 IF-3: the anchor never resolves, even if a lookup returned it.
+         {:ok, %User{status: :active, role: role} = user} when role != :agent_operator <-
            AshAuthentication.subject_to_user(subject, User) do
       {:ok, user}
     else
