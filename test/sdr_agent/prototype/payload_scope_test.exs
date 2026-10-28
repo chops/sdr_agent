@@ -141,6 +141,29 @@ defmodule SdrAgent.Prototype.PayloadScopeTest do
     )
   end
 
+  test "deny: a forged scope with a malformed hash list or shape never raises and never passes" do
+    fx = bound!()
+    content = ~s({"synthetic":"forged-shape"})
+    good = sha(content)
+    base = %{tenant_id: fx.tenant.id, delegation_id: fx.actor.id, purpose: :dossier_claims}
+    before = count_payloads()
+
+    forged = [
+      mixed_members: Map.put(base, :sha256s, [good, "not-32-bytes"]),
+      non_binary_member: Map.put(base, :sha256s, [good, 42]),
+      empty_list: Map.put(base, :sha256s, []),
+      not_a_list: Map.put(base, :sha256s, good),
+      missing_key: base,
+      not_a_map: [good]
+    ]
+
+    for {name, scope} <- forged do
+      forbidden!(name, store(content, fx.actor, %{@marker => scope}))
+    end
+
+    assert count_payloads() == before
+  end
+
   test "context/1 builds only well-formed scopes" do
     fx = bound!()
 

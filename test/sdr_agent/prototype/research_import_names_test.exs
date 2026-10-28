@@ -47,4 +47,22 @@ defmodule SdrAgent.Prototype.ResearchImportNamesTest do
 
     assert {count.("dossier_entries"), count.("dossier_sources")} == before
   end
+
+  test "the import shells write nothing for a valid operator until S3's bodies land" do
+    fx = bound!()
+
+    count = fn table ->
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM #{table}", [])
+      n
+    end
+
+    before = {count.("dossier_entries"), count.("dossier_sources")}
+
+    for name <- @names do
+      result = apply(Research, name, [%{}, [actor: fx.actor]])
+      assert match?({:error, _}, result), "#{name} by the operator wrote: #{inspect(result)}"
+    end
+
+    assert {count.("dossier_entries"), count.("dossier_sources")} == before
+  end
 end
