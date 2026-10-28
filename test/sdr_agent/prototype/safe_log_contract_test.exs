@@ -483,4 +483,28 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
       assert Enum.sort_by(:logger.get_handler_config(), & &1.id) == handlers
     end
   end
+
+  describe "detach (Codex b069e93f: its own direct RED)" do
+    # The actual S-a filter is installed directly as a controlled fixture,
+    # not through attach/1; the module setup removes it after the test
+    # whatever detach/0 did.
+    test "detach/0 removes only SafeLog's primary filter; ExceptionFilter and the handlers stay" do
+      assert :logger.add_primary_filter(@filter_id, {&SafeLog.filter/2, []}) == :ok
+      filters = filter_ids()
+      handlers = Enum.sort_by(:logger.get_handler_config(), & &1.id)
+      # Construction check: both filters are present before detach.
+      assert @exception_filter in filters and @filter_id in filters
+
+      assert SafeLog.detach() == :ok
+
+      assert filter_ids() == List.delete(filters, @filter_id),
+             "detach changed more or less than SafeLog's filter: #{inspect(filter_ids())}"
+
+      assert Enum.sort_by(:logger.get_handler_config(), & &1.id) == handlers,
+             "detach changed the handlers"
+
+      assert SafeLog.detach() == :ok, "detach without SafeLog's filter installed is not :ok"
+      assert filter_ids() == List.delete(filters, @filter_id)
+    end
+  end
 end
