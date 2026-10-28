@@ -1,10 +1,14 @@
 defmodule SdrAgent.Sales.Validations.ImportTenant do
   @moduledoc """
-  The tenant-bound relationship guard of the D-237 `:import_prototype`
-  actions of Contact and Lead (Codex 9a6dba0a R1). Every referenced row
-  (a contact's `account_id`; a lead's `contact_id` and `account_id`) must
-  exist in the NEW row's own tenant, the `tenant_id` that
-  `SdrAgent.Audit.Changes.SetTenant` derived from the acting operator.
+  The tenant-bound relationship guard of the D-237 prototype actions that
+  reference other Sales rows: the `:import_prototype` actions of Contact
+  and Lead (Codex 9a6dba0a R1), and the GTM seed's `:seed_prototype`
+  actions of SequenceStep and Campaign (seed design D5, Codex b8d624fe).
+  Every referenced row (a contact's `account_id`; a lead's `contact_id`
+  and `account_id`; a step's `sequence_id`; a campaign's
+  `icp_definition_id`, then its `sequence_id`) must exist in the NEW
+  row's own tenant, the `tenant_id` that `SdrAgent.Audit.Changes.SetTenant`
+  derived from the acting operator.
 
   It is declared with `before_action?: true`, so it runs after
   authorization (a refused caller stays `Forbidden`) and inside the
@@ -29,9 +33,12 @@ defmodule SdrAgent.Sales.Validations.ImportTenant do
   `Audit.transaction` owner does not happen, a named S1/Audit coverage
   limit) is Ash's, Guard's and Audit's behaviour, unchanged here.
 
-  Only the two import actions use it; the ordinary create paths and
-  `SdrAgent.Sales.Changes.LeadAccount` (which still requires a lead's
-  account to be its contact's, and active) are unchanged.
+  Only those four actions use it. The ordinary create paths, the seeder's
+  `:seed` actions, `SdrAgent.Sales.Changes.LeadAccount` (which still
+  requires a lead's account to be its contact's, and active) and the
+  step's draft-parent check (`SdrAgent.Sales.Changes.RelatedInState`,
+  which on `:seed_prototype` runs after this guard, so a foreign or
+  nonexistent sequence is refused before it is locked) are unchanged.
 
   Test-seam builds only (Codex 683a74e6): the reference read is
   instrumented for fault controls. A scope a test put under

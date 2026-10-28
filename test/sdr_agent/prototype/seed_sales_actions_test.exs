@@ -199,6 +199,28 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
     {leaf, Ash.Error.Unknown.exception(errors: [leaf])}
   end
 
+  # The injected leaf exactly as a top-level :seed_prototype create returns
+  # it (Ash 3.37.2 / Splode 0.3.2; the oracle r2 precedent at 62958f29 for
+  # :import_prototype, measured in c3-20261028T140813Z-56517): create.ex:228-230
+  # (Ash.Error.to_error_class) filters the leaf's frames with Ash.Error's
+  # Splode filter ["Ash.", "Splode."], then create.ex:92-96's
+  # Ash.Error.to_error_class(error, bread_crumbs: "Error returned from:
+  # <resource>.<action>") prepends exactly that one crumb to the leaf's own
+  # (accumulate_bread_crumbs, splode.ex:636-666). The crumb is built from the
+  # action's own resource and name only, never read from a returned error;
+  # every other key and value stays the injected leaf's, and == checks the
+  # crumbs' exact order and multiplicity.
+  defp returned(%{stacktrace: %Splode.Stacktrace{stacktrace: frames}} = leaf)
+       when is_list(frames) do
+    filtered = Splode.filter_stacktrace(frames, Ash.Error.__stacktrace_filters__())
+    %{leaf | stacktrace: %Splode.Stacktrace{stacktrace: filtered}}
+  end
+
+  defp action_crumb(resource), do: "Error returned from: #{inspect(resource)}.seed_prototype"
+
+  defp action_returned(injected, resource),
+    do: %{returned(injected) | bread_crumbs: [action_crumb(resource) | injected.bread_crumbs]}
+
   # One edge's call with valid same-tenant prerequisites:
   # {resource, field, referenced resource, referenced id, attrs}.
   defp reference_edge(ctx, :step_sequence) do
@@ -502,7 +524,8 @@ defmodule SdrAgent.Prototype.SeedSalesActionsTest do
         refute refused_on?(result, field),
                "#{inspect(resource)}.#{field}: a read error was relabelled as absence"
 
-        assert match?({:error, _}, result) and injected in leaves(elem(result, 1)),
+        assert match?({:error, _}, result) and
+                 action_returned(injected, resource) in leaves(elem(result, 1)),
                "#{inspect(resource)}.#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
