@@ -52,9 +52,6 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   # head compiles without it.
   @refused SdrAgent.Outreach.Errors.CaptureRefused
   @worker "SdrAgent.Outreach.DeliveryWorker"
-  # The worker boundary's exact first line for a propagated failure
-  # (error_boundary.ex:63-78; oban/lib/oban/job.ex:581-589).
-  @job_error_line ~s|** (Oban.PerformError) SdrAgent.Outreach.DeliveryWorker failed with {:error, "Ash.Error.Unknown"}|
   # The synthetic raw-detail markers; the recipient and its domain are added
   # per context.
   @raw_markers [
@@ -167,35 +164,52 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
 
   @doc """
   Runs one inline delivery drain (`OutreachFixtures.deliver!/0`) with `fun`
-  registered at `:before_capture` under a fresh ref. When the hook runs for
-  an operation, it first arms the boundary observer
-  (`{PrototypeCapture, :observer}` = `%{ref, op_id, attempt}`) for exactly
-  that operation and attempt, then runs `fun`. Both registrations are
-  removed in the calling process on every exit, restoring any prior value.
-  Returns `{ref, drain counts}`.
+  registered at `:before_capture` under a fresh ref.
+
+  When the hook runs for an operation, it first arms, for exactly that
+  operation and attempt:
+  - the boundary observer (`{PrototypeCapture, :observer}` =
+    `%{ref, op_id, attempt}`);
+  - each `opts[:arm]` seam (`inject:` or `fault:`), as its spec merged
+    with `%{op_id, attempt}`.
+
+  Then it runs `fun`. Every registration is removed in the calling process
+  on every exit, restoring any prior value.
+
+  Returns `{ref, drained}`. `drained` is `{:ok, drain counts}`, or
+  `{:raised, exception module}` when the drain itself raised; only the
+  module is kept (Codex 1fabb2d3 R1). An ExUnit assertion inside a hook
+  is re-raised unchanged.
   """
-  def with_capture!(fun) do
-    hook_key = {@hook, :before_capture}
-    observer_key = {@capture, :observer}
-    prior_hook = Process.get(hook_key)
-    prior_observer = Process.get(observer_key)
+  def with_capture!(fun, opts \\ []) do
+    arm = Keyword.get(opts, :arm, [])
+    seams = Enum.map(arm, &{@capture, elem(&1, 0)})
+    keys = [{@hook, :before_capture}, {@capture, :observer} | seams]
+    prior = Map.new(keys, &{&1, Process.get(&1)})
     OutreachFixtures.put_env!(:capture_faults, @hook)
     ref = make_ref()
 
     armed = fn operation ->
-      Process.put(observer_key, %{ref: ref, op_id: operation.id, attempt: operation.attempt_count})
-
+      bound = %{op_id: operation.id, attempt: operation.attempt_count}
+      Process.put({@capture, :observer}, Map.put(bound, :ref, ref))
+      Enum.each(arm, fn {kind, spec} -> Process.put({@capture, kind}, Map.merge(spec, bound)) end)
       fun.(operation)
     end
 
-    Process.put(hook_key, {ref, armed})
+    Process.put({@hook, :before_capture}, {ref, armed})
 
     try do
-      {ref, OutreachFixtures.deliver!()}
+      {ref, drain()}
     after
-      restore_key(hook_key, prior_hook)
-      restore_key(observer_key, prior_observer)
+      Enum.each(prior, fn {key, value} -> restore_key(key, value) end)
     end
+  end
+
+  defp drain do
+    {:ok, OutreachFixtures.deliver!()}
+  rescue
+    error in ExUnit.AssertionError -> reraise error, __STACKTRACE__
+    error -> {:raised, error.__struct__}
   end
 
   @doc """
@@ -288,21 +302,25 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
      has a job;
   2. `"S4-ORACLE refused: reach"`: exactly one before_capture run for this
      operation and attempt, returning `:ok`;
-  3. `"S4-ORACLE refused: no typed refusal"`: exactly one boundary
+  3. `"S4-ORACLE refused: protocol"`: the drain itself did not raise; the
+     worker returned a supported outcome (Codex 1fabb2d3 R1);
+  4. `"S4-ORACLE refused: no typed refusal"`: exactly one boundary
      observation `{:refused, op, attempt, code}`;
-  4. `"S4-ORACLE refused: outcome"`: the operation's only job completed on
+  5. `"S4-ORACLE refused: outcome"`: the operation's only job completed on
      attempt 1 with no error; the operation is failed_permanent with
      `last_error` `%{"reason" => code}`; the draft failed;
-  5. `"S4-ORACLE refused: capture written"`: no captured, accepted or
+  6. `"S4-ORACLE refused: capture written"`: no captured, accepted or
      delivered receipt or receipt event.
 
-  Nothing is rescued.
+  `opts[:arm]` is passed to `with_capture!/2`. Nothing is rescued except
+  the drain's own raise, of which only the module is kept and asserted.
   """
-  def refused_attempt!(ctx, delivery, code, fun \\ fn _operation -> :ok end) do
+  def refused_attempt!(ctx, delivery, code, fun \\ fn _operation -> :ok end, opts \\ []) do
     attempt = prerequisites!(ctx, delivery, "S4-ORACLE refused: prerequisites")
-    {ref, _counts} = with_capture!(fun)
+    {ref, drained} = with_capture!(fun, opts)
     seen = messages(ref)
     step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE refused: reach")
+    step!(match?({:ok, _counts}, drained), "S4-ORACLE refused: protocol")
 
     step!(
       observed(seen) == [{:refused, delivery.id, attempt, code}],
@@ -326,29 +344,33 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   drain, prerequisites (`"S4-ORACLE propagated: prerequisites"`) and reach
   (`"S4-ORACLE propagated: reach"`) steps as `refused_attempt!/4`, then:
 
+  - `"S4-ORACLE propagated: protocol"`: the drain itself did not raise; the
+    worker returned a supported outcome (Codex 1fabb2d3 R1);
   - `"S4-ORACLE propagated: typed refusal observed"`: no boundary
     observation for this ref;
   - `"S4-ORACLE propagated: outcome"`: the operation's only job is
     retryable on attempt 1 with one error. Its rendered error's first line
-    is exactly the sanitized `Ash.Error.Unknown` boundary line, and no
-    marker (`@raw_markers`, the recipient and its domain) appears anywhere
-    in it. The text is read, never printed. The operation stays attempting
-    on this attempt;
+    is exactly the worker boundary's sanitized line for `opts[:class]`
+    (default `Ash.Error.Unknown`), and no marker (`@raw_markers`, the
+    recipient and its domain) appears anywhere in it. The text is read,
+    never printed. The operation stays attempting on this attempt;
   - `"S4-ORACLE propagated: capture written"`.
 
-  It does not, and must not, tell a lossy database failure from a
-  programming error.
+  `opts[:arm]` is passed to `with_capture!/2`. It does not, and must not,
+  tell a lossy database failure from a programming error.
   """
-  def propagated_attempt!(ctx, delivery, fun) do
+  def propagated_attempt!(ctx, delivery, fun, opts \\ []) do
+    class = Keyword.get(opts, :class, Ash.Error.Unknown)
     attempt = prerequisites!(ctx, delivery, "S4-ORACLE propagated: prerequisites")
-    {ref, _counts} = with_capture!(fun)
+    {ref, drained} = with_capture!(fun, opts)
     seen = messages(ref)
     step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE propagated: reach")
+    step!(match?({:ok, _counts}, drained), "S4-ORACLE propagated: protocol")
     step!(observed(seen) == [], "S4-ORACLE propagated: typed refusal observed")
     op = OutreachFixtures.outreach!(ctx, delivery)
 
     step!(
-      jobs(delivery.id) == [{"retryable", 1, 1}] and job_error_clean?(ctx, delivery) and
+      jobs(delivery.id) == [{"retryable", 1, 1}] and job_error_clean?(ctx, delivery, class) and
         op.state == :attempting and op.attempt_count == attempt,
       "S4-ORACLE propagated: outcome"
     )
@@ -398,24 +420,39 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
 
   # The complete rendered error of the job's first attempt: its exact first
   # line and no marker anywhere. Read, never printed.
-  defp job_error_clean?(ctx, delivery) do
+  defp job_error_clean?(ctx, delivery, class) do
+    recipient = OutreachFixtures.outreach!(ctx, delivery).recipient_email
+
     case SdrAgent.Repo.query!(
            "SELECT errors[1]->>'error' FROM oban_jobs " <>
              "WHERE worker = $1 AND args->>'delivery_operation_id' = $2 ORDER BY id",
            [@worker, delivery.id]
          ) do
       %{rows: [[text]]} when is_binary(text) ->
-        hd(String.split(text, "\n")) == @job_error_line and
-          not Enum.any?(markers(ctx), &String.contains?(text, &1))
+        hd(String.split(text, "\n")) == job_error_line(class) and
+          not Enum.any?(recipient_markers(recipient), &String.contains?(text, &1))
 
       _other ->
         false
     end
   end
 
+  @doc """
+  The worker boundary's exact first job-error line for a propagated error
+  of Ash class `class`: ErrorBoundary returns its SafeMetadata summary
+  (error_boundary.ex:63-78), and Oban stores it as a PerformError
+  (oban/lib/oban/job.ex:581-589).
+  """
+  def job_error_line(class),
+    do:
+      ~s|** (Oban.PerformError) SdrAgent.Outreach.DeliveryWorker failed with {:error, "| <>
+        inspect(class) <> ~s|"}|
+
   @doc "The synthetic raw-detail markers for `ctx`: fixed markers plus the recipient and its domain."
-  def markers(ctx) do
-    email = to_string(ctx.contact.email)
+  def markers(ctx), do: recipient_markers(ctx.contact.email)
+
+  defp recipient_markers(email) do
+    email = to_string(email)
     [_local, domain] = String.split(email, "@", parts: 2)
     @raw_markers ++ [email, domain]
   end
@@ -443,7 +480,8 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   """
   def hold_before_capture!(ctx, delivery) do
     attempt = OutreachFixtures.outreach!(ctx, delivery).attempt_count + 1
-    {ref, _counts} = with_capture!(fn _operation -> {:error, {:retryable, :held_by_test}} end)
+    {ref, drained} = with_capture!(fn _operation -> {:error, {:retryable, :held_by_test}} end)
+    assert match?({:ok, _counts}, drained), "the held drain raised"
 
     assert reach(messages(ref)) == expected_reach(delivery, attempt, :fault),
            "the hold did not reach this operation's capture exactly once"
@@ -555,8 +593,8 @@ defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do
   (`{ref, fun}`) in the delivering process; Oban's inline drain runs in the
   test process. It returns `:ok` or the function's own
   `{:error, {class, reason}}` fault. It can only change what the test
-  controls (the clock, a suppression row) before the real capture runs, or
-  make the delivery fail before it.
+  controls (the clock, a suppression row) before the real capture runs,
+  make the delivery fail before it, or crash the adapter after it.
   """
 
   @doc """
@@ -567,9 +605,11 @@ defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do
   - `{CaptureHook, ref, :returned, phase, op_id, attempt, :ok | :fault}`
     after it, so a hook that raised is never reported as returned.
 
-  Returns `:ok`, or the function's own `{:error, {class, reason}}` fault,
+  Returns `:ok`; or the function's own `{:error, {class, reason}}` fault,
   which can only make the delivery fail before the capture
-  (`hold_before_capture!/2`).
+  (`hold_before_capture!/2`); or `:crash`, which the adapter raises as a
+  crash on that side of the capture (the after-capture crash of the
+  lifecycle controls).
   """
   def fault(phase, operation) do
     case Process.get({__MODULE__, phase}) do
@@ -591,5 +631,6 @@ defmodule SdrAgent.PrototypeOutreachFixtures.CaptureHook do
   end
 
   defp fault_of({:error, {_class, _reason}} = fault), do: fault
+  defp fault_of(:crash), do: :crash
   defp fault_of(_other), do: :ok
 end
