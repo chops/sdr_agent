@@ -18,6 +18,17 @@ defmodule SdrAgent.Sales.Validations.ImportTenant do
   Only the two import actions use it; the ordinary create paths and
   `SdrAgent.Sales.Changes.LeadAccount` (which still requires a lead's
   account to be its contact's, and active) are unchanged.
+
+  Test-seam builds only (Codex 683a74e6): the reference read is
+  instrumented for fault controls. A scope a test put under
+  `{__MODULE__, :read_fault}` in the calling process, `{edge, ref, kind}`,
+  applies only when `edge` is exactly this read's `%{field:, resource:,
+  id:, tenant_id:}`; it then sends `{__MODULE__, :reached, ref}` to the
+  calling process and: `{:error, error}` returns that error, running no
+  SQL; `:abort` runs one `SELECT 1 / 0` tagged `{:import_tenant, ref}` and
+  then the real read; `:raise` raises a fixed synthetic `ArgumentError`. No
+  scope, or another edge's scope, is the real read; every other build is
+  the plain real read. What a read's result means is unchanged here.
   """
   use Ash.Resource.Validation
 
@@ -45,21 +56,53 @@ defmodule SdrAgent.Sales.Validations.ImportTenant do
     Enum.find_value(opts[:refs], :ok, fn {field, resource} ->
       id = Ash.Changeset.get_attribute(changeset, field)
 
-      unless in_tenant?(resource, id, tenant_id),
+      unless in_tenant?(field, resource, id, tenant_id),
         do: {:error, field: field, message: "is not a row of this tenant"}
     end)
   end
 
-  defp in_tenant?(resource, id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
+  defp in_tenant?(field, resource, id, tenant_id) when is_binary(id) and is_binary(tenant_id) do
     resource
     |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
     |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
-    |> Ash.read_one()
+    |> reference_read(%{field: field, resource: resource, id: id, tenant_id: tenant_id})
     |> case do
       {:ok, %{tenant_id: ^tenant_id}} -> true
       _none_or_error -> false
     end
   end
 
-  defp in_tenant?(_resource, _id, _tenant_id), do: false
+  defp in_tenant?(_field, _resource, _id, _tenant_id), do: false
+
+  # The reference read (see the moduledoc for the test-seam scope).
+  if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
+    defp reference_read(query, edge) do
+      case Process.get({__MODULE__, :read_fault}) do
+        {^edge, ref, kind} when is_reference(ref) -> fault(kind, query, ref)
+        _absent_or_other_edge -> Ash.read_one(query)
+      end
+    end
+
+    defp fault(kind, query, ref) do
+      send(self(), {__MODULE__, :reached, ref})
+
+      case kind do
+        {:error, error} ->
+          {:error, error}
+
+        :abort ->
+          _aborted =
+            SdrAgent.Repo.query("SELECT 1 / 0", [],
+              telemetry_options: [d237_s3_fault: {:import_tenant, ref}]
+            )
+
+          Ash.read_one(query)
+
+        :raise ->
+          raise ArgumentError, "test seam: import tenant reference read"
+      end
+    end
+  else
+    defp reference_read(query, _edge), do: Ash.read_one(query)
+  end
 end
