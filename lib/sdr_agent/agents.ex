@@ -2049,8 +2049,11 @@ defmodule SdrAgent.Agents do
   1. Only the resolved operator (`OperatorAction :provision`, live) passes;
      any other caller is `Forbidden` before any input is read, audited once
      through `SdrAgent.Audit.Guard.refuse/2` for a well-formed actor.
-  2. No `evidence_root` is `{:error, :budget_unbounded}`; a digest that
-     does not match the bytes is `{:error, :worksheet_invalid}`.
+  2. A call inside an already-open transaction is
+     `{:error, :binding_mismatch}` (a nested transaction is not a
+     savepoint; the provision task never nests). No `evidence_root` is
+     `{:error, :budget_unbounded}`; a digest that does not match the bytes
+     is `{:error, :worksheet_invalid}`.
   3. In one `SdrAgent.Audit.transaction/1`, under the binding-row lock:
      when this binding's grant exists by its original provisioned event,
      it is returned only if it is still active with the exact entry terms
@@ -2077,8 +2080,19 @@ defmodule SdrAgent.Agents do
       actor = Keyword.get(opts, :actor)
 
       if OperatorAction.match?(actor, nil, action: :provision),
-        do: provision_as_operator(attrs, actor, Keyword.get(opts, :evidence_root)),
+        do: provision_top_level(attrs, actor, Keyword.get(opts, :evidence_root)),
         else: Guard.refuse(@provision_meta, actor)
+    end
+
+    # Precedence: a non-operator is Forbidden (and audited) first; then an
+    # already-open caller transaction is refused with :binding_mismatch
+    # before any write (a nested Audit or Repo transaction is not a
+    # savepoint; the provision task, the one caller, never nests: Codex
+    # 17a870c0); then the explicit evidence root and the digest.
+    defp provision_top_level(attrs, actor, root) do
+      if Repo.in_transaction?(),
+        do: {:error, :binding_mismatch},
+        else: provision_as_operator(attrs, actor, root)
     end
 
     defp provision_as_operator(_attrs, _actor, root) when not is_binary(root),

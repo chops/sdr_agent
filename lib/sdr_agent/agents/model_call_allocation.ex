@@ -20,8 +20,11 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
   Actions: `:create`, `:update_terms`, `:release`; only from the grant's own
   action (`SdrAgent.Agents.Checks.GrantContext`) and as an active human
   admin (`SdrAgent.Agents.Checks.CurrentAdmin`), or, for `:create` only,
-  as the D-237 prototype operator within `ModelCallGrant
-  :provision_prototype`; a direct call is refused before any lock. Reads as the grant. Audited:
+  as the D-237 prototype operator under the registered, single-use
+  `SdrAgent.Prototype.ProvisionScope` that `ModelCallGrant
+  :provision_prototype` forwards (`SdrAgent.Prototype.Checks.ProvisionScope`,
+  consumed by `SdrAgent.Prototype.Changes.ConsumeProvisionScope`); a direct
+  call is refused before any lock. Reads as the grant. Audited:
   `model.grant.allocation_created | allocation_changed`,
   `model.allocation.released`, each carrying `grant_revision`.
   """
@@ -82,6 +85,7 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
       accept [:grant_id, :grant_revision, :key, :profile_id | @terms]
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
+      change SdrAgent.Prototype.Changes.ConsumeProvisionScope
       change {AppendEvent, [event_type: "model.grant.allocation_created"] ++ @event}
     end
 
@@ -111,11 +115,13 @@ defmodule SdrAgent.Agents.ModelCallAllocation do
       authorize_if GrantContext
     end
 
-    # The D-237 operator creates allocations only through
-    # `ModelCallGrant :provision_prototype` (the GrantContext marker above
-    # still applies); every other write remains a current admin's.
+    # The D-237 operator creates its one planned allocation only under the
+    # registered scope `ModelCallGrant :provision_prototype` forwards (a pure
+    # check; consumed once in the action by ConsumeProvisionScope; the
+    # GrantContext marker above still applies); every other write remains a
+    # current admin's.
     policy action_type(:create) do
-      authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: :provision}
+      authorize_if SdrAgent.Prototype.Checks.ProvisionScope
       authorize_if CurrentAdmin
     end
 

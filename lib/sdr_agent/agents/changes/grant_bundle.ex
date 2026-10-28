@@ -227,24 +227,26 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
 
   defp apply_plan(changeset, grant, actor) do
     writes = changeset.context[:grant_bundle_writes] || []
+    scope_context = provision_scope(changeset)
 
     Enum.reduce_while(writes, {:ok, grant}, fn write, {:ok, grant} ->
-      case write(write, grant, actor) do
+      case write(write, grant, actor, scope_context) do
         {:ok, _allocation} -> {:cont, {:ok, grant}}
         {:error, error} -> {:halt, {:error, error}}
       end
     end)
   end
 
-  defp write({:create, attrs}, grant, actor) do
+  defp write({:create, attrs}, grant, actor, scope_context) do
     attrs = Map.merge(attrs, %{grant_id: grant.id, grant_revision: grant.revision})
+    context = Map.merge(GrantContext.context(), scope_context)
 
     ModelCallAllocation
-    |> Ash.Changeset.for_create(:create, attrs, actor: actor, context: GrantContext.context())
+    |> Ash.Changeset.for_create(:create, attrs, actor: actor, context: context)
     |> Ash.create()
   end
 
-  defp write({:update, allocation, changes}, grant, actor) do
+  defp write({:update, allocation, changes}, grant, actor, _scope_context) do
     allocation
     |> Ash.Changeset.for_update(:update_terms, Map.put(changes, :grant_revision, grant.revision),
       actor: actor,
@@ -253,7 +255,7 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
     |> Ash.update()
   end
 
-  defp write({:release, allocation}, grant, actor) do
+  defp write({:release, allocation}, grant, actor, _scope_context) do
     allocation
     |> Ash.Changeset.for_update(:release, %{grant_revision: grant.revision},
       actor: actor,
@@ -261,6 +263,25 @@ defmodule SdrAgent.Agents.Changes.GrantBundle do
     )
     |> Ash.update()
   end
+
+  # D-237 (design note r2, Codex 17a870c0 D3): only the creates of
+  # `ModelCallGrant :provision_prototype` carry the operator's scope, fetched
+  # by the parent changeset's private ref AFTER it was bound to the inserted
+  # grant, and forwarded whole; admin bundles, updates and releases carry
+  # none.
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp provision_scope(%{action: %{name: :provision_prototype}, context: context}) do
+      case SdrAgent.Prototype.ProvisionScope.fetch(Map.get(context, :sdr_prototype_provision_ref)) do
+        %SdrAgent.Prototype.ProvisionScope{grant_id: grant_id} = scope when is_binary(grant_id) ->
+          %{sdr_prototype_provision_scope: scope}
+
+        _unbound ->
+          %{}
+      end
+    end
+  end
+
+  defp provision_scope(_changeset), do: %{}
 
   defp same?(allocation, key, profile_id),
     do: Map.get(allocation, :key) == key and Map.get(allocation, :profile_id) == profile_id

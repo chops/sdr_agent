@@ -42,10 +42,17 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
   ]
 
   @impl true
-  def change(changeset, _opts, context) do
-    if Enum.any?(@server_derived, &Map.has_key?(changeset.arguments, &1)),
-      do: refuse(changeset, :forged_metadata),
-      else: provision(changeset, context.actor)
+  def change(changeset, opts, context) do
+    cond do
+      Keyword.get(opts, :stage) == :finish ->
+        finish(changeset)
+
+      Enum.any?(@server_derived, &Map.has_key?(changeset.arguments, &1)) ->
+        refuse(changeset, :forged_metadata)
+
+      true ->
+        provision(changeset, context.actor)
+    end
   end
 
   defp refuse(changeset, reason),
@@ -54,12 +61,86 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Prototype
     alias SdrAgent.Prototype.Authority
+    alias SdrAgent.Prototype.ProvisionScope
     alias SdrAgent.Prototype.Provisioning
 
+    @ref_key :sdr_prototype_provision_ref
+
+    # The scope lifecycle (design note r2, Codex 17a870c0): a fresh private
+    # ref at build (it overwrites any caller value); the scope is established
+    # in the before_action only after every check, bound to the inserted
+    # grant in an after_action listed before GrantBundle's (which fetches
+    # the bound scope by this ref and forwards it whole), and released by an
+    # around_transaction try/after that calls the action exactly once.
     defp provision(changeset, actor) do
+      ref = make_ref()
+
       changeset
+      |> Ash.Changeset.put_context(@ref_key, ref)
       |> Ash.Changeset.force_change_attributes(Provisioning.terms())
       |> Ash.Changeset.before_action(&mint(&1, actor))
+      |> Ash.Changeset.after_action(fn _changeset, grant -> bind(ref, grant) end)
+      |> Ash.Changeset.around_transaction(fn changeset, callback ->
+        try do
+          callback.(changeset)
+        after
+          ProvisionScope.release(ref)
+        end
+      end)
+    end
+
+    defp bind(ref, grant) do
+      case ProvisionScope.bind_grant(ref, grant) do
+        %ProvisionScope{} = bound ->
+          seam(:scope_bound, bound)
+          {:ok, grant}
+
+        {:error, _refused} ->
+          {:error, ProvisionRefused.exception(reason: :binding_mismatch)}
+      end
+    end
+
+    # Listed after GrantBundle: the allocation writes are done.
+    defp finish(changeset) do
+      Ash.Changeset.after_action(changeset, fn changeset, grant ->
+        seam(:after_allocations, ProvisionScope.fetch(changeset.context[@ref_key]))
+        {:ok, grant}
+      end)
+    end
+
+    defp establish(changeset, snapshot, actor) do
+      bindings = %{
+        tenant_id: snapshot.tenant_id,
+        binding_id: snapshot.id,
+        delegation_id: actor.id,
+        anchor_id: snapshot.operator_user_id,
+        planned: Provisioning.allocations()
+      }
+
+      case ProvisionScope.establish(changeset.context[@ref_key], bindings) do
+        %ProvisionScope{} = scope ->
+          seam(:scope_established, scope)
+          :ok
+
+        {:error, _refused} ->
+          {:error, :binding_mismatch}
+      end
+    end
+
+    if Application.compile_env(:sdr_agent, :prototype_test_seams, false) do
+      # Test-build-only, process-local hooks (Codex e006f70a D2):
+      # `{SdrAgent.Agents.Changes.ProvisionPrototype, name}`, a one-argument
+      # function; its result is ignored.
+      defp seam(name, arg) do
+        case Process.get({__MODULE__, name}) do
+          hook when is_function(hook, 1) -> hook.(arg)
+          _none -> nil
+        end
+
+        :ok
+      end
+    else
+      defp seam(_name, _arg), do: :ok
     end
 
     defp mint(changeset, actor) do
@@ -69,7 +150,8 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
       with {:ok, snapshot} <- live_operator(actor),
            :ok <- Provisioning.lock_binding(snapshot),
            :ok <- no_prior_grant(snapshot),
-           {:ok, %{}} <- check(worksheet, digest, changeset) do
+           {:ok, %{}} <- check(worksheet, digest, changeset),
+           :ok <- establish(changeset, snapshot, actor) do
         changeset
         |> Ash.Changeset.force_change_attributes(%{
           created_by_id: snapshot.operator_user_id,
@@ -122,5 +204,6 @@ defmodule SdrAgent.Agents.Changes.ProvisionPrototype do
     end
   else
     defp provision(changeset, _actor), do: refuse(changeset, :binding_mismatch)
+    defp finish(changeset), do: changeset
   end
 end

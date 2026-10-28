@@ -168,6 +168,7 @@ defmodule SdrAgent.Agents.ModelCallGrant do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change {GrantBundle, mode: :create}
+      change {SdrAgent.Agents.Changes.ProvisionPrototype, stage: :finish}
 
       change {AppendEvent,
               [
