@@ -28,6 +28,15 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
     under the action's own transaction and under an `SdrAgent.Audit.transaction/1`
     caller; **a fixed synthetic raise** propagates with the same cleanup
     (characterization controls of the unchanged throw and raise paths).
+  - **Through the public guarded wrappers** (Guard unchanged, by the
+    coordinator's disposition): at top level the action's rollback comes
+    first, no business row or event survives, and a returned Forbidden is
+    audited as exactly one `authz.denied` of the wrapper's resource and
+    action with the caller as the actor (coarse by contract: it cannot be
+    told apart from the action's own policy refusal), an Unknown as none;
+    under an `SdrAgent.Audit.transaction/1` owner the inner rollback throws
+    to the owner, Guard never observes a result and no denial is queued
+    (characterization, made explicit).
   - **Seam controls:** a scope for another edge is a no-op (the real read,
     no reach); a prior scope survives an inner scope's return, raise and
     throw; the build without test seams has no fault path (a twin compiled
@@ -414,6 +423,120 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
       assert post == [@rollback], "after the reach: #{inspect(post)}"
       assert result == {:raised, Ash.Error.Unknown}
       assert survivors(ctx) == before
+    end
+  end
+
+  # Codex 58b1feeb / efd6ca3e and the coordinator's disposition (Guard
+  # unchanged; S1's caveats): through the PUBLIC guarded wrappers
+  # (Sales.import_prototype_contact/2, import_prototype_lead/2:
+  # GuardedCall.create, guarded?: true), a returned reference-read error,
+  # with business atomicity and denial audit checked separately.
+  # - Top level: the action owns its transaction, so the action's rollback
+  #   comes first; Guard then sees the wrapper's result. A Forbidden result
+  #   is audited as exactly one authz.denied: the wrapper's resource and
+  #   action, the CALLER (the operator delegation) as the actor, this
+  #   tenant, after the rollback. Coarse by contract: indistinguishable from
+  #   the action's own policy refusal. An Unknown is not audited.
+  # - Under an Audit.transaction owner (characterization, made explicit):
+  #   the action inherits the owner's transaction, so its rollback-on-error
+  #   throws to that owner and Guard.run never observes a result; the owner
+  #   returns the rolled-back changeset and no denial is queued.
+  defp wrapper(Contact, attrs, actor), do: Sales.import_prototype_contact(attrs, actor: actor)
+  defp wrapper(Lead, attrs, actor), do: Sales.import_prototype_lead(attrs, actor: actor)
+
+  defp expected_denials(:forbidden), do: 1
+  defp expected_denials(:unknown), do: 0
+
+  @business ~w(sales.account.created sales.contact.created sales.lead.created)
+
+  defp business(ctx) do
+    rows = Map.delete(survivors(ctx), :events)
+    Map.put(rows, :business_events, Enum.map(@business, &length(events_of_type(ctx.tenant, &1))))
+  end
+
+  defp business_write?({verb, table, _code, _tag}),
+    do: verb in [:insert, :update, :delete] and table in [:accounts, :contacts, :leads]
+
+  defp business_write?(_marker), do: false
+
+  describe "through the public guarded wrappers (denial audit)" do
+    for name <- @edges, kind <- [:forbidden, :unknown] do
+      test "#{name}, returned #{kind}, top level: the action's rollback, then the wrapper's exact denial incidence",
+           ctx do
+        {resource, attrs, field, referenced, id} = edge(ctx, unquote(name))
+        {injected, class} = injection(unquote(kind), referenced)
+        ref = make_ref()
+        rows = business(ctx)
+        denials = length(events_of_type(ctx.tenant, "authz.denied"))
+        scope = {selector(ctx, field, referenced, id), ref, {:error, class}}
+
+        {stream, result} =
+          observed(fn -> with_fault(scope, fn -> wrapper(resource, attrs, ctx.actor) end) end)
+
+        {_pre, post} = after_reach(stream, ref)
+        assert post != :not_reached, "the #{field} read was not reached"
+
+        # Business atomicity: the action's own rollback first, no business
+        # write after the fault, no business row or creation event survives.
+        assert hd(post) == @rollback, "after the reach: #{inspect(post)}"
+        refute Enum.any?(post, &business_write?/1), "a business write followed the fault"
+        assert business(ctx) == rows
+
+        # Denial audit, separately: exactly the wrapper's denial incidence,
+        # attributed exactly (resource, action, caller, tenant).
+        new = Enum.drop(events_of_type(ctx.tenant, "authz.denied"), denials)
+
+        assert length(new) == expected_denials(unquote(kind)),
+               "#{field} #{unquote(kind)}: #{length(new)} new authz.denied; result #{inspect(outcome(result))}"
+
+        for denial <- new do
+          assert {denial.subject_resource, denial.action, denial.actor_type, denial.actor_id,
+                  denial.tenant_id} ==
+                   {inspect(resource), "import_prototype", :prototype_operator, ctx.actor.id,
+                    ctx.tenant.id}
+        end
+
+        # The returned error keeps its identity through the wrapper.
+        assert match?({:error, _}, result) and injected in leaves(elem(result, 1)),
+               "#{field}: the injected leaf is not in #{inspect(outcome(result))}"
+      end
+    end
+
+    for name <- [:contact_account, :lead_account], kind <- [:forbidden, :unknown] do
+      test "#{name}, returned #{kind}, under an Audit.transaction owner: the owner rolls back; no denial is queued (characterization)",
+           ctx do
+        {resource, attrs, field, referenced, id} = edge(ctx, unquote(name))
+        {injected, class} = injection(unquote(kind), referenced)
+        ref = make_ref()
+        rows = business(ctx)
+        denials = length(events_of_type(ctx.tenant, "authz.denied"))
+        scope = {selector(ctx, field, referenced, id), ref, {:error, class}}
+
+        {stream, result} =
+          observed(fn ->
+            with_fault(scope, fn ->
+              SdrAgent.Audit.transaction(fn -> wrapper(resource, attrs, ctx.actor) end)
+            end)
+          end)
+
+        {_pre, post} = after_reach(stream, ref)
+        assert post != :not_reached, "the #{field} read was not reached"
+
+        # The inner wrapper never returns: the owner's rollback is the only
+        # statement after the fault and nothing survives.
+        assert post == [@rollback], "after the reach: #{inspect(post)}"
+        assert business(ctx) == rows
+
+        assert match?({:error, %Ash.Changeset{}}, result),
+               "the owner returned #{inspect(outcome(result))}"
+
+        assert Enum.drop(events_of_type(ctx.tenant, "authz.denied"), denials) == [],
+               "a denial was queued although Guard.run never observed a result"
+
+        # The returned error keeps its identity in the rolled-back changeset.
+        assert injected in leaves(elem(result, 1)),
+               "#{field}: the injected leaf is not in the owner's rolled-back changeset"
+      end
     end
   end
 
