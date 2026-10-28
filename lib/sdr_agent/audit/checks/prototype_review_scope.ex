@@ -67,7 +67,7 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
   @spec context(map()) :: map()
   def context(%{tenant_id: tenant_id, delegation_id: delegation_id, sha256s: sha256s} = scope)
       when is_binary(tenant_id) and is_binary(delegation_id) and is_list(sha256s) do
-    if sha256s != [] and Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)) do
+    if hashes?(sha256s) do
       %{@marker => %{scope | sha256s: Enum.uniq(sha256s)}}
     else
       raise ArgumentError, "a prototype review scope needs one or more 32-byte sha256s"
@@ -76,16 +76,17 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
 
   def context(_other), do: raise(ArgumentError, "not a prototype review scope")
 
-  @doc "The well-formed scope in `context`, if any."
+  @doc """
+  The well-formed scope in `context`, if any: binary tenant and delegation
+  and a non-empty proper list of 32-byte hashes only. A forged or malformed
+  scope (any other shape or member) is `:error`; it never raises.
+  """
   @spec fetch(term()) :: {:ok, map()} | :error
   def fetch(context) when is_map(context) do
     case Map.get(context, @marker) do
       %{tenant_id: tenant_id, delegation_id: delegation_id, sha256s: sha256s} = scope
-      when is_binary(tenant_id) and is_binary(delegation_id) and is_list(sha256s) and
-             sha256s != [] ->
-        if Enum.all?(sha256s, &(is_binary(&1) and byte_size(&1) == 32)),
-          do: {:ok, scope},
-          else: :error
+      when is_binary(tenant_id) and is_binary(delegation_id) ->
+        if hashes?(sha256s), do: {:ok, scope}, else: :error
 
       _other ->
         :error
@@ -93,4 +94,16 @@ defmodule SdrAgent.Audit.Checks.PrototypeReviewScope do
   end
 
   def fetch(_context), do: :error
+
+  # A non-empty PROPER list of 32-byte binaries. Anything else, an improper
+  # tail included, is false; it never raises (Codex 6ccaa32f R1).
+  defp hashes?([_ | _] = sha256s), do: all_hashes?(sha256s)
+  defp hashes?(_other), do: false
+
+  defp all_hashes?([]), do: true
+
+  defp all_hashes?([sha256 | rest]) when is_binary(sha256) and byte_size(sha256) == 32,
+    do: all_hashes?(rest)
+
+  defp all_hashes?(_improper_or_invalid), do: false
 end
