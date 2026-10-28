@@ -504,11 +504,19 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
     assert {:ok, approval} = operator_approve(ctx, ctx.draft)
     delivery = delivery_of!(ctx, approval)
 
-    propagated_attempt!(ctx, delivery, fn _op ->
-      tamper!("ALTER TABLE delivery_receipts RENAME TO delivery_receipts_unavailable")
-    end)
+    # The source is restored right after the drain, before the oracle's
+    # checks read the receipts.
+    propagated_attempt!(
+      ctx,
+      delivery,
+      fn _op ->
+        tamper!("ALTER TABLE delivery_receipts RENAME TO delivery_receipts_unavailable")
+      end,
+      after_drain: fn ->
+        tamper!("ALTER TABLE delivery_receipts_unavailable RENAME TO delivery_receipts")
+      end
+    )
 
-    tamper!("ALTER TABLE delivery_receipts_unavailable RENAME TO delivery_receipts")
     no_capture!(ctx, delivery)
   end
 

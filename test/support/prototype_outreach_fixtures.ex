@@ -312,12 +312,15 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
   6. `"S4-ORACLE refused: capture written"`: no captured, accepted or
      delivered receipt or receipt event.
 
-  `opts[:arm]` is passed to `with_capture!/2`. Nothing is rescued except
+  `opts[:arm]` is passed to `with_capture!/2`. `opts[:after_drain]` runs in
+  the calling process right after the drain, before any check (for example,
+  restoring a synthetic fault). Nothing is rescued except
   the drain's own raise, of which only the module is kept and asserted.
   """
   def refused_attempt!(ctx, delivery, code, fun \\ fn _operation -> :ok end, opts \\ []) do
     attempt = prerequisites!(ctx, delivery, "S4-ORACLE refused: prerequisites")
     {ref, drained} = with_capture!(fun, opts)
+    Keyword.get(opts, :after_drain, fn -> :ok end).()
     seen = messages(ref)
     step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE refused: reach")
     step!(match?({:ok, _counts}, drained), "S4-ORACLE refused: protocol")
@@ -356,13 +359,15 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     never printed. The operation stays attempting on this attempt;
   - `"S4-ORACLE propagated: capture written"`.
 
-  `opts[:arm]` is passed to `with_capture!/2`. It does not, and must not,
+  `opts[:arm]` and `opts[:after_drain]` are as in `refused_attempt!/5`. It
+  does not, and must not,
   tell a lossy database failure from a programming error.
   """
   def propagated_attempt!(ctx, delivery, fun, opts \\ []) do
     class = Keyword.get(opts, :class, Ash.Error.Unknown)
     attempt = prerequisites!(ctx, delivery, "S4-ORACLE propagated: prerequisites")
     {ref, drained} = with_capture!(fun, opts)
+    Keyword.get(opts, :after_drain, fn -> :ok end).()
     seen = messages(ref)
     step!(reach(seen) == expected_reach(delivery, attempt, :ok), "S4-ORACLE propagated: reach")
     step!(match?({:ok, _counts}, drained), "S4-ORACLE propagated: protocol")
