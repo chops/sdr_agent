@@ -41,14 +41,12 @@ defmodule SdrAgent.Prototype.BootCheck do
   read `config :sdr_agent, SdrAgent.Prototype, switch:` only.
 
   In a build without the prototype authority (the production build) any
-  switch other than `:off` is `:switch_outside_dev`, and the runtime stays
-  ordinary.
+  switch other than `:off` is `:switch_outside_dev` before its shape is
+  examined or the binding table is read (Codex 422c47dc R1); `:off` keeps
+  the ordinary row and the binding refusal, and the runtime stays ordinary.
   """
 
   alias SdrAgent.Operations.PrototypeDatabaseBinding
-
-  @policy_id "d237-prototype/1"
-  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   @doc "The closed set of boot refusal codes (`SdrAgent.Prototype.SafeLog.reasons(:boot)`)."
   @spec reasons() :: [atom()]
@@ -60,7 +58,7 @@ defmodule SdrAgent.Prototype.BootCheck do
           | {:ok, :prototype, SdrAgent.Prototype.Binding.t()}
           | {:error, atom()}
   def check(switch) do
-    with {:ok, switch} <- switch_shape(switch),
+    with {:ok, switch} <- admit(switch),
          {:ok, rows} <- binding_rows() do
       decide(switch, rows)
     end
@@ -98,15 +96,6 @@ defmodule SdrAgent.Prototype.BootCheck do
     error in SdrAgent.Prototype.BootCheck.Refusal -> {:error, error.code}
   end
 
-  defp switch_shape(:off), do: {:ok, :off}
-
-  defp switch_shape(%{policy_id: @policy_id, instance_id: instance_id} = switch)
-       when map_size(switch) == 2 and is_binary(instance_id) do
-    if Regex.match?(@uuid, instance_id), do: {:ok, switch}, else: {:error, :switch_invalid}
-  end
-
-  defp switch_shape(_switch), do: {:error, :switch_invalid}
-
   # The boot check's own read of the binding rows (at most two), as the
   # audit kernel; a failed read is a closed refusal, never a dump.
   defp binding_rows do
@@ -122,14 +111,26 @@ defmodule SdrAgent.Prototype.BootCheck do
     _error -> {:error, :binding_not_exact}
   end
 
-  defp decide(:off, []), do: {:ok, :ordinary}
-  defp decide(:off, [_ | _]), do: {:error, :binding_without_switch}
-  defp decide(_switch, []), do: {:error, :binding_absent}
-  defp decide(switch, [row]), do: exact(switch, row)
-  defp decide(_switch, _rows), do: {:error, :binding_not_exact}
-
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Prototype.Authority
+
+    @policy_id "d237-prototype/1"
+    @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+    defp admit(:off), do: {:ok, :off}
+
+    defp admit(%{policy_id: @policy_id, instance_id: instance_id} = switch)
+         when map_size(switch) == 2 and is_binary(instance_id) do
+      if Regex.match?(@uuid, instance_id), do: {:ok, switch}, else: {:error, :switch_invalid}
+    end
+
+    defp admit(_switch), do: {:error, :switch_invalid}
+
+    defp decide(:off, []), do: {:ok, :ordinary}
+    defp decide(:off, [_ | _]), do: {:error, :binding_without_switch}
+    defp decide(_switch, []), do: {:error, :binding_absent}
+    defp decide(switch, [row]), do: exact(switch, row)
+    defp decide(_switch, _rows), do: {:error, :binding_not_exact}
 
     defp exact(switch, row) do
       with :ok <- expect(row.instance_id == switch.instance_id, :instance_mismatch),
@@ -223,7 +224,15 @@ defmodule SdrAgent.Prototype.BootCheck do
       defp configured_switch, do: app_switch()
     end
   else
-    defp exact(_switch, _row), do: {:error, :switch_outside_dev}
+    # The production build (Codex 422c47dc R1): any switch other than `:off`
+    # is refused here, before its shape is examined or the binding table is
+    # read, so a malformed, unbound or unreadable switch has the one code.
+    defp admit(:off), do: {:ok, :off}
+    defp admit(_switch), do: {:error, :switch_outside_dev}
+
+    defp decide(:off, []), do: {:ok, :ordinary}
+    defp decide(:off, [_ | _]), do: {:error, :binding_without_switch}
+
     defp normalize({:ok, :ordinary}), do: {:ok, :ordinary}
     defp normalize({:error, code}), do: {:error, code}
     defp fix({:ok, :ordinary}), do: :ok
