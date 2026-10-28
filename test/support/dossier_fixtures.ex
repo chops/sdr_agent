@@ -13,6 +13,9 @@ defmodule SdrAgent.DossierFixtures do
   - `encode/1`, `sha256/1`; `scratch_dir!/1`, `write!/3`.
   - `seed_contents/0` and `write_seed_dir!/2` build a valid seed directory
     and return its four digests.
+  - `stored_payload!/3` and `stored_provenance!/2` store bytes (the synthetic
+    provenance) as a real Payload through the genuine scoped operator store
+    and return the digest and the exact seed provenance note.
   """
 
   @checked_at "2026-10-27T10:00:00-06:00"
@@ -475,5 +478,54 @@ defmodule SdrAgent.DossierFixtures do
 
     {:ok, rows} = result
     rows
+  end
+
+  @note_prefix "d237 seed provenance sha256:"
+
+  @doc "The fixed prefix of the seed revision's provenance note (D1)."
+  def note_prefix, do: @note_prefix
+
+  @doc """
+  Stores `bytes` as a Payload through S1's genuine scoped operator store
+  (`:store_prototype_input` under a `PrototypeInputScope` for `purpose`, the
+  exact digest of those bytes), as `actor`. Returns the lowercase hex digest
+  or fails the test as a prerequisite. No direct persistence.
+  """
+  def stored_payload!(actor, bytes, purpose \\ :seed_provenance) do
+    digest = :crypto.hash(:sha256, bytes)
+
+    scope =
+      SdrAgent.Audit.Checks.PrototypeInputScope.context(%{
+        tenant_id: actor.tenant_id,
+        delegation_id: actor.id,
+        purpose: purpose,
+        sha256s: [digest]
+      })
+
+    result =
+      SdrAgent.Audit.Payload
+      |> Ash.Changeset.for_create(
+        :store_prototype_input,
+        %{content: bytes, content_type: "application/json"},
+        actor: actor,
+        context: scope
+      )
+      |> Ash.create()
+
+    ExUnit.Assertions.assert(
+      match?({:ok, _}, result),
+      "prerequisite: the scoped Payload store returned #{inspect(result)}"
+    )
+
+    Base.encode16(digest, case: :lower)
+  end
+
+  @doc """
+  The synthetic seed's provenance bytes stored as a real Payload (see
+  `stored_payload!/3`): `%{sha256: hex, note: "d237 seed provenance sha256:" <> hex}`.
+  """
+  def stored_provenance!(actor, contents \\ seed_contents()) do
+    hex = stored_payload!(actor, seed_read(contents).provenance_bytes)
+    %{sha256: hex, note: @note_prefix <> hex}
   end
 end

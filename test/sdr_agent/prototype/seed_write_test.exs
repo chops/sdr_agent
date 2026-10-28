@@ -294,9 +294,13 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
       assert count("settings_revisions") == 0
     end
 
+    # Codex b8d624fe: the seed action is given its valid note (the stored
+    # provenance Payload's exact reference), so a missing-note error cannot
+    # stand in for content-rule parity; the comparison is of content errors.
     test "the seed action's content errors equal :create_revision's (field and rule, no value)",
          ctx do
       content = %{"text" => "Sign as the GTMscape team.\u0007"}
+      note = F.stored_provenance!(ctx.actor).note
 
       errors = fn action, args ->
         SdrAgent.Agents.SettingsRevision
@@ -306,7 +310,8 @@ defmodule SdrAgent.Prototype.SeedWriteTest do
         |> Enum.sort()
       end
 
-      seed_errors = errors.(:seed_prototype, %{kind: :writing_guide, content: content})
+      seed_errors =
+        errors.(:seed_prototype, %{kind: :writing_guide, content: content, note: note})
 
       ordinary =
         errors.(:create_revision, %{kind: :writing_guide, content: content, expected_number: 0})
