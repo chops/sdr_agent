@@ -638,11 +638,13 @@ defmodule SdrAgent.Prototype.DossierImportTest do
 
     test "any other returned error keeps its identity: raised, never :import_failed", ctx do
       # The observed lossy shape (a binary leaf) and two wrapped programming
-      # errors are all raised as the injected Ash error itself.
-      for wrapped <- [
-            "formatted failure text",
-            "synthetic programming error",
-            %RuntimeError{message: "synthetic programming error"}
+      # errors are all raised as the injected Ash error itself: the class
+      # first, then (Codex d59fb7a3) the exact caught == injected exception,
+      # so a newly constructed Ash.Error.Unknown cannot pass.
+      for {label, wrapped} <- [
+            neutral_binary: "formatted failure text",
+            programming_binary: "synthetic programming error",
+            programming_exception: %RuntimeError{message: "synthetic programming error"}
           ] do
         error =
           Ash.Error.Unknown.exception(
@@ -650,8 +652,29 @@ defmodule SdrAgent.Prototype.DossierImportTest do
           )
 
         result = count_faulted(ctx, {:error, error})
-        assert match?({:raised, Ash.Error.Unknown, _, _}, result), "returned #{inspect(result)}"
+
+        assert match?({:raised, Ash.Error.Unknown, _, _}, result),
+               "#{label}: returned #{inspect(result)}"
+
+        assert raises_injected?(ctx, error),
+               "#{label}: the caught exception is not the injected one"
       end
+    end
+  end
+
+  # Whether cap_used, with its count read replaced by {:error, injected},
+  # raises exactly `injected` (the same exception, not a reconstruction). A
+  # boolean, so no assertion ever prints the exception or its contents.
+  defp raises_injected?(ctx, injected) do
+    Process.put({@import, :count_fault}, {:error, injected})
+
+    try do
+      call(@import, :cap_used, [ctx.actor])
+      false
+    rescue
+      caught -> caught == injected
+    after
+      Process.delete({@import, :count_fault})
     end
   end
 
