@@ -144,12 +144,17 @@ defmodule SdrAgent.Prototype.Output do
   # Startup intent is refusal-only: any presence of either switch variable,
   # even partial, empty or malformed, refuses; boot verification has not run.
   defp prototype_switch? do
-    Prototype.runtime() == :prototype or Enum.any?(@switch, &(System.get_env(&1) != nil))
+    prototype_runtime?() or Enum.any?(@switch, &(System.get_env(&1) != nil))
   end
 
   defp prototype_runtime do
-    if Prototype.runtime() == :prototype, do: :ok, else: {:error, :not_prototype_runtime}
+    if prototype_runtime?(), do: :ok, else: {:error, :not_prototype_runtime}
   end
+
+  # `runtime/0` is `:ordinary | :prototype`. Asking "not ordinary" is the same
+  # question, and the production build (whose facade is always `:ordinary`)
+  # compiles it without a comparison the type checker knows is always false.
+  defp prototype_runtime?, do: Prototype.runtime() != :ordinary
 
   defp rendered_message?(bytes) do
     case :binary.split(bytes, "\r\n\r\n") do
