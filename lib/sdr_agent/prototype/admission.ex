@@ -44,23 +44,40 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         discards exactly the entries made during its call. A trusted
         in-process convention, not a capability against server code.
       * **Launch** (`launch/3`, under `Admission.lock_charge/1` and the head,
-        so a refusal keeps its charge): a `:proof` run, the live binding, the
-        active gate and the absent store as above, then the
-        `prototype_authority` recorded by the invocation's one original
-        `model.invocation.reserved` event: a missing, duplicated or non-map
-        record is `authority_unrecorded`. A present record is refused
-        `authority_mismatch` until the launch increment adds its 14-key
-        comparison and the charged grant's current checks (staged after
-        this admission increment; Codex 3b2e8c61).
+        so a refusal keeps its charge; amendment item 4 "Re-derived at
+        launch"): a `:proof` run, the live binding, the active gate and the
+        absent store as above; then the `prototype_authority` recorded by
+        the invocation's one original `model.invocation.reserved` event (a
+        missing, duplicated or non-map record is `authority_unrecorded`);
+        then that record as a closed dictionary: exactly the 14 keys, each
+        strictly typed (`grant_revision` a non-negative integer, every
+        other value a string; no coercion), else `authority_mismatch`; then
+        every recorded value but the revision against the live binding and
+        the invocation's own charge (profile, purpose, grant, allocation),
+        the general keys first (`authority_mismatch`), then the operator
+        anchor (`operator_mismatch`), then the witness mode
+        (`witness_mode_mismatch`); then the charged grant's current row:
+        this binding's provenance grant, its status, the anchor as creator
+        and updater and the exact terms and allocation set, in the
+        registration's order and codes, and finally the recorded revision
+        against the current one (`grant_changed`). The ordinary launch
+        checks that follow (switch fence, grant window, allocation) are
+        unchanged, so a launch at the window's end keeps
+        `grant_ineligible_at_launch`/`grant_expired`.
 
     The release decision (`SdrAgent.Prototype.Release`) reuses `live/0` and
     `recorded/1`.
     """
 
+    require Ash.Query
+
     alias SdrAgent.Agents.Admission.Gate
     alias SdrAgent.Agents.Checks.AdmissionContext.Registration
+    alias SdrAgent.Agents.ModelCallAllocation
+    alias SdrAgent.Agents.ModelCallGrant
     alias SdrAgent.Agents.Witness
     alias SdrAgent.Audit.Canonical
+    alias SdrAgent.Audit.Kernel, as: AuditKernel
     alias SdrAgent.Prototype
     alias SdrAgent.Prototype.Provisioning
     alias SdrAgent.Repo
@@ -93,9 +110,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc """
     The launch gate in prototype runtime for the owned reserved `invocation`
-    of the locked `run`, its charge share-locked: `{:error, reason, check}`
-    (see the moduledoc; no launch is admitted until reservations record
-    their authority).
+    of the locked `run`, its charged grant and allocation share-locked
+    (`Admission.lock_charge/1`) and the head held: `:ok` or
+    `{:error, reason, check}` (see the moduledoc for the order and codes).
     """
     def launch(run, invocation, observation) do
       with :ok <- not_proof(run),
@@ -103,10 +120,81 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            :ok <- same_tenant(run, live),
            :ok <- gate_active(),
            :ok <- witness_absent(live.binding, observation),
-           {:ok, _recorded} <- recorded(invocation) do
-        refuse(:authority_mismatch)
+           {:ok, recorded} <- recorded(invocation),
+           :ok <- closed_authority(recorded),
+           :ok <- recorded_values(recorded, live, invocation),
+           {:ok, grant, allocations} <- charged_grant(invocation),
+           :ok <- provenance(grant, live),
+           :ok <- provisioned(grant, allocations, live) do
+        same_revision(recorded, grant)
       end
     end
+
+    @authority_keys ~w(allocation_id binding_id dataset_class entry_sha256 funding_id grant_id
+                       grant_revision instance_id operator_user_id policy_id profile_id purpose
+                       tenant_id witness_mode)
+
+    # The closed dictionary: exactly the 14 keys, each strictly typed.
+    defp closed_authority(recorded) do
+      if Enum.sort(Map.keys(recorded)) == @authority_keys and
+           Enum.all?(recorded, fn {key, value} -> typed?(key, value) end),
+         do: :ok,
+         else: refuse(:authority_mismatch)
+    end
+
+    defp typed?("grant_revision", value), do: is_integer(value) and value >= 0
+    defp typed?(_key, value), do: is_binary(value)
+
+    # Every recorded value but the revision, against the live binding and
+    # the invocation's own charge: the general keys first, then the operator
+    # anchor, then the witness mode, each with its own code.
+    @value_order (@authority_keys -- ~w(grant_revision operator_user_id witness_mode)) ++
+                   ~w(operator_user_id witness_mode)
+
+    defp recorded_values(recorded, live, invocation) do
+      expected =
+        expected(
+          live,
+          invocation,
+          %{id: invocation.grant_id, revision: nil},
+          invocation.allocation_id
+        )
+
+      case Enum.find(@value_order, &(Map.fetch!(recorded, &1) != Map.fetch!(expected, &1))) do
+        nil -> :ok
+        "operator_user_id" -> refuse(:operator_mismatch)
+        "witness_mode" -> refuse(:witness_mode_mismatch)
+        _other -> refuse(:authority_mismatch)
+      end
+    end
+
+    # The charged grant's current row and its allocations (id order), both
+    # share-locked by the launch, read as the kernel in the invocation's
+    # tenant (as `Provisioning.lock_grant/2`, without a lock clause).
+    defp charged_grant(%{grant_id: grant_id, tenant_id: tenant_id}) when is_binary(grant_id) do
+      opts = AuditKernel.opts(tenant_id)
+
+      with {:ok, %ModelCallGrant{} = grant} <-
+             ModelCallGrant
+             |> Ash.Query.for_read(:read, %{}, opts)
+             |> Ash.Query.filter(id == ^grant_id and tenant_id == ^tenant_id)
+             |> Ash.read_one(),
+           {:ok, allocations} <-
+             ModelCallAllocation
+             |> Ash.Query.for_read(:read, %{}, opts)
+             |> Ash.Query.filter(grant_id == ^grant_id and tenant_id == ^tenant_id)
+             |> Ash.Query.sort(id: :asc)
+             |> Ash.read() do
+        {:ok, grant, allocations}
+      else
+        _missing_or_error -> refuse(:grant_not_eligible)
+      end
+    end
+
+    defp charged_grant(_invocation), do: refuse(:grant_not_eligible)
+
+    defp same_revision(%{"grant_revision" => revision}, %{revision: revision}), do: :ok
+    defp same_revision(_recorded, _grant), do: refuse(:grant_changed)
 
     ## This binding's grant (C2 r2 provenance; Codex ff812f6d ruling a)
 
@@ -137,12 +225,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     (mechanism note r3 B). `{:ok, registration, authority}` or
     `{:error, reason, check}` (`grant_not_eligible`, `operator_mismatch`,
     `binding_mismatch`). The authority is never a caller input.
+
+    An INTERNAL producer helper, not an admission API: its sole caller is
+    `SdrAgent.Agents.Admission.admit/5`, after the room check, under the
+    reservation's locks and head (a source and xref guard in
+    `test/sdr_agent/prototype/admission_register_guard_test.exs` pins it).
     """
     def register(run, call, {grant, allocation}, admitted_at) do
       with {:ok, live} <- live(),
            :ok <- same_tenant(run, live),
            :ok <- provenance(grant, live),
-           :ok <- provisioned(grant, live) do
+           :ok <- provisioned(grant, grant.allocations, live) do
         authority = expected(live, call, grant, allocation.id)
         marker = "sdr_admission.r" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
         Repo.query!("SELECT set_config($1, '1', true)", [marker])
@@ -181,7 +274,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     # Status, then the anchor as creator and updater, then the exact terms
     # and allocation set (Codex ff812f6d ruling b; the revision is recorded).
-    defp provisioned(grant, %{binding: binding}) do
+    defp provisioned(grant, allocations, %{binding: binding}) do
       cond do
         grant.status != :active ->
           refuse(:grant_not_eligible)
@@ -190,7 +283,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
             grant.updated_by_id != binding.operator_user_id ->
           refuse(:operator_mismatch)
 
-        not Provisioning.unchanged?(grant, grant.allocations) ->
+        not Provisioning.unchanged?(grant, allocations) ->
           refuse(:grant_not_eligible)
 
         true ->
@@ -278,7 +371,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc """
     Runs `fun`, then discards ONLY the registrations this process created
     during it (by owned ref), whatever `fun` returns or raises: its result is
-    returned and its raise re-raised unchanged.
+    returned and its raise re-raised unchanged. It always reads this
+    process's registry before and after `fun`, in ordinary runtime too
+    (where no registration is created, so nothing is discarded).
     """
     def with_owned_registrations(fun) when is_function(fun, 0) do
       before = registry() |> Map.keys() |> MapSet.new()

@@ -109,8 +109,11 @@ defmodule SdrAgent.Agents.Changes.AdmissionCharge do
       end
     end
 
-    # Pure verification at build time: the registration's own entry, then
-    # the reservation's run, provider, profile, purpose and the charge.
+    # Read-only verification at build time (nothing is consumed): the
+    # registration's own entry and these facts (the reservation's run,
+    # provider, profile, purpose and the charge) are compared before any
+    # SQL, so a malformed or another process's registration is refused
+    # without a query; only then is the transaction state read.
     defp build_facts(changeset, {grant_id, allocation_id, at}) do
       changeset
       |> attributes(@build_facts)
