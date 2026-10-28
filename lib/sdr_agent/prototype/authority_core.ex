@@ -88,8 +88,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @funded_ceiling 50
     @window_starts_at "2026-10-28T02:38:32.000000Z"
     @worksheet_max_bytes 16_384
-    # Each counts-only evidence receipt: the worksheet's own bound (DECISION
-    # requested: IF-2 states no evidence size; 16 KiB proposed).
+    # A conservative processing bound per counts-only evidence receipt (the
+    # worksheet's own 16 KiB; accepted by Codex 47825d4a). It is not an IF-2
+    # value: IF-2 states no evidence size. Larger is :budget_unbounded.
     @evidence_max_bytes 16_384
     @worksheet_keys ~w(schema shared_total window_starts_at as_of routes previous_bindings)
     @route_keys ~w(route basis consumed evidence)
