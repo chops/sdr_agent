@@ -48,6 +48,30 @@ defmodule SdrAgent.Prototype.TaskBoundary do
   @spec run(task(), term(), (-> :ok | :refused)) :: :ok | {:error, :not_implemented}
   def run(_task, _attached, _body), do: red({:error, :not_implemented})
 
+  @typedoc "One observed entry-guard result: what the guard returned, or the kind it raised."
+  @type observed :: {:returned, term()} | {:raised, :error | :exit | :throw}
+
+  @doc """
+  The pure entry decision of contract r6 steps 4a and 4b (deny-only).
+
+  `repo` is the observed `SdrAgent.Prototype.RepoState.repo_state/0`
+  result, called dynamically (an absent module is observed as
+  `{:raised, :error}`); `snapshot` is the observed
+  `SdrAgent.AgentEnv.OperationSnapshot.current/0` result. The answer is
+  `:clear` only when `repo` is `{:returned, :not_started}` or
+  `{:returned, {:started, false}}` AND `snapshot` is `{:returned, :inert}`
+  or `{:returned, {:error, :snapshot_not_in_use}}`; every other pair,
+  malformed observations included, is `:refuse`. The observations are
+  bounded and non-linearizable (contract r6); the decision never reads,
+  formats or retains a raised value.
+
+  Deny-only declaration (D-237 S1b I2 RED): returns
+  `{:error, :not_implemented}`.
+  """
+  @spec entry_decision(observed() | term(), observed() | term()) ::
+          :clear | :refuse | {:error, :not_implemented}
+  def entry_decision(_repo, _snapshot), do: red({:error, :not_implemented})
+
   # Deny-only stub result, typed dynamic() so callers' success clauses
   # compile against it (Elixir 1.20 infers literal returns); read-only,
   # nothing sets the key.
