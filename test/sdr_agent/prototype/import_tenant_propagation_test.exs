@@ -296,6 +296,19 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
     {leaf, Ash.Error.Unknown.exception(errors: [leaf])}
   end
 
+  # The injected leaf as an action's returned error class carries it. A
+  # validation's returned class is kept unchanged in the changeset (so an
+  # owner's rolled-back changeset holds `injected` itself), but create's
+  # error return (create.ex:228-230, Ash.Error.to_error_class) passes the
+  # class through Splode's stacktrace filter, Ash.Error's ["Ash.",
+  # "Splode."]: the leaf's frames are filtered and every other field is
+  # unchanged. Exactly that, nothing looser.
+  defp returned(%{stacktrace: %Splode.Stacktrace{stacktrace: frames}} = leaf)
+       when is_list(frames) do
+    filtered = Splode.filter_stacktrace(frames, Ash.Error.__stacktrace_filters__())
+    %{leaf | stacktrace: %Splode.Stacktrace{stacktrace: filtered}}
+  end
+
   defp sibling_succeeded?(:lead_account, pre), do: {:select, :contacts, :ok, nil} in pre
   defp sibling_succeeded?(_edge, _pre), do: true
 
@@ -332,7 +345,7 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
         refute absent_refusal?(result, field),
                "#{field}: the returned #{unquote(kind)} was relabelled as absence"
 
-        assert injected in leaves(elem(result, 1)),
+        assert returned(injected) in leaves(elem(result, 1)),
                "#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
@@ -497,7 +510,7 @@ defmodule SdrAgent.Prototype.ImportTenantPropagationTest do
         end
 
         # The returned error keeps its identity through the wrapper.
-        assert match?({:error, _}, result) and injected in leaves(elem(result, 1)),
+        assert match?({:error, _}, result) and returned(injected) in leaves(elem(result, 1)),
                "#{field}: the injected leaf is not in #{inspect(outcome(result))}"
       end
     end
