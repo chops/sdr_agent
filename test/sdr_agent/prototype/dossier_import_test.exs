@@ -31,14 +31,24 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     n
   end
 
-  # A result, or any raise captured as {:raised, module, frames}: the
-  # exception module and the first three stack frames as {module, function,
-  # arity, line}, never a value, so a failure names where it was raised.
+  # A result, or any raise captured as {:raised, module, frames, shape}: the
+  # exception module, the first three stack frames as {module, function,
+  # arity, line}, and the shape of an unmatched term (tuple tags, atoms and
+  # struct names only), never a value, so a failure names where and on what
+  # it was raised.
   defp capture(fun) do
     fun.()
   rescue
-    error -> {:raised, error.__struct__, frames(__STACKTRACE__)}
+    error ->
+      {:raised, error.__struct__, frames(__STACKTRACE__), shape(Map.get(error, :term))}
   end
+
+  defp shape(term) when is_tuple(term), do: term |> Tuple.to_list() |> Enum.map(&shape/1)
+  defp shape(%module{}), do: module
+  defp shape(term) when is_atom(term), do: term
+  defp shape(term) when is_list(term), do: :list
+  defp shape(term) when is_map(term), do: :map
+  defp shape(_term), do: :value
 
   defp frames(stacktrace) do
     for {module, function, arity, location} <- Enum.take(stacktrace, 3),
