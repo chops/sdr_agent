@@ -68,6 +68,106 @@ defmodule SdrAgent.Prototype.DelegationTest do
     end
   end
 
+  # The unique-race mechanism, proved apart from the replay count (Codex
+  # ca4624a1 A) with two test-seam keys of the authority, read only in a
+  # test-seam build: one makes the in-transaction lookup miss an existing
+  # session (a competitor that committed after the lookup), the other runs
+  # a hook just before the create. No external concurrency run.
+  describe "enter_session/2 unique race" do
+    @authority SdrAgent.Prototype.Authority
+
+    defp created_events(tenant),
+      do: length(events_of_type(tenant, "prototype.delegation.created"))
+
+    test "a unique conflict re-reads after the rollback and returns the existing id, writing nothing" do
+      fx = bound!()
+      first = Prototype.enter_session(:codex_cli, "codex-session:race-0001")
+      assert match?({:ok, _id}, first), "prerequisite: first session: #{inspect(first)}"
+      {:ok, id} = first
+      rows_before = delegations(fx.binding.id)
+      events_before = created_events(fx.tenant)
+
+      Process.put({@authority, :miss_session_lookup}, true)
+      result = Prototype.enter_session(:codex_cli, "codex-session:race-0001")
+
+      assert result == {:ok, id}, "conflict re-read: #{inspect(result)}"
+      assert delegations(fx.binding.id) == rows_before
+      assert created_events(fx.tenant) == events_before
+    end
+
+    test "an unrelated failure after the lookup is never taken for a replay" do
+      fx = bound!()
+      first = Prototype.enter_session(:codex_cli, "codex-session:race-0002")
+      assert match?({:ok, _id}, first), "prerequisite: first session: #{inspect(first)}"
+      rows_before = delegations(fx.binding.id)
+      events_before = created_events(fx.tenant)
+
+      Process.put({@authority, :miss_session_lookup}, true)
+
+      Process.put({@authority, :before_session_create}, fn _snapshot ->
+        Repo.rollback(:injected)
+      end)
+
+      result = Prototype.enter_session(:codex_cli, "codex-session:race-0002")
+
+      assert result == {:error, :binding_mismatch}, "unrelated failure: #{inspect(result)}"
+      assert delegations(fx.binding.id) == rows_before
+      assert created_events(fx.tenant) == events_before
+    end
+  end
+
+  # Codex a95a89fb R1: a nested Audit.transaction is a plain nested
+  # Repo.transaction, not a savepoint, so the recovery path cannot run
+  # inside a caller's transaction. The entry refuses an already-open
+  # transaction early: a fixed code, no query, no write, and the caller's
+  # transaction stays usable.
+  describe "enter_session/2 inside an already-open transaction" do
+    @authority SdrAgent.Prototype.Authority
+
+    defp in_outer_transaction(fun) do
+      SdrAgent.Audit.transaction(fn ->
+        inner = fun.()
+        {inner, Repo.query("SELECT 1")}
+      end)
+    end
+
+    test "with a forced lookup miss on an existing session: refused early, the outer transaction usable" do
+      fx = bound!()
+      first = Prototype.enter_session(:codex_cli, "codex-session:nested-0001")
+      assert match?({:ok, _id}, first), "prerequisite: first session: #{inspect(first)}"
+      rows_before = delegations(fx.binding.id)
+      events_before = length(events_of_type(fx.tenant, "prototype.delegation.created"))
+
+      Process.put({@authority, :miss_session_lookup}, true)
+
+      outer =
+        in_outer_transaction(fn ->
+          Prototype.enter_session(:codex_cli, "codex-session:nested-0001")
+        end)
+
+      assert match?({:ok, {{:error, :binding_mismatch}, {:ok, %{rows: [[1]]}}}}, outer),
+             "nested entry: #{inspect(outer)}"
+
+      assert delegations(fx.binding.id) == rows_before
+      assert length(events_of_type(fx.tenant, "prototype.delegation.created")) == events_before
+    end
+
+    test "a new session inside an open transaction is refused early, writing nothing" do
+      fx = bound!()
+      rows_before = delegations(fx.binding.id)
+
+      outer =
+        in_outer_transaction(fn ->
+          Prototype.enter_session(:codex_cli, "codex-session:nested-0002")
+        end)
+
+      assert match?({:ok, {{:error, :binding_mismatch}, {:ok, %{rows: [[1]]}}}}, outer),
+             "nested new entry: #{inspect(outer)}"
+
+      assert delegations(fx.binding.id) == rows_before
+    end
+  end
+
   describe "the setup-only and task-entry actions" do
     test ":enter and :create_setup are refused for an operator, a user and an auditor" do
       fx = bound!(auditor: true, enter_runtime: false)

@@ -13,9 +13,8 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
   without the prototype authority (`:prototype_authority_compiled` unset,
   the production build) it never matches and has no `context/1`.
 
-  Stage (D-237 S1 B2a): the `:setup` positive branch is implemented. The
-  `:task_entry` marker still never matches (its positive branch comes with
-  `PrototypeDelegation :enter`), and neither does any other marker option.
+  Stage (D-237 S1): the `:setup` (B2a) and `:task_entry` (session) positive
+  branches are implemented; any other marker option never matches.
   """
   use Ash.Policy.SimpleCheck
 
@@ -34,11 +33,11 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
     @impl true
     def match?(actor, %{subject: %{context: context}} = authorizer, opts) when is_map(context) do
       case opts[:marker] do
-        :setup ->
+        marker when marker in [:setup, :task_entry] ->
           KernelContext.match?(actor, authorizer, []) and
-            Map.get(context, @markers.setup) == true
+            Map.get(context, Map.fetch!(@markers, marker)) == true
 
-        _not_yet_or_unknown ->
+        _unknown ->
           false
       end
     end
