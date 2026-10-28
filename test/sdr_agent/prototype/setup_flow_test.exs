@@ -193,6 +193,8 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
     {:s4_control_mismatch, :fresh, :cluster_marker},
     {:s4_socket_dir_not_owned, :fresh, :cluster_marker},
     {:s4_cluster_check_failed, :fresh, :cluster_marker},
+    {:s4_not_implemented, :fresh, :cluster_marker},
+    {:s4_dependency_absent, :fresh, :cluster_marker},
     {:seed_invalid_content, :fresh, :seed_run},
     {:seed_differs, :fresh, :seed_run}
   ]
@@ -815,6 +817,16 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
 
   defp scenario(:s4_cluster_check_failed),
     do: {%{}, %{cluster_marker: {:error, :cluster_check_failed}}, {:unexpected, 0}}
+
+  # S4 ACK (07f1ebf): marker/0 and check/1 on a valid map are still
+  # deny-only there ({:error, :not_implemented}, a stage marker, not in
+  # @reasons); dep/3 gives {:error, :dependency_absent} without S4. Both
+  # fail closed as unexpected: never a pass or a refusal claim.
+  defp scenario(:s4_not_implemented),
+    do: {%{}, %{cluster_marker: {:error, :not_implemented}}, {:unexpected, 0}}
+
+  defp scenario(:s4_dependency_absent),
+    do: {%{}, %{cluster_marker: {:error, :dependency_absent}}, {:unexpected, 0}}
 
   ## Helpers
 
