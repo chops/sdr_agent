@@ -23,6 +23,27 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
     message, and the two unchecked codes are retired.
   - T13: each boundary stage's call, made as the delivery worker, queries
     only its own source; the policy checks issue no query. Control.
+  - T4: through the test-build result-injection seam (proposal r3 section
+    5.1), a returned Forbidden at the operation or approval read stays
+    Forbidden, a returned Unknown stays Unknown, and an injected `{:ok, nil}`
+    is the closed not-delegated refusal. Nothing is kept. The injection's own
+    attempt-tagged message is a prerequisite: until the seam exists, this is
+    a prerequisite RED, not a semantic one.
+  - T5: through the test-build decision-fault seam, a programming fault in
+    decision code is raised by Ash as `Ash.Error.Unknown` (create.ex:124-134).
+    It is not a refusal, and nothing is kept. The cause is identified by the
+    seam's own `fault_raised` message, never by error text.
+  - T10: negative oracle controls (Codex 4c72c150 H2). The typed-refusal
+    oracle rejects an Ash-wrapped storage failure, and a programming fault,
+    at exactly `"S4-ORACLE refused: no typed refusal"` after reach for this
+    operation and attempt. The propagated-failure oracle rejects a typed
+    business refusal at exactly `"S4-ORACLE propagated: typed refusal
+    observed"`.
+
+  The seams are site-local keys that only PrototypeCapture's boundary call
+  sites read (Codex 7b7f4b1c). The create authorize pre-flight
+  (create.ex:200) never consumes them, and no data-layer read rule is
+  involved.
 
   Errors are compared by struct name only, never by text or value. The
   proposed `SdrAgent.Outreach.Errors.CaptureRefused` is named as an atom, so
@@ -45,6 +66,7 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
   alias SdrAgent.Outreach.DeliveryReceipt
   alias SdrAgent.Repo
 
+  @capture SdrAgent.Outreach.Changes.PrototypeCapture
   @refused SdrAgent.Outreach.Errors.CaptureRefused
   @boundary_sources [
     "prototype_database_bindings",
@@ -309,5 +331,138 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
       assert {source, sources} == {source, [source]}
       refute match?({:error, _}, result), "the #{source} stage call returned an error"
     end
+  end
+
+  # ------------------------------------------------------------------ T4, T5
+
+  # A direct record of `operation` with the result-injection seam armed for
+  # this operation, its current attempt and `stage`. Returns
+  # {the messages for the seam's ref, the value-free outcome}.
+  defp injected(ctx, operation, stage, result) do
+    ref = make_ref()
+
+    scope = %{
+      ref: ref,
+      op_id: operation.id,
+      attempt: operation.attempt_count,
+      stage: stage,
+      result: result
+    }
+
+    outcome = with_seam(:inject, scope, fn -> direct_refusal(ctx, operation) end)
+    {messages(ref), outcome}
+  end
+
+  defp injected_at(operation, stage),
+    do: [{:injected, operation.id, operation.attempt_count, stage}]
+
+  test "T4: an injected returned Forbidden at the operation or approval read stays Forbidden; nothing kept" do
+    {ctx, delivery, operation} = held!()
+
+    for stage <- [:operation, :approval] do
+      forbidden = {:error, Ash.Error.Forbidden.exception([])}
+      {seen, outcome} = injected(ctx, operation, stage, forbidden)
+
+      assert seen == injected_at(operation, stage),
+             "prerequisite: the #{stage} injection was not reached"
+
+      assert outcome == {:returned, :error, Ash.Error.Forbidden}
+    end
+
+    no_capture!(ctx, delivery)
+  end
+
+  test "T4: an injected returned Unknown stays Unknown; an injected missing approval is not delegated" do
+    {ctx, delivery, operation} = held!()
+
+    {seen, outcome} =
+      injected(ctx, operation, :approval, {:error, Ash.Error.Unknown.exception([])})
+
+    assert seen == injected_at(operation, :approval),
+           "prerequisite: the injection was not reached"
+
+    assert outcome == {:returned, :error, Ash.Error.Unknown}
+
+    {seen, outcome} = injected(ctx, operation, :approval, {:ok, nil})
+
+    assert seen == injected_at(operation, :approval),
+           "prerequisite: the injection was not reached"
+
+    assert outcome == {:refused, :prototype_approval_not_delegated}
+    no_capture!(ctx, delivery)
+  end
+
+  test "T5: a programming fault in the boundary's decision code is raised by Ash as Unknown, not a refusal" do
+    {ctx, delivery, operation} = held!()
+    ref = make_ref()
+    scope = %{ref: ref, op_id: operation.id, attempt: operation.attempt_count, point: :decision}
+
+    outcome = with_seam(:fault, scope, fn -> direct_refusal(ctx, operation) end)
+
+    assert messages(ref) == [{:fault_raised, operation.id, operation.attempt_count, :decision}],
+           "prerequisite: the decision fault was not reached"
+
+    assert outcome == {:raised, Ash.Error.Unknown}
+    no_capture!(ctx, delivery)
+  end
+
+  # ------------------------------------------------------------------ T10
+
+  test "T10: the typed-refusal oracle rejects an Ash-wrapped storage failure after reach, at its typed step (control)" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+
+    rejected_at!("S4-ORACLE refused: no typed refusal", fn ->
+      refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn _op ->
+        tamper!("ALTER TABLE delivery_receipts RENAME TO delivery_receipts_unavailable")
+      end)
+    end)
+
+    tamper!("ALTER TABLE delivery_receipts_unavailable RENAME TO delivery_receipts")
+    no_capture!(ctx, delivery)
+  end
+
+  test "T10: the typed-refusal oracle rejects a programming fault after reach, at its typed step" do
+    ctx = prototype_drafted!()
+    assert {:ok, approval} = operator_approve(ctx, ctx.draft)
+    delivery = delivery_of!(ctx, approval)
+    attempt = outreach!(ctx, delivery).attempt_count + 1
+    ref = make_ref()
+
+    # The decision fault is armed inside the hook, so it binds exactly this
+    # operation and attempt. It is removed in the calling process on every
+    # exit.
+    try do
+      rejected_at!("S4-ORACLE refused: no typed refusal", fn ->
+        refused_attempt!(ctx, delivery, :prototype_recipient_suppressed, fn op ->
+          scope = %{ref: ref, op_id: op.id, attempt: op.attempt_count, point: :decision}
+          Process.put({@capture, :fault}, scope)
+          :ok
+        end)
+      end)
+    after
+      Process.delete({@capture, :fault})
+    end
+
+    assert messages(ref) == [{:fault_raised, delivery.id, attempt, :decision}],
+           "prerequisite: the decision fault was not reached for this attempt"
+
+    no_capture!(ctx, delivery)
+  end
+
+  test "T10: the propagated-failure oracle rejects a typed business refusal at its typed step" do
+    fixture = bound!(enter_runtime: false)
+    ctx = demo!(fixture)
+    %{draft: draft} = drafted!(ctx)
+    approval = approve!(ctx, draft, operator!(ctx, :reviewer))
+    delivery = delivery_of!(ctx, approval)
+    enter_window!(fixture)
+
+    rejected_at!("S4-ORACLE propagated: typed refusal observed", fn ->
+      propagated_attempt!(ctx, delivery, fn _op -> :ok end)
+    end)
+
+    no_capture!(ctx, delivery)
   end
 end
