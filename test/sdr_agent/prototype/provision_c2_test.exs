@@ -570,6 +570,232 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
     end
   end
 
+  # Codex e006f70a D1-D3 against design note r2 (1e6992c1): the operator's
+  # one allocation write is authorized only by a registered,
+  # transaction-bound ProvisionScope. Structural until GREEN: the scope
+  # module, its test seam and the ProvisionPrototype hooks are absent at
+  # this pin, so these tests stop at their first "hook ran" prerequisite or
+  # at a captured UndefinedFunctionError. Hooks are process-local,
+  # test-build-only keys.
+  describe "the ProvisionScope boundary (Codex e006f70a D1-D3)" do
+    @change SdrAgent.Agents.Changes.ProvisionPrototype
+    @scope_module SdrAgent.Prototype.ProvisionScope
+    @scope_key :sdr_prototype_provision_scope
+    @b1 {"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}
+
+    defp scope_context(scope), do: Map.put(GrantContext.context(), @scope_key, scope)
+
+    defp planned(grant_id, overrides \\ %{}) do
+      Map.merge(
+        %{
+          grant_id: grant_id,
+          grant_revision: 1,
+          key: :b1,
+          applies_to: [:b1],
+          profile_id: :claude_cli_opus,
+          attempts: 50
+        },
+        overrides
+      )
+    end
+
+    defp allocation_changeset(actor, attrs, scope) do
+      Ash.Changeset.for_create(ModelCallAllocation, :create, attrs,
+        actor: actor,
+        context: scope_context(scope)
+      )
+    end
+
+    defp raw(actor, attrs, scope), do: actor |> allocation_changeset(attrs, scope) |> Ash.create()
+    defp forbidden?(result), do: match?({:error, %Ash.Error.Forbidden{}}, result)
+    defp hook(name, fun), do: Process.put({@change, name}, fun)
+    defp see(name, value), do: Process.put({__MODULE__, name}, value)
+    defp seen(name), do: Process.get({__MODULE__, name})
+
+    defp scope_call(function, args) do
+      Function.capture(@scope_module, function, length(args)) |> apply(args)
+    rescue
+      error -> {:raised, error.__struct__}
+    end
+
+    defp registered do
+      Function.capture(Module.concat(@scope_module, TestSeam), :registered, 0).()
+    rescue
+      error -> {:raised, error.__struct__}
+    end
+
+    test "D1: repeated policy checks leave the plan available; the one insert consumes it", ctx do
+      actor = ctx.fx.actor
+
+      hook(:scope_bound, fn scope ->
+        id = scope.grant_id
+        changeset = allocation_changeset(actor, planned(id), scope)
+        see(:checks, for(_ <- 1..3, do: Ash.can?(changeset, actor)))
+
+        see(:mismatched,
+          key: raw(actor, planned(id, %{key: :b2}), scope),
+          attempts: raw(actor, planned(id, %{attempts: 49}), scope),
+          grant_revision: raw(actor, planned(id, %{grant_revision: 2}), scope),
+          grant_id: raw(actor, planned(Ecto.UUID.generate()), scope)
+        )
+      end)
+
+      hook(:after_allocations, fn scope ->
+        see(:second, raw(actor, planned(scope.grant_id), scope))
+      end)
+
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      assert seen(:checks) == [true, true, true], "policy checks: #{inspect(seen(:checks))}"
+      assert is_list(seen(:mismatched)), "prerequisite: the :scope_bound hook ran"
+
+      for {name, result} <- seen(:mismatched) do
+        assert forbidden?(result), "mismatched #{name}: #{inspect(result)}"
+      end
+
+      assert forbidden?(seen(:second)), "the second write: #{inspect(seen(:second))}"
+      assert allocations_of(grant.id) == [@b1]
+    end
+
+    test "D2: a captured scope is refused from another process and after its transaction", ctx do
+      actor = ctx.fx.actor
+
+      hook(:scope_bound, fn scope ->
+        see(:scope, scope)
+        task = Task.async(fn -> raw(actor, planned(scope.grant_id), scope) end)
+        see(:cross_process, Task.await(task))
+      end)
+
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      scope = seen(:scope)
+      assert scope != nil, "prerequisite: the :scope_bound hook ran"
+      assert forbidden?(seen(:cross_process)), "cross-process: #{inspect(seen(:cross_process))}"
+
+      before = counts()
+      stale = raw(actor, planned(scope.grant_id), scope)
+      assert forbidden?(stale), "stale: #{inspect(stale)}"
+      assert counts() == before
+      assert allocations_of(grant.id) == [@b1]
+    end
+
+    test "D2: a scope established after a rolled-back real SAVEPOINT is invalid", ctx do
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      actor = ctx.fx.actor
+      ref = make_ref()
+
+      bindings = %{
+        tenant_id: ctx.fx.tenant.id,
+        binding_id: ctx.fx.snapshot.id,
+        delegation_id: actor.id,
+        anchor_id: ctx.fx.anchor.id,
+        planned: SdrAgent.Prototype.Provisioning.allocations()
+      }
+
+      result =
+        SdrAgent.Audit.transaction(fn ->
+          Repo.query!("SAVEPOINT d237_scope_test")
+          established = scope_call(:establish, [ref, bindings])
+          bound = scope_call(:bind_grant, [ref, grant])
+          Repo.query!("ROLLBACK TO SAVEPOINT d237_scope_test")
+
+          valid =
+            scope_call(:valid?, [
+              bound,
+              allocation_changeset(actor, planned(grant.id), bound),
+              actor
+            ])
+
+          _released = scope_call(:release, [ref])
+          {established, bound, valid}
+        end)
+
+      assert match?(
+               {:ok, {%{__struct__: @scope_module}, %{__struct__: @scope_module}, false}},
+               result
+             ),
+             "savepoint: #{inspect(result)}"
+    end
+
+    test "D2: no scope stays registered after a successful provision", ctx do
+      _grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      assert registered() == 0, "after success: #{inspect(registered())}"
+    end
+
+    test "D2: no scope stays registered after a rolled-back provision", ctx do
+      hook(:scope_bound, fn _scope ->
+        see(:ran, true)
+        Repo.rollback(:injected)
+      end)
+
+      before = counts()
+      result = provision(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+      assert seen(:ran) == true, "prerequisite: the :scope_bound hook ran (#{inspect(result)})"
+      assert match?({:error, _}, result)
+      assert counts() == before
+      assert registered() == 0, "after rollback: #{inspect(registered())}"
+    end
+
+    test "D2: no scope stays registered after a raised provision", ctx do
+      hook(:scope_bound, fn _scope ->
+        see(:ran, true)
+        raise ArgumentError, "injected"
+      end)
+
+      before = counts()
+
+      raised =
+        try do
+          provision(ctx.fx.actor, worksheet_bytes(ctx.root), ctx.root)
+        rescue
+          error -> {:raised, error.__struct__}
+        end
+
+      assert seen(:ran) == true, "prerequisite: the :scope_bound hook ran (#{inspect(raised)})"
+      assert raised == {:raised, ArgumentError}
+      assert counts() == before
+      assert registered() == 0, "after raise: #{inspect(registered())}"
+    end
+
+    test "D3: a forged ref, a hand-built scope and another delegation of the binding are refused",
+         ctx do
+      actor = ctx.fx.actor
+      entered = Prototype.enter_session(:codex_cli, "codex-session:scope-other-1")
+      assert match?({:ok, _id}, entered), "prerequisite: another session: #{inspect(entered)}"
+      {:ok, other_id} = entered
+      {:ok, other} = Prototype.operator_actor(other_id)
+
+      hook(:scope_bound, fn scope ->
+        see(:other_delegation, raw(other, planned(scope.grant_id), scope))
+        see(:forged_ref, raw(actor, planned(scope.grant_id), %{scope | ref: make_ref()}))
+      end)
+
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      assert seen(:other_delegation) != nil, "prerequisite: the :scope_bound hook ran"
+
+      assert forbidden?(seen(:other_delegation)),
+             "other delegation: #{inspect(seen(:other_delegation))}"
+
+      assert forbidden?(seen(:forged_ref)), "forged ref: #{inspect(seen(:forged_ref))}"
+
+      hand_built = %{
+        __struct__: @scope_module,
+        ref: make_ref(),
+        tenant_id: ctx.fx.tenant.id,
+        binding_id: ctx.fx.snapshot.id,
+        delegation_id: actor.id,
+        anchor_id: ctx.fx.anchor.id,
+        planned: SdrAgent.Prototype.Provisioning.allocations(),
+        grant_id: grant.id,
+        grant_revision: 1,
+        xact_id: "1",
+        marker: "sdr_forged",
+        consumed?: false
+      }
+
+      assert forbidden?(raw(actor, planned(grant.id, %{key: :b2}), hand_built))
+      assert allocations_of(grant.id) == [@b1]
+    end
+  end
+
   describe "an ordinary grant with the prototype's name (D1 conflict, D3 revoke)" do
     setup ctx do
       PrototypeFixtures.leave_runtime()
