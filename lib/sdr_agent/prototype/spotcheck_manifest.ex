@@ -29,25 +29,139 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
   Refusals are `{:error, {path, rule}}`, value-free; every artifact refusal
   is `{:error, {"artifact", :artifact_invalid}}`.
 
-  GREEN-1 stage (D-237 S3; Codex a322d6d9): `artifact/2` is implemented.
-  `read/3` and `parse/3` still return `{:error, :not_implemented}`: they wait
-  for S1's `SdrAgent.Prototype.BoundedJson` and their own review.
+  `read/3` passes a `BoundedJson.read_file/3` refusal through unchanged
+  (`{"(file)", rule}`); decode refusals keep BoundedJson's paths.
   """
 
   import Bitwise
 
+  alias SdrAgent.Prototype.BoundedJson
+  alias SdrAgent.Prototype.DossierParser.Rules
+
+  @schema "sdr-agent.prototype-spotcheck"
+  @max_bytes 65_536
+  @max_depth 3
+  @top_keys ~w(schema schema_version dossier_sha256 checker results)
+  @result_keys ~w(row_id item source_id final_url checked_at result relation)
+  @statuses ~w(verified not_found unreachable conflict)
+  @relations ~w(person_address_linked person_role_current company_size_stated company_location_stated)
+  @checker ~r/\A[A-Za-z0-9 ._:\/@-]{1,120}\z/
   @artifact_max_bytes 1_048_576
   @artifact_file ~r/\A[a-z0-9][a-z0-9._-]{0,63}\z/
   @hex64 ~r/\A[0-9a-f]{64}\z/
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
-  @doc "Reads the manifest at `path` once, by its full sha256, and parses it against `dossier`."
-  @spec read(Path.t(), String.t(), {map(), String.t()}) :: {:ok, map()} | {:error, term()}
-  def read(_path, _sha256, _dossier), do: red({:error, :not_implemented})
+  @doc """
+  Reads the manifest at `path` once (S1 `BoundedJson.read_file/3`), by its
+  full sha256, and parses it against `{dossier, dossier_sha256}`.
+  """
+  @spec read(Path.t(), String.t(), {map(), String.t()}) ::
+          {:ok, map()} | {:error, {String.t(), atom()}}
+  def read(path, sha256, {dossier, dossier_sha256}) when is_binary(path) and is_binary(sha256) do
+    with {:ok, bin} <- BoundedJson.read_file(path, sha256, @max_bytes),
+         do: parse(bin, dossier, dossier_sha256)
+  end
 
   @doc "Parses manifest bytes against the parsed `dossier` and its sha256 hex."
-  @spec parse(binary(), map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def parse(_bin, _dossier, _dossier_sha256), do: red({:error, :not_implemented})
+  @spec parse(binary(), map(), String.t()) :: {:ok, map()} | {:error, {String.t(), atom()}}
+  def parse(bin, dossier, dossier_sha256) when is_binary(bin) do
+    with {:ok, doc} <-
+           BoundedJson.decode(bin,
+             max_bytes: @max_bytes,
+             max_depth: @max_depth,
+             known_keys: @top_keys ++ @result_keys
+           ),
+         :ok <- Rules.keys(doc, @top_keys, []),
+         :ok <- same(doc["schema"], @schema, "schema", :schema),
+         :ok <- same(doc["schema_version"], 1, "schema_version", :schema_version),
+         :ok <- Rules.pattern(doc["dossier_sha256"], @hex64, "dossier_sha256"),
+         :ok <- same(doc["dossier_sha256"], dossier_sha256, "dossier_sha256", :dossier_mismatch),
+         :ok <- Rules.pattern(doc["checker"], @checker, "checker"),
+         :ok <- Rules.list(doc["results"], "results", 1, 200),
+         {:ok, results} <- results(doc["results"], rows(dossier)) do
+      {:ok, %{sha256: sha256_hex(bin), checker: doc["checker"], results: results}}
+    end
+  end
+
+  defp rows(dossier), do: Map.new(dossier["companies"], &{&1["row_id"], &1})
+
+  defp results(list, rows) do
+    list
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, %{}}, &add_result(&1, &2, rows))
+  end
+
+  defp add_result({r, k}, {:ok, acc}, rows) do
+    case result(r, k, rows, acc) do
+      :ok -> {:cont, {:ok, Map.put(acc, {r["row_id"], r["item"]}, r)}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp result(r, k, rows, seen) do
+    p = "results[#{k}]"
+
+    with :ok <- Rules.keys(r, @result_keys, ["results", k]),
+         {:ok, row} <- known_row(rows, r["row_id"], "#{p}.row_id"),
+         {:ok, target} <- target(row, r["item"], "#{p}.item"),
+         :ok <- fresh(seen, {r["row_id"], r["item"]}, p),
+         :ok <- same(r["source_id"], target.source_id, "#{p}.source_id", :source_mismatch),
+         :ok <-
+           same(r["final_url"], final_url(row, target.source_id), "#{p}.final_url", :url_mismatch),
+         :ok <- Rules.time(r["checked_at"], "#{p}.checked_at"),
+         :ok <- Rules.enum(r["result"], @statuses, "#{p}.result") do
+      relation(r["relation"], target, "#{p}.relation")
+    end
+  end
+
+  defp known_row(rows, row_id, p) do
+    case is_binary(row_id) && Map.get(rows, row_id) do
+      %{} = row -> {:ok, row}
+      _ -> {:error, {p, :unknown_row}}
+    end
+  end
+
+  # The claim or fact an item names: `claim:<field>` for a present claim,
+  # `fact:<fact_id>` for a fact with a source.
+  defp target(row, "claim:" <> field, p) when field in ["name", "role", "email"] do
+    case get_in(row, ["contact", "evidence", field]) do
+      %{"source_id" => source_id} -> {:ok, %{kind: {:claim, field}, source_id: source_id}}
+      _ -> {:error, {p, :unknown_item}}
+    end
+  end
+
+  defp target(row, "fact:" <> fact_id, p) do
+    case Enum.find(row["facts"], &(&1["fact_id"] == fact_id)) do
+      %{"source_id" => source_id, "topic" => topic} when is_binary(source_id) ->
+        {:ok, %{kind: {:fact, topic}, source_id: source_id}}
+
+      _ ->
+        {:error, {p, :unknown_item}}
+    end
+  end
+
+  defp target(_row, _item, p), do: {:error, {p, :unknown_item}}
+
+  defp fresh(seen, key, p),
+    do: if(Map.has_key?(seen, key), do: {:error, {p, :duplicate}}, else: :ok)
+
+  defp final_url(row, source_id),
+    do: Enum.find_value(row["sources"], &if(&1["source_id"] == source_id, do: &1["final_url"]))
+
+  defp relation(nil, _target, _p), do: :ok
+  defp relation("person_address_linked", %{kind: {:claim, "email"}}, _p), do: :ok
+  defp relation("person_role_current", %{kind: {:claim, "role"}}, _p), do: :ok
+  defp relation("company_size_stated", %{kind: {:fact, "size"}}, _p), do: :ok
+  defp relation("company_location_stated", %{kind: {:fact, "location"}}, _p), do: :ok
+
+  defp relation(relation, _target, p) do
+    if relation in @relations, do: {:error, {p, :relation}}, else: {:error, {p, :enum}}
+  end
+
+  defp same(value, value, _p, _rule), do: :ok
+  defp same(_value, _expected, p, rule), do: {:error, {p, rule}}
+
+  defp sha256_hex(bin), do: :crypto.hash(:sha256, bin) |> Base.encode16(case: :lower)
 
   @doc "Reads one retained artifact (`%{\"file\" => …, \"sha256\" => …}`) from `dir`."
   @spec artifact(Path.t(), term()) :: {:ok, binary()} | {:error, {String.t(), :artifact_invalid}}
@@ -144,8 +258,4 @@ defmodule SdrAgent.Prototype.SpotcheckManifest do
   else
     defp seam(_name, _arg), do: :ok
   end
-
-  # RED stub result, typed dynamic() so success clauses of callers compile
-  # against the stub (Elixir 1.20 infers literal returns); nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end
