@@ -110,8 +110,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc """
     The launch gate in prototype runtime for the owned reserved `invocation`
-    of the locked `run`, its charged grant and allocation share-locked
-    (`Admission.lock_charge/1`) and the head held: `:ok` or
+    of the locked `run`, its charged grant and its one charged allocation
+    share-locked (`Admission.lock_charge/1`) and the head held: `:ok` or
     `{:error, reason, check}` (see the moduledoc for the order and codes).
     """
     def launch(run, invocation, observation) do
@@ -168,9 +168,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    # The charged grant's current row and its allocations (id order), both
-    # share-locked by the launch, read as the kernel in the invocation's
-    # tenant (as `Provisioning.lock_grant/2`, without a lock clause).
+    # The charged grant's current row and its allocation set (id order),
+    # read as the kernel in the invocation's tenant (as
+    # `Provisioning.lock_grant/2`, without a lock clause). The launch's
+    # `Admission.lock_charge/1` share-locks only the charged grant and the
+    # ONE charged allocation, not every row of this set; the supported
+    # allocation edits (`ModelCallGrant` actions through `GrantBundle`) lock
+    # the parent grant `FOR UPDATE` first, so they serialize on that grant
+    # lock. No per-row lock is claimed for the other rows, and nothing here
+    # proves concurrency against SQL written behind the application.
     defp charged_grant(%{grant_id: grant_id, tenant_id: tenant_id}) when is_binary(grant_id) do
       opts = AuditKernel.opts(tenant_id)
 
