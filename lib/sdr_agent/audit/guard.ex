@@ -21,7 +21,7 @@ defmodule SdrAgent.Audit.Guard do
 
   `refuse/2` is a closed refusal decided before any changeset (a domain
   precheck): through `run/3`, so audited exactly once, only for a
-  recognized actor whose tenant has an initialized audit chain; any other
+  well-formed actor whose tenant has an initialized audit chain; any other
   input is refused with no append, so no audit destination comes from
   unvalidated input.
   """
@@ -29,6 +29,7 @@ defmodule SdrAgent.Audit.Guard do
   require Ash.Query
 
   alias SdrAgent.Audit.AuditChainHead
+  alias SdrAgent.Audit.AuditEvent
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Repo
 
@@ -62,10 +63,12 @@ defmodule SdrAgent.Audit.Guard do
 
   @doc """
   Refuses a call for `meta` before it runs: `{:error, Ash.Error.Forbidden}`.
-  For an `SdrAgent.Actor` or an `SdrAgent.Accounts.User` whose tenant has an
-  initialized audit chain, the refusal goes through `run/3` (one
+  For a well-formed `SdrAgent.Actor` (a known type, a nil or non-empty
+  UTF-8 id of at most 128 bytes) or `SdrAgent.Accounts.User` (a canonical
+  UUID id, a role an audit event can record) whose canonical tenant UUID
+  has an initialized audit chain, the refusal goes through `run/3` (one
   `authz.denied` when `meta` is guarded or the actor is an auditor);
-  missing, non-actor or unknown-tenant input appends nothing. A failed
+  missing, non-actor, malformed or unknown-tenant input appends nothing. A failed
   chain read raises; it is never treated as a destination.
   """
   def refuse(meta, actor) do
@@ -73,27 +76,41 @@ defmodule SdrAgent.Audit.Guard do
     if destination?(actor), do: run(meta, actor, forbidden), else: forbidden.()
   end
 
-  defp destination?(%SdrAgent.Actor{tenant_id: tenant_id}), do: chain_initialized?(tenant_id)
+  # A destination needs a kernel-safe actor envelope first (Codex e976f58a
+  # R1): only values an audit event can record, never coerced, and only then
+  # a canonical tenant UUID with an initialized chain head. A malformed
+  # envelope is the plain refusal: it never reaches the kernel.
+  defp destination?(%SdrAgent.Actor{type: type, id: id, tenant_id: tenant_id}) do
+    type in SdrAgent.Actor.types() and actor_id?(id) and chain_initialized?(tenant_id)
+  end
 
-  defp destination?(%SdrAgent.Accounts.User{tenant_id: tenant_id}),
-    do: chain_initialized?(tenant_id)
+  defp destination?(%SdrAgent.Accounts.User{id: id, role: role, tenant_id: tenant_id}) do
+    uuid?(id) and role in auditable_roles() and chain_initialized?(tenant_id)
+  end
 
   defp destination?(_actor), do: false
 
-  defp chain_initialized?(tenant_id) when is_binary(tenant_id) do
-    case Ecto.UUID.cast(tenant_id) do
-      {:ok, uuid} ->
-        AuditChainHead
-        |> Ash.Query.for_read(:read, %{}, Kernel.opts(uuid))
-        |> Ash.Query.filter(tenant_id == ^uuid)
-        |> Ash.exists?()
+  # The kernel records a system actor id as `to_string(id || type)`: nil, or
+  # a non-empty valid UTF-8 string of at most 128 bytes.
+  defp actor_id?(nil), do: true
+  defp actor_id?(id) when is_binary(id), do: byte_size(id) in 1..128 and String.valid?(id)
+  defp actor_id?(_id), do: false
 
-      :error ->
-        false
-    end
+  # The roles an audit event can record (`AuditEvent.actor_role`).
+  defp auditable_roles,
+    do: Ash.Resource.Info.attribute(AuditEvent, :actor_role).constraints[:one_of]
+
+  # A canonical UUID string only (a raw 16-byte binary also casts).
+  defp uuid?(id) when is_binary(id) and byte_size(id) == 36, do: Ecto.UUID.cast(id) == {:ok, id}
+  defp uuid?(_id), do: false
+
+  defp chain_initialized?(tenant_id) do
+    uuid?(tenant_id) and
+      AuditChainHead
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+      |> Ash.Query.filter(tenant_id == ^tenant_id)
+      |> Ash.exists?()
   end
-
-  defp chain_initialized?(_tenant_id), do: false
 
   @doc "Transaction that defers denial appends until it has finished."
   def transaction(fun) do
