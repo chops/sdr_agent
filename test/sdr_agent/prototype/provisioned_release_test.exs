@@ -533,6 +533,41 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
       assert [event] = released_events(ctx.fx)
       assert event.payload["arguments"] == original
     end
+
+    # B1 (Codex be36b5df): the raw own-context branch verifies the ORIGINAL
+    # basis against the stored facts (the row, the invocation, its run and
+    # the original reservation authority), not only its shape and digest.
+    # Labelled tamper: the original event's basis is rewritten behind the
+    # application to a grammar-valid value that contradicts the stored
+    # charge, binding or identity, with its canonical digest recomputed; the
+    # identical rewritten arguments are then requested under a fresh own
+    # context. Refused on :basis (an invalid ORIGINAL is never a replay or a
+    # ReleaseConflict); no row or event is written; the original release and
+    # its one event stay.
+    for variant <- [:charge, :binding, :identity] do
+      test "a self-consistent rewritten ORIGINAL (#{variant}) requested verbatim is refused on :basis (labelled tamper)",
+           ctx do
+        {:released, release, _output} = released!(ctx)
+        event = basis_event!(ctx.fx, release)
+        rewritten = rewritten_original(event.payload["arguments"], unquote(variant))
+        rewrite_original!(event, rewritten)
+
+        result =
+          decide_under_gate(ctx, %{
+            basis: rewritten["basis"],
+            basis_sha256: rewritten["basis_sha256"]
+          })
+
+        assert refused_on?(result, :basis, "must be a valid d237-basis/1 with its digest"),
+               "#{unquote(variant)}: #{inspect(G.summary(result))}"
+
+        assert release_count(ctx) == 1
+        assert G.release(ctx.invocation).id == release.id
+        assert [kept] = released_events(ctx.fx)
+        assert kept.id == event.id
+        assert events_of_type(ctx.fx.tenant, "model.result.withheld") == []
+      end
+    end
   end
 
   ## RED-b2c: identity and the recorded authority at release (G6, G7, Q4)
@@ -710,6 +745,27 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
   defp conflict?(_result), do: false
 
   ## RED-b2c helpers
+
+  # B1 labelled tamper: the original basis with one stored fact contradicted
+  # (a grammar-valid value) and its canonical digest recomputed.
+  defp rewritten_original(arguments, variant) do
+    {path, value} =
+      case variant do
+        :charge -> {["funding", "allocation_id"], Ecto.UUID.generate()}
+        :binding -> {["prototype", "binding_id"], Ecto.UUID.generate()}
+        :identity -> {["identity", "model_id"], "claude-synthetic-other"}
+      end
+
+    basis = put_in(arguments["basis"], path, value)
+    %{"basis" => basis, "basis_sha256" => canonical_hex(basis)}
+  end
+
+  defp rewrite_original!(event, arguments) do
+    tamper!(
+      "UPDATE audit_events SET payload = jsonb_set(payload, '{arguments}', $2::text::jsonb) WHERE id = $1",
+      [Ecto.UUID.dump!(event.id), Jason.encode!(arguments)]
+    )
+  end
 
   defp release_count(ctx) do
     SdrAgent.Agents.ModelResultRelease
