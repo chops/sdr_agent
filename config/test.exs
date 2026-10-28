@@ -79,6 +79,17 @@ config :sdr_agent, seeding_allowed?: true
 # Live console refresh reloads at once in tests (no debounce timer).
 config :sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 0
 
+# D-237 (ADR-0005 D-237 amendment item 2 "Development build only"): compiles
+# the prototype authority. Only this file and config/dev.exs set it; the
+# production build holds the refusal stubs of SdrAgent.Prototype only.
+config :sdr_agent, prototype_authority_compiled: true
+
+# D-237 (interfaces r6 ruling a): the hermetic, test-build-only prototype seam
+# (SdrAgent.Prototype.Authority.TestSeam: a process-scoped runtime and live
+# identity override). Never set in dev or prod; the authority flag alone does
+# not enable it.
+config :sdr_agent, prototype_test_seams: true
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_test#{System.get_env("MIX_TEST_PARTITION")}",

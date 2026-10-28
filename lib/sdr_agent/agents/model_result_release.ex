@@ -26,6 +26,12 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       output release — only under `SdrAgent.Agents.Checks.CalibrationContext`
       (test-seam builds), for an invocation of a `:proof` run of that
       profile in any terminal status, with `evidence_sha256`.
+    * D-237 (frozen values, S1): `:released_unverified` ↔
+      `:owner_prototype_unverified` with no link, projection, method or
+      evidence (the `model_result_releases_pair` CHECK), and the withheld
+      reason `:prototype_authority_refused` (`prototype_withheld_reasons/0`,
+      codes `prototype_codes/0`). `allowed_pair?/2` and the decision
+      behaviour for them are S2's and not yet in place.
 
   `:released` and `:withheld` need a completed generation-2 ClaudeCLI
   invocation outside a `:proof` run. The invocation is never updated for
@@ -61,7 +67,11 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Checks
 
-  @dispositions [:released, :withheld, :calibration]
+  # D-237 (amendment items 5-6; interfaces r6 IF-4): `:released_unverified`
+  # pairs only with `:owner_prototype_unverified`; `:prototype_authority_refused`
+  # is a withheld reason; the code of a refusal is one of `@prototype_codes`.
+  # The values are frozen here (S1); the decision behaviour is S2's.
+  @dispositions [:released, :withheld, :calibration, :released_unverified]
   @withheld_reasons [
     :witness_mismatch,
     :witness_missing,
@@ -69,7 +79,24 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     :store_unreadable,
     :gate_interrupted
   ]
-  @reasons [:reconciled, :calibration | @withheld_reasons]
+  @prototype_withheld_reasons [:prototype_authority_refused]
+  @all_withheld_reasons @withheld_reasons ++ @prototype_withheld_reasons
+  @reasons [:reconciled, :calibration, :owner_prototype_unverified | @all_withheld_reasons]
+  @prototype_codes [
+    :binding_mismatch,
+    :authority_unrecorded,
+    :authority_mismatch,
+    :scope_mismatch,
+    :identity_mismatch,
+    :operator_mismatch,
+    :grant_changed,
+    :grant_not_eligible,
+    :outside_window,
+    :witness_mode_mismatch,
+    :witness_evidence_present,
+    :known_integrity_signal,
+    :output_invalid
+  ]
   @methods [:time_window, :propagated_id]
   # R0-07 slice C (G2): the bounded typed classification of a withheld
   # gate outcome, recorded as metadata only.
@@ -125,10 +152,13 @@ defmodule SdrAgent.Agents.ModelResultRelease do
             "wire_witness_link_id IS NOT NULL AND projection_version IS NOT NULL AND " <>
             "method IS NOT NULL AND evidence_sha256 IS NULL) OR " <>
             "(disposition = 'withheld' AND " <>
-            SdrAgent.Audit.SQL.one_of("reason", @withheld_reasons) <>
+            SdrAgent.Audit.SQL.one_of("reason", @all_withheld_reasons) <>
             " AND evidence_sha256 IS NULL) OR " <>
             "(disposition = 'calibration' AND reason = 'calibration' AND " <>
-            "evidence_sha256 IS NOT NULL)"
+            "evidence_sha256 IS NOT NULL) OR " <>
+            "(disposition = 'released_unverified' AND " <>
+            "reason = 'owner_prototype_unverified' AND wire_witness_link_id IS NULL AND " <>
+            "projection_version IS NULL AND method IS NULL AND evidence_sha256 IS NULL)"
     end
 
     custom_statements do
@@ -293,8 +323,14 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   @doc "The disposition values."
   def dispositions, do: @dispositions
 
-  @doc "The reasons allowed with `:withheld`."
+  @doc "The reasons allowed with `:withheld` outside prototype runtime."
   def withheld_reasons, do: @withheld_reasons
+
+  @doc "The D-237 prototype-only withheld reasons (amendment item 5)."
+  def prototype_withheld_reasons, do: @prototype_withheld_reasons
+
+  @doc "The closed D-237 refusal codes of `:prototype_authority_refused` (amendment item 5)."
+  def prototype_codes, do: @prototype_codes
 
   @doc "The typed classifications of a withheld gate outcome (R0-07 slice C, G2)."
   def gate_classifications, do: @gate_classifications

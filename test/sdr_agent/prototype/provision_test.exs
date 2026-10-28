@@ -174,10 +174,13 @@ defmodule SdrAgent.Prototype.ProvisionTest do
 
   describe "provisioning" do
     setup do
-      fx = bound!()
+      # Users are arranged before prototype runtime, which refuses user administration.
+      fx = bound!(enter_runtime: false)
+      admin = human(:admin, fx.tenant)
+      enter!(fx)
       root = scratch_dir!()
       bytes = Jason.encode!(worksheet(root))
-      %{fx: fx, root: root, bytes: bytes, digest: sha(bytes)}
+      %{fx: fx, admin: admin, root: root, bytes: bytes, digest: sha(bytes)}
     end
 
     test "the operator provisions exactly the entry's terms, with the anchor as creator and updater",
@@ -210,15 +213,14 @@ defmodule SdrAgent.Prototype.ProvisionTest do
     end
 
     test "a non-operator cannot provision", ctx do
-      admin = human(:admin, ctx.fx.tenant)
-      assert match?({:error, _}, provision(ctx, admin))
+      assert match?({:error, _}, provision(ctx, ctx.admin))
       assert match?({:error, _}, provision(ctx, system_actor(:agent_runtime, ctx.fx.tenant)))
     end
 
     test "in prototype runtime grant creation, term changes and releases are refused; revoke is the operator's",
          ctx do
       {:ok, grant} = provision(ctx)
-      admin = human(:admin, ctx.fx.tenant)
+      admin = ctx.admin
 
       created =
         Agents.create_grant(

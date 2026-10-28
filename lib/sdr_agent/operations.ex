@@ -47,6 +47,9 @@ defmodule SdrAgent.Operations do
     resource SdrAgent.Operations.Operation
     resource SdrAgent.Operations.Failure
     resource SdrAgent.Operations.WebhookEvent
+    # D-237 (interfaces r6 IF-2, IF-3): the prototype binding and delegations.
+    resource SdrAgent.Operations.PrototypeDatabaseBinding
+    resource SdrAgent.Operations.PrototypeDelegation
   end
 
   ## Operations
