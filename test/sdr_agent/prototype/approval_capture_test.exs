@@ -35,6 +35,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
   alias SdrAgent.Audit.Export
   alias SdrAgent.Clock
   alias SdrAgent.Outreach
+  alias SdrAgent.Outreach.Approval
   alias SdrAgent.Prototype
   alias SdrAgent.Sales
 
@@ -93,6 +94,54 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     refute Map.has_key?(args, "approval_mode")
     refute Map.has_key?(args, "delegation_id")
     refute Map.has_key?(args, "prototype")
+  end
+
+  # The delegated arguments are server-derived at the raw action (Codex S4 B1
+  # bounded PASS order, step 4): a caller's values never reach the event.
+  @forged %{
+    approval_mode: "human_reviewed",
+    delegation_id: "00000000-0000-0000-0000-000000000001",
+    prototype: %{"label" => "forged"}
+  }
+
+  defp raw_approve(ctx, actor) do
+    {draft, input} = reviewed(ctx, ctx.draft)
+
+    Approval
+    |> Ash.Changeset.for_create(
+      :approve,
+      input |> Map.put(:draft_id, draft.id) |> Map.merge(@forged),
+      actor: actor
+    )
+    |> Ash.create()
+  end
+
+  test "the operator's forged delegated inputs are replaced by the server values at the raw action" do
+    ctx = prototype_drafted!()
+    result = raw_approve(ctx, ctx.operator)
+
+    assert match?({:ok, %{status: :granted}}, result),
+           "raw operator approve: #{inspect(result, limit: 5)}"
+
+    [granted] = events_of(ctx.tenant, "outreach.approval.granted")
+    args = granted.payload["arguments"]
+    assert args["approval_mode"] == "delegated_machine"
+    assert args["delegation_id"] == ctx.operator.id
+    assert args["prototype"] == block!()
+  end
+
+  test "a human's raw :approve in prototype runtime records none of the forged delegated inputs" do
+    ctx = prototype_drafted!()
+    result = raw_approve(ctx, ctx.admin)
+
+    assert match?({:ok, %{status: :granted}}, result),
+           "raw human approve: #{inspect(result, limit: 5)}"
+
+    [granted] = events_of(ctx.tenant, "outreach.approval.granted")
+    args = granted.payload["arguments"]
+    refute Map.has_key?(args, "approval_mode")
+    refute Map.has_key?(args, "delegation_id")
+    refute args["prototype"] == @forged.prototype
   end
 
   test "a stale revision is refused for the operator" do
