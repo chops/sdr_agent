@@ -190,10 +190,19 @@ defmodule SdrAgent.Prototype.SetupTest do
       admin = human(:admin, fx.tenant)
       binding = loaded!(SdrAgent.Operations.PrototypeDatabaseBinding)
 
+      # Valid inputs, so a refusal is the authorization's, never Invalid.
+      params = %{
+        instance_id: Ecto.UUID.generate(),
+        operator_user_id: fx.anchor.id,
+        policy_entry_sha256: fx.snapshot.policy_entry_sha256,
+        database_oid: fx.snapshot.database_oid,
+        system_identifier: fx.snapshot.system_identifier
+      }
+
       for actor <- [admin, fx.actor, system_actor(:kernel, fx.tenant)] do
         result =
           binding
-          |> Ash.Changeset.for_create(:create, %{instance_id: Ecto.UUID.generate()}, actor: actor)
+          |> Ash.Changeset.for_create(:create, params, actor: actor)
           |> Ash.create()
 
         assert match?({:error, %Ash.Error.Forbidden{}}, result),
