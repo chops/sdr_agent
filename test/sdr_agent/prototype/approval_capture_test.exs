@@ -142,9 +142,12 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     ctx = prototype_drafted!()
     {draft, input} = reviewed(ctx, ctx.draft)
 
+    # Both forgeries keep the binding tenant: the guarded denial is audited in
+    # the actor's tenant chain, which a random tenant does not have here (a
+    # random-tenant delegation is the resolver's own case, S1, and the
+    # ActorUser forged test).
     forged = [
       %Actor{type: :prototype_operator, id: Ecto.UUID.generate(), tenant_id: ctx.tenant.id},
-      %Actor{type: :prototype_operator, id: ctx.operator.id, tenant_id: Ecto.UUID.generate()},
       %Actor{type: :prototype_operator, id: nil, tenant_id: ctx.tenant.id}
     ]
 
