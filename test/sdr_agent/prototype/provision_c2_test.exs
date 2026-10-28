@@ -482,6 +482,29 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
         assert result == :untrusted, "#{name}: #{inspect(result)}"
       end
     end
+
+    # Codex 4ebbce03: classify/2 must stand alone; lookup/1 filters the type
+    # and tenant today, but the public decision must check them itself,
+    # before any DB access. In-memory copies only.
+    test "classify/2 refuses a genuine-event copy with another event type or another tenant",
+         ctx do
+      grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
+      [event] = events_of_type(ctx.fx.tenant, "model.grant.provisioned")
+      genuine = classify(ctx.fx.snapshot, event)
+
+      assert match?({:one, id, _event} when id == grant.id, genuine),
+             "genuine: #{inspect(genuine)}"
+
+      copies = [
+        other_event_type: %{event | event_type: "model.grant.created"},
+        other_tenant: %{event | tenant_id: Ecto.UUID.generate()}
+      ]
+
+      for {name, copy} <- copies do
+        result = classify(ctx.fx.snapshot, copy)
+        assert result == :untrusted, "#{name}: #{inspect(result)}"
+      end
+    end
   end
 
   describe "malformed provisioned-event arguments (Codex 4281bb5c R3)" do
