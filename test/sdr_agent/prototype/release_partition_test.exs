@@ -274,12 +274,14 @@ defmodule SdrAgent.Prototype.ReleasePartitionTest do
       assert G.release(ctx.invocation) == nil
     end
 
+    # D-237 TF-1 (plan r3 section 1; Codex 3a5ca9cf): this expected the
+    # superseded ordinary G5 withheld; in prototype runtime direct Recovery
+    # with no release decides nothing.
     test "Recovery never decides a release of either kind", ctx do
       result = SdrAgent.Agents.ResultGate.Recovery.run(ctx.invocation, G.gate(ctx.run))
 
-      assert match?({:withheld, %{reason: :gate_interrupted}, _run}, result),
-             "recovery: #{inspect(result)}"
-
+      assert result == {:error, :no_prototype_decision}, "recovery: #{inspect(result)}"
+      assert G.release(ctx.invocation) == nil
       assert ctx.fx.tenant |> events_of_type("model.result.released_unverified") == []
     end
 
