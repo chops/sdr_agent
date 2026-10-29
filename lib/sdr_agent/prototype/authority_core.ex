@@ -31,7 +31,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       is owner-held), `check_fresh/0`, `check_resumable/0`,
       `public_tables/0` and `pinned_migrations/0`; and phase 0's
       `maintenance_target/0`, `maintenance_identity/0` and
-      `maintenance_result/1` (S1 I4 r2; deny-only declarations);
+      `maintenance_result/1` (S1 I4 r3; fixed target, monitored helper,
+      acknowledged cleanup and conservative uncertainty);
     - `check_worksheet/3`: the IF-2 budget worksheet with byte-resolved
       evidence under a root;
     - the compiled entries (amendment items 1 and 4, `max_contacts: 3` per
@@ -58,8 +59,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     B2a's `bootstrap/1` with `live_identity/0` (its one plain identity read),
     B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
     `resolve_delegation/2` and `operator?/1`, `assurance/0`, and C1's pure
-    `check_worksheet/3` steps 1-3 are implemented. Every other
-    function is still a non-permissive RED declaration returning
+    `check_worksheet/3` steps 1-3, and I4 r3 maintenance target/decoder/read
+    primitives are implemented. Remaining declarations that still call
+    red/1 are non-permissive and return
     `{:error, :not_implemented}`; none fabricates success.
     """
 
@@ -87,6 +89,26 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
                     "(pg_control_system()).system_identifier FROM pg_database d " <>
                     "WHERE d.datname = current_database()"
+
+    @maintenance_target [
+      database: "postgres",
+      port: 5541,
+      socket_dir: "/private/tmp/d237-pg",
+      username: "postgres"
+    ]
+    @maintenance_conn_opts [
+      pool_size: 1,
+      backoff_type: :stop,
+      max_restarts: 0,
+      connect_timeout: 5_000,
+      timeout: 5_000,
+      queue_target: 5_000,
+      queue_interval: 5_000,
+      show_sensitive_data_on_connection_error: false
+    ]
+    @maintenance_sql "SELECT current_database()::text, " <>
+                       "(pg_control_system()).system_identifier, " <>
+                       "current_setting('data_directory')"
 
     # IF-2 provisioning: the budget worksheet (F7).
     @shared_total 60
@@ -364,37 +386,251 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def valid_correlation?(_value), do: false
 
     @doc """
-    Setup phase 0's maintenance target (S1 I4 r2 §2.1): exactly the
-    prototype socket directory and port, the maintenance database
-    `"postgres"` and the cluster's bootstrap superuser, with no host, URL,
-    endpoint or password. A constant: nothing reads the environment or the
-    Repo configuration for it. RED: not implemented.
+    The fixed local maintenance target. No host, URL, password or caller
+    configuration is accepted.
     """
-    @spec maintenance_target() :: keyword() | {:error, :not_implemented}
-    def maintenance_target, do: red({:error, :not_implemented})
+    @spec maintenance_target() :: keyword()
+    def maintenance_target, do: @maintenance_target
 
     @doc """
-    Setup phase 0's maintenance identity (S1 I4 r2 §2): one statement on
-    `maintenance_target/0`, run by a monitored helper process, giving
-    `{:ok, %{database:, system_identifier:, data_directory:}}`,
-    `{:error, :maintenance_unavailable}` or
-    `{:error, :maintenance_cleanup_unacknowledged}`. RED: not implemented.
+    Reads the fixed maintenance identity in an owned, monitored helper.
+    Facts require the reply and both helper/pool DOWN observations before
+    one absolute success deadline, measured from maintenance_read entry
+    after the unbounded local application start. Expiry invalidates a
+    saved reply; cleanup grace never restores success. An unannounced
+    pool after a failed start is cleanup_unacknowledged, not absent.
     """
     @spec maintenance_identity() ::
             {:ok, map()}
-            | {:error,
-               :maintenance_unavailable | :maintenance_cleanup_unacknowledged | :not_implemented}
-    def maintenance_identity, do: red({:error, :not_implemented})
+            | {:error, :maintenance_unavailable | :maintenance_cleanup_unacknowledged}
+    def maintenance_identity do
+      with {:ok, connector, bounds} <- maintenance_plan(),
+           {:ok, _apps} <- Application.ensure_all_started(:postgrex, :temporary) do
+        maintenance_read(connector, bounds)
+      else
+        _unplanned_or_not_started -> {:error, :maintenance_unavailable}
+      end
+    end
 
     @doc """
-    The pure decoder of the maintenance statement's result (S1 I4 r2 §2.2):
-    exactly one row of a binary database name, a positive integer
-    identifier and a binary data directory is `{:ok, map}`; anything else
-    is `{:error, :maintenance_unavailable}`. RED: not implemented.
+    Decodes exactly one row with a binary database, positive integer
+    system identifier and binary data directory. Every other shape is
+    maintenance_unavailable. Pure: no connection or query.
     """
-    @spec maintenance_result(term()) ::
-            {:ok, map()} | {:error, :maintenance_unavailable | :not_implemented}
-    def maintenance_result(_result), do: red({:error, :not_implemented})
+    @spec maintenance_result(term()) :: {:ok, map()} | {:error, :maintenance_unavailable}
+    def maintenance_result({:ok, %Postgrex.Result{rows: [[db, id, dir]]}})
+        when is_binary(db) and is_integer(id) and id > 0 and is_binary(dir),
+        do: {:ok, %{database: db, system_identifier: id, data_directory: dir}}
+
+    def maintenance_result(_other), do: {:error, :maintenance_unavailable}
+
+    if @test_seams do
+      # The exact fake-only seam is trusted test code, not a sandbox
+      # against arbitrary code running in the same VM.
+      defp maintenance_plan do
+        case SdrAgent.Prototype.Authority.TestSeam.maintenance() do
+          %{connector: {SdrAgent.PrototypeMaintenanceFake, _script} = connector} = seam ->
+            {:ok, connector, Map.delete(seam, :connector)}
+
+          _no_fake_seam ->
+            :no_seam
+        end
+      end
+
+      # Deterministic test-only post-reply gate. Production has no call
+      # to test support, and no general callback/connector injection.
+      defp maintenance_after_reply(script, deadline),
+        do: SdrAgent.PrototypeMaintenanceFake.after_reply(script, deadline)
+    else
+      defp maintenance_plan,
+        do:
+          {:ok, {SdrAgent.Prototype.Authority.MaintenanceConnector, nil},
+           %{reply_ms: 15_000, down_ms: 5_000, stop_ms: 5_000}}
+
+      defp maintenance_after_reply(_script, _deadline), do: :ok
+    end
+
+    defp maintenance_read({module, script}, bounds) do
+      deadline = System.monotonic_time(:millisecond) + bounds.reply_ms
+      reply_to = :erlang.alias()
+      opts = @maintenance_target ++ @maintenance_conn_opts
+
+      {helper, helper_ref} =
+        spawn_monitor(fn ->
+          maintenance_helper(module, script, opts, reply_to, bounds.stop_ms, deadline)
+        end)
+
+      state = %{
+        to: reply_to,
+        helper: helper,
+        helper_ref: helper_ref,
+        starting?: false,
+        pool: nil,
+        reply: nil,
+        helper_down: nil,
+        pool_down: nil,
+        timed_out?: false
+      }
+
+      outcome =
+        state
+        |> await_helper(deadline, bounds.down_ms)
+        |> await_pool(deadline, bounds.down_ms)
+        |> maintenance_outcome()
+
+      :erlang.unalias(reply_to)
+      drain_own(reply_to)
+      outcome
+    end
+
+    # No caller monitor is added: if the caller dies this unlinked
+    # helper may remain until its connector finishes or the task VM
+    # exits. ADR-0021 states this residual; D263 does not waive it.
+    defp maintenance_helper(module, script, opts, to, stop_ms, deadline) do
+      send(to, {to, :maintenance_starting})
+
+      case module.start_link(opts, script) do
+        {:ok, pool} ->
+          send(to, {to, :maintenance_pool, pool})
+          result = module.query(pool, @maintenance_sql, script)
+          :ok = module.stop(pool, stop_ms, script)
+          send(to, {to, :maintenance_reply, result})
+          maintenance_after_reply(script, deadline)
+
+        _start_failed ->
+          send(to, {to, :maintenance_reply, :start_failed})
+      end
+    end
+
+    defp await_helper(%{to: to, helper: helper, helper_ref: ref} = s, deadline, down_ms) do
+      if expired?(deadline) do
+        expire_helper(s, down_ms)
+      else
+        receive do
+          {^to, :maintenance_starting} ->
+            await_helper(%{s | starting?: true}, deadline, down_ms)
+
+          {^to, :maintenance_pool, pool} ->
+            await_helper(pool(s, pool), deadline, down_ms)
+
+          {^to, :maintenance_reply, result} ->
+            await_helper(%{s | reply: {:reply, result}}, deadline, down_ms)
+
+          {:DOWN, ^ref, :process, ^helper, reason} ->
+            success_window(%{s | helper_down: {:down, reason}}, deadline)
+        after
+          remaining(deadline) -> expire_helper(s, down_ms)
+        end
+      end
+    end
+
+    defp expire_helper(s, down_ms) do
+      Process.exit(s.helper, :kill)
+
+      %{s | timed_out?: true, reply: nil}
+      |> drain_helper(System.monotonic_time(:millisecond) + down_ms)
+    end
+
+    # Grace starts at the kill request. It only acknowledges cleanup,
+    # never accepts a late result or extends the success deadline.
+    defp drain_helper(%{to: to, helper: helper, helper_ref: ref} = s, deadline) do
+      receive do
+        {^to, :maintenance_starting} ->
+          drain_helper(%{s | starting?: true}, deadline)
+
+        {^to, :maintenance_pool, pool} ->
+          drain_helper(pool(s, pool), deadline)
+
+        {^to, :maintenance_reply, _late} ->
+          drain_helper(s, deadline)
+
+        {:DOWN, ^ref, :process, ^helper, reason} ->
+          %{s | helper_down: {:down, reason}}
+      after
+        remaining(deadline) ->
+          Process.demonitor(ref, [:flush])
+          %{s | helper_down: :unacknowledged}
+      end
+    end
+
+    defp pool(s, pool), do: %{s | pool: {pool, Process.monitor(pool)}}
+
+    defp await_pool(%{pool: nil} = s, deadline, _down_ms),
+      do: success_window(%{s | pool_down: :none}, deadline)
+
+    defp await_pool(%{pool: {pool, ref}} = s, deadline, down_ms) do
+      if s.timed_out? or expired?(deadline) do
+        %{s | timed_out?: true, reply: nil}
+        |> cleanup_pool(System.monotonic_time(:millisecond) + down_ms)
+      else
+        receive do
+          {:DOWN, ^ref, :process, ^pool, _reason} ->
+            success_window(%{s | pool_down: :acknowledged}, deadline)
+        after
+          remaining(deadline) ->
+            %{s | timed_out?: true, reply: nil}
+            |> cleanup_pool(System.monotonic_time(:millisecond) + down_ms)
+        end
+      end
+    end
+
+    # Pool grace starts when success expires (or helper cleanup
+    # completes after an earlier expiry). Again: acknowledgement only.
+    defp cleanup_pool(%{pool: {pool, ref}} = s, deadline) do
+      receive do
+        {:DOWN, ^ref, :process, ^pool, _reason} ->
+          %{s | pool_down: :acknowledged}
+      after
+        remaining(deadline) ->
+          Process.demonitor(ref, [:flush])
+          %{s | pool_down: :unacknowledged}
+      end
+    end
+
+    defp expired?(deadline), do: System.monotonic_time(:millisecond) >= deadline
+    defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+    defp success_window(s, deadline) do
+      if expired?(deadline), do: %{s | timed_out?: true, reply: nil}, else: s
+    end
+
+    defp maintenance_outcome(%{helper_down: :unacknowledged}),
+      do: {:error, :maintenance_cleanup_unacknowledged}
+
+    defp maintenance_outcome(%{pool_down: :unacknowledged}),
+      do: {:error, :maintenance_cleanup_unacknowledged}
+
+    # Includes generic start errors: init may have created a supervisor
+    # before failing to announce a pool. Never infer resource absence.
+    defp maintenance_outcome(%{pool_down: :none, starting?: true}),
+      do: {:error, :maintenance_cleanup_unacknowledged}
+
+    defp maintenance_outcome(%{
+           timed_out?: false,
+           helper_down: {:down, :normal},
+           pool_down: :acknowledged,
+           reply: {:reply, result}
+         }),
+         do: maintenance_result(result)
+
+    defp maintenance_outcome(_not_success), do: {:error, :maintenance_unavailable}
+
+    defp drain_own(to) do
+      receive do
+        {^to, :maintenance_starting} -> drain_own(to)
+        {^to, :maintenance_pool, _pool} -> drain_own(to)
+        {^to, :maintenance_reply, _result} -> drain_own(to)
+      after
+        0 -> :ok
+      end
+    end
+
+    defmodule SdrAgent.Prototype.Authority.MaintenanceConnector do
+      @moduledoc false
+      def start_link(opts, nil), do: Postgrex.start_link(opts)
+      def query(pool, sql, nil), do: Postgrex.query(pool, sql, [], timeout: 5_000)
+      def stop(pool, stop_ms, nil), do: GenServer.stop(pool, :normal, stop_ms)
+    end
 
     @doc "Setup phase 2; see the moduledoc."
     @spec bootstrap(keyword()) :: {:ok, map()} | {:error, :bootstrap_failed}
@@ -1255,9 +1491,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
       @doc """
       Sets the calling process's maintenance-read seam: exactly
-      `%{connector: {module, script}, reply_ms:, down_ms:, stop_ms:}`, a
-      test connector module with its script and non-negative millisecond
-      bounds. Anything else raises `ArgumentError` and stores nothing.
+      `%{connector: {SdrAgent.PrototypeMaintenanceFake, script}, reply_ms:,
+      down_ms:, stop_ms:}`, the reviewed socket-free fake and non-negative
+      millisecond bounds. Anything else raises before storage or start.
+      This is a trusted test-code restriction, not a hostile-VM sandbox.
       """
       @spec put_maintenance(map()) :: :ok
       def put_maintenance(seam) do
@@ -1272,7 +1509,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @spec maintenance() :: map() | nil
       def maintenance, do: Process.get(@maintenance_key)
 
-      defp maintenance_seam?(%{connector: {module, _script}} = seam) when is_atom(module) do
+      defp maintenance_seam?(%{connector: {SdrAgent.PrototypeMaintenanceFake, _script}} = seam) do
         Enum.sort(Map.keys(seam)) == @maintenance_keys and
           Enum.all?([seam.reply_ms, seam.down_ms, seam.stop_ms], &(is_integer(&1) and &1 >= 0))
       end

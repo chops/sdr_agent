@@ -11,8 +11,9 @@ defmodule SdrAgent.Prototype.MaintenanceIdentityTest do
   helper and pool pids it names, this process's links and monitors, and
   the read's own message tags; no mailbox or process census.
 
-  RED (deny-only declarations): every test fails at its first assertion;
-  no helper, connector or cleanup step has run.
+  GREEN primitives: all typed-result, boundary and owned-process oracles
+  must pass, including later decoder inputs and all 200 race rounds.
+  This file never uses the real connector or proves a real socket.
   """
   use ExUnit.Case, async: true
 
