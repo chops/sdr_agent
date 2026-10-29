@@ -90,7 +90,10 @@ defmodule SdrAgent.Prototype.SafeLog do
     :bootstrap_failed,
     :credential_stale,
     :boot_refused,
-    :seed_failed
+    :seed_failed,
+    # Setup's `{:unexpected, phase}` outcome, printed once and then
+    # `:refused` (S1 ACK 6dbe2278 M1, ruled by S1b; I2).
+    :unexpected
   ]
 
   @import_reasons [
