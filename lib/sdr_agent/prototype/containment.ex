@@ -194,17 +194,19 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @canonical_keys List.delete(@keys, :tracers)
     # D1 (otel_tracer_server.erl:185-197, otel_sampler.erl:108-116): the
     # always_off sampler and the two processor funs with empty captured env.
+    # The fun names are measured, not derived: S4 d6 (Oct 29, Codex
+    # 0d4c8fc1) saw -fun-1- for both on every cached tracer of a fresh VM.
     @always_off {:otel_sampler_always_off, "AlwaysOffSampler", []}
     @on_start %{
       module: :otel_tracer_server,
-      name: :"-on_start/1-fun-0-",
+      name: :"-on_start/1-fun-1-",
       arity: 2,
       type: :local,
       env: [[]]
     }
     @on_end %{
       module: :otel_tracer_server,
-      name: :"-on_end/1-fun-0-",
+      name: :"-on_end/1-fun-1-",
       arity: 1,
       type: :local,
       env: [[]]
