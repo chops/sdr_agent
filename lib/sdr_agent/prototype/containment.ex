@@ -83,14 +83,26 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       * `seal_decision/3`, `advance_decision/3`, `recheck_decision/3` - the
         seal state machine over `{kind, phase_index}`.
 
+    The K0 entry token (process-local; S4 K0 GREEN r1):
+
+      * `put_entry/1` - `:ok` only when `kind` is one of `kinds/0` and the
+        calling process holds no token; it writes `{Containment, :entry} =>
+        kind` in the calling process's dictionary. Anything else is
+        `{:error, :entry_unadopted}` and writes nothing (set-once, never
+        overwritten, never raises). `SdrAgent.Prototype.TaskBoundary` is
+        its only lib caller, in the body process.
+      * `entry/0` - `{:ok, kind}` or `{:error, :entry_unadopted}`. It reads
+        only the calling process's dictionary, never `$callers`, so the
+        token is never inherited and dies with its process.
+
     Held (positive contracts outside this pure stage, each separately
     granted): `pinned/2` (the reviewed constants come from discovery) and
     the VM-effect functions `snapshot/0`, `precheck/1`, `seal/1`,
-    `advance/2`, `recheck/1`, `put_entry/1` and `entry/0`, including the
-    snapshot sender lifetime, the snapshot's tracer projection, readiness
-    and descendant cleanup, and S1's setup placements.
+    `advance/2` and `recheck/1`, including the snapshot sender lifetime,
+    the snapshot's tracer projection, readiness and descendant cleanup,
+    and S1's setup placements.
 
-    Stage: pure GREEN.
+    Stage: pure GREEN plus the K0 entry token.
     """
 
     @type kind :: :setup | :provision | :import | :op | :serve
@@ -127,6 +139,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @type seal :: {kind(), non_neg_integer()}
 
     @kinds [:setup, :provision, :import, :op, :serve]
+    # The K0 entry token's key in the holding process's dictionary.
+    @entry_key {__MODULE__, :entry}
     @codes [
       :entry_unadopted,
       :otel_env,
@@ -475,11 +489,27 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @doc "Held VM effect (IT/SV only): G2."
     def recheck(_point), do: red({:error, :not_implemented})
 
-    @doc "Held VM effect (TaskBoundary only): records the entry token in this process."
-    def put_entry(_kind), do: red({:error, :not_implemented})
+    @doc "Process-local (TaskBoundary only): adopts the K0 entry token once; see the moduledoc."
+    @spec put_entry(term()) :: :ok | {:error, :entry_unadopted}
+    def put_entry(kind) when kind in @kinds do
+      if Process.get(@entry_key) == nil do
+        Process.put(@entry_key, kind)
+        :ok
+      else
+        {:error, :entry_unadopted}
+      end
+    end
 
-    @doc "Held: the entry token of this process, or nil."
-    def entry, do: red({:error, :not_implemented})
+    def put_entry(_kind), do: {:error, :entry_unadopted}
+
+    @doc "The K0 entry token of the calling process only; see the moduledoc."
+    @spec entry() :: {:ok, kind()} | {:error, :entry_unadopted}
+    def entry do
+      case Process.get(@entry_key) do
+        kind when kind in @kinds -> {:ok, kind}
+        _none -> {:error, :entry_unadopted}
+      end
+    end
 
     # -- Phases, K0/K-block and K7 -------------------------------------------
 

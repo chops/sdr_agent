@@ -37,6 +37,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
        caller followed by the caller's own `$callers`, plus the nesting
        key. Nothing else is copied into it. A raise in steps 5 or 6 aborts
        at stage `:entry`.
+       6a. Before the body's first statement, the body process adopts the
+       K0 entry token of `task` (`SdrAgent.Prototype.Containment`'s
+       `put_entry/1`; this module is its only lib caller). Only a returned
+       `:ok` runs the body; any other result or a raise (`:export` has no
+       containment kind) aborts at stage `:entry` without calling the
+       body. The caller never holds a token, and no process the body
+       starts inherits it.
     7. Only a body result of `:ok` (completed) or `:refused` (the body
        printed its own closed code) is known. Every other result, raise,
        throw, exit or death of the body's process aborts at stage `:body`.
@@ -52,10 +59,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     no Logger configuration. The entry observations are bounded and
     non-linearizable (contract r6), not transaction or capability erasure.
     A body process outlives a caller that dies after the spawn (disclosed,
-    non-deciding). The K0 entry token is not part of this module yet.
+    non-deciding).
     """
 
     alias SdrAgent.AgentEnv.OperationSnapshot
+    alias SdrAgent.Prototype.Containment
     alias SdrAgent.Prototype.SafeLog
 
     # S1's RepoState (a3cd9b78) is reached only through a dynamic call, so
@@ -136,7 +144,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp outermost(task, attached, body) do
       with :ok <- admission(task, attached, body),
            :clear <- entry_guard(),
-           {:started, monitored} <- start(body) do
+           {:started, monitored} <- start(task, body) do
         conclude(task, await(monitored))
       else
         :attach -> abort(task, :attach)
@@ -169,23 +177,33 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     # Steps 5 and 6. A raise here is aborted entry.
-    defp start(body) do
+    defp start(task, body) do
       System.put_env(@dump_var, "0")
       caller = self()
       tag = make_ref()
       inherited = Process.get(:"$callers") || []
       callers = [caller | inherited]
-      {pid, ref} = spawn_monitor(fn -> body_process(caller, tag, callers, body) end)
+      {pid, ref} = spawn_monitor(fn -> body_process(caller, tag, callers, task, body) end)
       {:started, {pid, ref, tag}}
     catch
       _kind, _reason -> :not_started
     end
 
-    # Step 7, in the body process: only :ok and :refused are known.
-    defp body_process(caller, tag, callers, body) do
+    # Steps 6a and 7, in the body process: the entry token, then the body.
+    defp body_process(caller, tag, callers, task, body) do
       Process.put(:"$callers", callers)
       Process.put(@nested, true)
-      send(caller, {tag, outcome(body)})
+      send(caller, {tag, adopted_outcome(task, body)})
+    end
+
+    # Step 6a: the body runs only after the token adoption returned exactly
+    # :ok; any other result or a raise is :unadopted (no permissive
+    # fallback). Step 7: only :ok and :refused are known.
+    defp adopted_outcome(task, body) do
+      case observe(fn -> Containment.put_entry(task) end) do
+        {:returned, :ok} -> outcome(body)
+        _not_adopted -> :unadopted
+      end
     end
 
     defp outcome(body) do
@@ -215,6 +233,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp conclude(_task, :ok), do: :ok
     defp conclude(_task, :refused), do: exit({:shutdown, 2})
     defp conclude(task, :aborted), do: abort(task, :body)
+    defp conclude(task, :unadopted), do: abort(task, :entry)
 
     defp abort(task, stage) do
       present(task, stage)
