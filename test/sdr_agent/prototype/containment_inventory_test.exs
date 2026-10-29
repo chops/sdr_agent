@@ -9,7 +9,8 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
   application or OS environment is in the reviewed inventory.
 
   STRUCTURAL CONTROL: it is expected to PASS at the RED head (the counts
-  below are the S4 head 231914a source and the locked dependencies). It
+  below are the S4 RED head 709e3030 source, with S1b TaskBoundary step 5
+  at task_boundary.ex, and the locked dependencies). It
   earns no TDD credit; it fails on any new or removed call site, which then
   needs review. Inventory counts are per file, by the patterns below.
   """
@@ -24,6 +25,7 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
     "lib/sdr_agent/calibration_console.ex" => 8,
     "lib/sdr_agent/logger/exception_filter.ex" => 2,
     "lib/sdr_agent/prototype/safe_log.ex" => 2,
+    "lib/sdr_agent/prototype/task_boundary.ex" => 1,
     "lib/sdr_agent/repo/query_log.ex" => 1,
     "lib/sdr_agent/telemetry.ex" => 3,
     "lib/sdr_agent/telemetry/repo_spans.ex" => 1

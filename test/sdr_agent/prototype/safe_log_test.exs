@@ -24,6 +24,12 @@ defmodule SdrAgent.Prototype.SafeLogTest do
 
   @marker "CANARY-d237-safelog-7f3a"
   @withheld "prototype: log content withheld"
+  # An output call: IO., Logger.<function>, :io., :logger. or Mix.shell().
+  # A module path (Logger.Formatter, SdrAgent.Logger.ExceptionFilter) is not
+  # one; an explicit Elixir. prefix at a module boundary still is. Unlike a
+  # leading \b, the lookbehinds also match :io. and :logger. after a space
+  # or a parenthesis.
+  @output_call ~r/(?<![\w.])(?:Elixir\.)?(IO\.|Logger\.[a-z_])|(?<![\w.]):(io|logger)\.|\bMix\.shell\(\)/
 
   setup do
     on_exit(fn -> SafeLog.detach() end)
@@ -203,11 +209,40 @@ defmodule SdrAgent.Prototype.SafeLogTest do
         Path.wildcard("lib/mix/tasks/sdr.prototype.*.ex")
 
     allowed = ["lib/sdr_agent/prototype/safe_log.ex", "lib/sdr_agent/prototype/output.ex"]
-    pattern = ~r/\b(IO\.|Logger\.|:io\.|:logger\.|Mix\.shell\(\))/
 
     offenders =
-      for file <- files, file not in allowed, Regex.match?(pattern, File.read!(file)), do: file
+      for file <- files,
+          file not in allowed,
+          Regex.match?(@output_call, File.read!(file)),
+          do: file
 
     assert offenders == []
+  end
+
+  test "the output-call pattern matches each output form and no module path" do
+    calls = [
+      "IO.puts(x)",
+      " IO.write(x)",
+      "IO.inspect(x)",
+      "Logger.error(x)",
+      "Logger.log(:info, x)",
+      "Elixir.Logger.error(x)",
+      "Elixir.IO.puts(x)",
+      " :io.format(x)",
+      "(:io.put_chars(x))",
+      " :logger.log(:info, x)",
+      "Mix.shell().info(x)"
+    ]
+
+    paths = [
+      "{Logger.Formatter, template, metadata, truncate}",
+      "formatter({Logger.Formatter, %Logger.Formatter{}})",
+      "{SdrAgent.Logger.ExceptionFilter, :filter, 2}",
+      "require Logger",
+      "Foo.IO.bar(x)"
+    ]
+
+    for call <- calls, do: assert(Regex.match?(@output_call, call), "not matched: #{call}")
+    for path <- paths, do: refute(Regex.match?(@output_call, path), "matched: #{path}")
   end
 end
