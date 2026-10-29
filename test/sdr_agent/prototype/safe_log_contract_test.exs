@@ -126,6 +126,7 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
       seed_result: [revisions: 4, result: :replay],
       import_row: [row_index: 14, result: :skipped, reason: :role_mailbox],
       import_summary: [imported: 1, replayed: 0, refused: 2, cap_used: 3],
+      import_refused: [reason: :digest_mismatch],
       provisioned: [grant_id: uuid, result: :created, reason: :none],
       op_result: [command: :approve, id: uuid, result: :refused, reason: :stale_review],
       bundle_written: [bundle_id: uuid, items: 7],
@@ -135,7 +136,8 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
         withheld: 2,
         captured: 0,
         attempts_left: 1_000_000
-      ]
+      ],
+      task_aborted: [task: :import, stage: :body]
     }
   end
 

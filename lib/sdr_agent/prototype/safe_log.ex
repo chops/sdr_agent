@@ -90,7 +90,11 @@ defmodule SdrAgent.Prototype.SafeLog do
     :bootstrap_failed,
     :credential_stale,
     :boot_refused,
-    :seed_failed
+    :seed_failed,
+    # Setup's `{:unexpected, phase}` outcome, printed once and then
+    # `:refused` (S1 ACK 6dbe2278 M1, ruled by S1b; I2).
+    :unexpected,
+    :seed_differs
   ]
 
   @import_reasons [
@@ -114,6 +118,19 @@ defmodule SdrAgent.Prototype.SafeLog do
     :forbidden,
     :import_failed
   ]
+
+  # An input-level import refusal (S3 I4 import grammar r1 §3, adopted
+  # exactly and in its order): the row family without `:none`, then the
+  # six input-stage atoms. `@import_reasons` and `import_row` are unchanged.
+  @import_refused_reasons (@import_reasons -- [:none]) ++
+                            [
+                              :invalid_arguments,
+                              :session_unset,
+                              :invalid_agent,
+                              :invalid_correlation,
+                              :delegation_not_found,
+                              :boot_refused
+                            ]
 
   @provision_reasons [
     :none,
@@ -155,6 +172,7 @@ defmodule SdrAgent.Prototype.SafeLog do
       reason: {:enum, @import_reasons}
     ],
     import_summary: [imported: :count, replayed: :count, refused: :count, cap_used: :count],
+    import_refused: [reason: {:enum, @import_refused_reasons}],
     provisioned: [
       grant_id: :uuid,
       result: {:enum, [:created, :replay, :refused]},
@@ -173,6 +191,10 @@ defmodule SdrAgent.Prototype.SafeLog do
       withheld: :count,
       captured: :count,
       attempts_left: :count
+    ],
+    task_aborted: [
+      task: {:enum, [:setup, :provision, :import, :op, :serve, :export]},
+      stage: {:enum, [:attach, :entry, :body]}
     ]
   }
 
@@ -182,10 +204,12 @@ defmodule SdrAgent.Prototype.SafeLog do
           | :seed_result
           | :import_row
           | :import_summary
+          | :import_refused
           | :provisioned
           | :op_result
           | :bundle_written
           | :status_counts
+          | :task_aborted
 
   @doc "The closed set of codes."
   @spec codes() :: [code()]
@@ -195,11 +219,15 @@ defmodule SdrAgent.Prototype.SafeLog do
   @spec shapes() :: %{code() => keyword()}
   def shapes, do: @shapes
 
-  @doc "A closed reason enum: `:boot`, `:setup`, `:import`, `:provision` or `:op`."
-  @spec reasons(:boot | :setup | :import | :provision | :op) :: [atom()]
+  @doc """
+  A closed reason enum: `:boot`, `:setup`, `:import`, `:import_refused`,
+  `:provision` or `:op`.
+  """
+  @spec reasons(:boot | :setup | :import | :import_refused | :provision | :op) :: [atom()]
   def reasons(:boot), do: @boot_reasons
   def reasons(:setup), do: @setup_reasons
   def reasons(:import), do: @import_reasons
+  def reasons(:import_refused), do: @import_refused_reasons
   def reasons(:provision), do: @provision_reasons
   def reasons(:op), do: @op_reasons
 
