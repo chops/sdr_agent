@@ -49,6 +49,18 @@ defmodule SdrAgent.Prototype.Session do
     [queues: false, plugins: false, peer: false, stage_interval: :infinity]
   end
 
+  @doc """
+  The pure Repo decision of a task entry (S1 I4b r2 §7), over a
+  `SdrAgent.Prototype.RepoState.repo_state/0` result: `:not_started` is
+  `:start` (the entry starts the Repo), `{:started, false}` is `:reuse`
+  (a Repo this entry does not own and never stops), and `{:started, true}`
+  or any other value is `{:error, :binding_mismatch}` (the nesting
+  refusal). It starts, stops and reads nothing. RED: not implemented.
+  """
+  @spec repo_decision(term()) ::
+          :start | :reuse | {:error, :binding_mismatch} | {:error, :not_implemented}
+  def repo_decision(_state), do: red({:error, :not_implemented})
+
   @doc "Enters a task process; see the moduledoc."
   @spec enter(keyword()) :: {:ok, map()} | {:error, atom()}
   def enter(opts) when is_list(opts) do
@@ -94,4 +106,9 @@ defmodule SdrAgent.Prototype.Session do
   rescue
     error in SdrAgent.Prototype.BootCheck.RefusalError -> {:error, error.code}
   end
+
+  # RED stub result, typed dynamic() so callers compile against the stub
+  # (Elixir 1.20 infers literal returns). Read-only: nothing writes the key;
+  # removed in GREEN.
+  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end
