@@ -2,11 +2,11 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   @moduledoc """
   The source guard of `mix sdr.prototype.import`
   (`SdrAgent.ImportTaskSource.violations/1`; Codex 8ff184e4 and the
-  coordinator's harness GO; I4 grammar r2 R-a1, the gate-independent rules,
-  Codex d3048840), in two parts:
+  coordinator's harness GO; I4 R-a1 plus T3 grammar-r3 tagged guard,
+  entity ruling eef53204 and direction review 10912db7), in two parts:
 
   - **the checker itself**, on tracked synthetic sources written here (no
-    task file in `lib/`): a conforming sample of the I4 r2 grammar has no
+    task file in `lib/`): a conforming sample of I4 grammar r3 plus T3 has no
     violation, and every single-defect variant has exactly the violations
     of its defect, one test per variant. They are evidence about the
     checker, not a task RED;
@@ -19,10 +19,14 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   `TaskBoundary.run(:import, attached, fn -> body(args) end)`; one private
   `body/1` clause starts with `Mix.Task.run("app.config", [])` and
   `{:ok, _} = Application.ensure_all_started(:opentelemetry)`, and holds the
-  session entry and every reader; refusals go through
+  session entry, one tagged ContainmentGuard.guard(:import) and every reader;
+  all readers are descendants of that same with's later generators or do
+  block, never its else or a fall-through after it. The first else clause
+  returns the whole tagged guard result unchanged. Input refusals go through
   `SafeLog.say(:import_refused, …)`; no `exit`, `raise`, `throw`, halt or
-  stop. The containment gates (G0, G1) are NOT part of this sample or of
-  these rules: they come with R-a2, once their call forms are accepted.
+  stop. Old precheck/seal/recheck, activation and direct provider calls are
+  rejected. Literal :import only, not a variable/attribute. Both equivalent
+  whole-result pattern orders and a bare underscore are accepted controls.
 
   Honest scope (see the checker's moduledoc): a lexical, source-order guard
   over explicit remote calls inside the task module, and only inside a
@@ -46,6 +50,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
 
       alias SdrAgent.Prototype.{DossierImport, DossierParser, ImportOutcome, SafeLog, Session}
       alias SdrAgent.Prototype.TaskBoundary
+      alias SdrAgent.Prototype.ContainmentGuard
       alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest
 
       @impl Mix.Task
@@ -61,11 +66,13 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
 
         with {:ok, opts} <- parse(args),
              {:ok, %{actor: actor}} <- at(:session, Session.enter(agent: opts.agent, session_correlation: correlation)),
+             {:guard, :ok} <- {:guard, ContainmentGuard.guard(:import)},
              {:ok, dossier} <- at(:dossier, DossierParser.read(opts.dossier, opts.dossier_sha256)),
              {:ok, manifest} <- at(:spotcheck, Manifest.read(opts.spotcheck, opts.spotcheck_sha256, {dossier, opts.dossier_sha256})),
              {:ok, rows} <- at(:prepare, DossierImport.prepare(dossier, opts.dossier_sha256, manifest, opts.rows, opts.artifacts)) do
           finish(DossierImport.import(rows, actor), actor)
         else
+          {:guard, _result} = guard_refusal -> guard_refusal
           {:error, stage, error} -> refuse(ImportOutcome.reason(stage, error))
         end
       end
@@ -105,6 +112,14 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   @body_anchor ~S|correlation = System.get_env("SDR_PROTOTYPE_SESSION")| <> "\n"
   @with "with {:ok, opts} <- parse(args),"
   @enter "Session.enter(agent: opts.agent, session_correlation: correlation)"
+  @session_step "{:ok, %{actor: actor}} <- at(:session, " <> @enter <> "),\n"
+  @guard_call "ContainmentGuard.guard(:import)"
+  @guard_step "{:guard, :ok} <- {:guard, " <> @guard_call <> "},\n"
+  @guard_route "{:guard, _result} = guard_refusal -> guard_refusal\n"
+  @dossier_step "{:ok, dossier} <- at(:dossier, DossierParser.read(opts.dossier, opts.dossier_sha256)),\n"
+  @manifest_step "{:ok, manifest} <- at(:spotcheck, Manifest.read(opts.spotcheck, opts.spotcheck_sha256, {dossier, opts.dossier_sha256})),\n"
+  @guard_alias "alias SdrAgent.Prototype.ContainmentGuard\n"
+  @body_end "\n    end\n\n    defp finish({:ok, summary}, actor) do"
   @row_say "SafeLog.say(:import_row, row_index: 0, result: :imported, reason: :none)"
   @refused_say "SafeLog.say(:import_refused, reason: reason)\n"
   @manifest_alias "alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest\n"
@@ -115,6 +130,118 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
 
   # {label, [{text to replace (each exactly once), replacement}], expected}
   @variants [
+    # T3: literal guard edge, whole-result provenance and same-with readers.
+    {:guard_missing, [{@guard_step, ""}], [:gate_order, :missing_reader]},
+    {:guard_wrong_kind, [{@guard_call, "ContainmentGuard.guard(:serve)"}], [:gate_order]},
+    {:guard_wrong_arity, [{@guard_call, "ContainmentGuard.guard()"}],
+     [:gate_order, :missing_reader]},
+    {:guard_variable_kind, [{@guard_call, "ContainmentGuard.guard(kind)"}], [:gate_order]},
+    {:guard_attribute_kind, [{@guard_call, "ContainmentGuard.guard(@kind)"}], [:gate_order]},
+    {:guard_twice, [{@guard_step, @guard_step <> @guard_step}], [:gate_order]},
+    {:guard_before_session, [{@guard_step, ""}, {@session_step, @guard_step <> @session_step}],
+     [:gate_order]},
+    {:guard_after_dossier, [{@guard_step, ""}, {@dossier_step, @dossier_step <> @guard_step}],
+     [:gate_order]},
+    {:guard_after_manifest, [{@guard_step, ""}, {@manifest_step, @manifest_step <> @guard_step}],
+     [:gate_order]},
+    {:guard_in_helper,
+     [
+       {@guard_step, "_ <- guard_in_helper(),\n"},
+       {@first_helper, "defp guard_in_helper, do: " <> @guard_call <> "\n" <> @first_helper}
+     ], [:gate_order, :outside_body]},
+    {:guard_untagged, [{@guard_step, ":ok <- " <> @guard_call <> ",\n"}], [:gate_order]},
+    {:guard_widened_lhs, [{@guard_step, "{:guard, _} <- {:guard, " <> @guard_call <> "},\n"}],
+     [:gate_order]},
+    {:guard_bare_match, [{@guard_step, "{:guard, :ok} = {:guard, " <> @guard_call <> "},\n"}],
+     [:gate_order]},
+    {:guard_wrong_tag, [{@guard_step, "{:guard, :ok} <- {:different, " <> @guard_call <> "},\n"}],
+     [:gate_order]},
+    {:guard_partial_error_tag,
+     [
+       {@guard_step,
+        "{:guard, :ok} <- (case " <>
+          @guard_call <>
+          " do {:error, code} -> {:guard, code}; other -> other end),\n"}
+     ], [:gate_order]},
+    {:guard_route_missing, [{@guard_route, ""}], [:gate_order]},
+    {:guard_route_refused, [{@guard_route, "{:guard, _result} = guard_refusal -> :refused\n"}],
+     [:gate_order]},
+    {:guard_route_maps_code,
+     [{@guard_route, "{:guard, code} -> refuse(ImportOutcome.reason(:session, code))\n"}],
+     [:gate_order]},
+    {:guard_route_logs_code,
+     [
+       {@guard_route,
+        "{:guard, code} = guard_refusal ->\nSafeLog.say(:import_refused, reason: code)\nguard_refusal\n"}
+     ], [:gate_order]},
+    {:guard_route_other_variable, [{@guard_route, "{:guard, _result} = guard_refusal -> args\n"}],
+     [:gate_order]},
+    {:guard_route_narrowed_pattern,
+     [{@guard_route, "{:guard, {:error, _}} = guard_refusal -> guard_refusal\n"}], [:gate_order]},
+    {:guard_route_wrong_tag, [{@guard_route, "{:other, _} = guard_refusal -> guard_refusal\n"}],
+     [:gate_order]},
+    {:guard_earlier_catchall, [{@guard_route, "_other -> :refused\n" <> @guard_route}],
+     [:gate_order]},
+    {:guard_nested_with_falls_through,
+     [
+       {@guard_step,
+        "_ <- (with {:guard, :ok} <- {:guard, " <>
+          @guard_call <>
+          "} do\n:ok\nelse\n{:guard, _} = rejected -> rejected\nend),\n"}
+     ], [:gate_order]},
+    {:reader_after_guarded_with,
+     [{@body_end, "\n_ = DossierParser.read(:synthetic, :synthetic)" <> @body_end}],
+     [:gate_order]},
+    {:reader_in_else,
+     [
+       {"{:error, stage, error} -> refuse(ImportOutcome.reason(stage, error))",
+        "{:error, stage, error} ->\n_ = DossierParser.read(:synthetic, :synthetic)\nrefuse(ImportOutcome.reason(stage, error))"}
+     ], [:gate_order]},
+    {:old_precheck,
+     [{@body_anchor, "SdrAgent.Prototype.Containment.precheck(:import)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:old_seal,
+     [{@body_anchor, "SdrAgent.Prototype.Containment.seal(:import)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:old_recheck,
+     [{@body_anchor, "SdrAgent.Prototype.Containment.recheck(:before_spawn)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:guard_activate, [{@body_anchor, "ContainmentGuard.activate(:serve)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:guard_activated_read,
+     [{@body_anchor, "ContainmentGuard.activated?(:serve)\n" <> @body_anchor}], [:gate_order]},
+    {:guard_vm_call, [{@body_anchor, "ContainmentGuard.guard_vm(:serve)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:provider_call,
+     [{@body_anchor, "SdrAgent.AI.ModelProvider.complete(:synthetic)\n" <> @body_anchor}],
+     [:gate_order]},
+    {:provider_child_call,
+     [
+       {@body_anchor,
+        "SdrAgent.AI.ModelProvider.ClaudeCLI.complete(:synthetic)\n" <> @body_anchor}
+     ], [:gate_order]},
+    {:provider_aliased_call,
+     [
+       {@guard_alias, @guard_alias <> "alias SdrAgent.AI.ModelProvider, as: Brain\n"},
+       {@body_anchor, "Brain.complete(:synthetic)\n" <> @body_anchor}
+     ], [:gate_order]},
+    {:old_aliased_precheck,
+     [
+       {@guard_alias, @guard_alias <> "alias SdrAgent.Prototype.Containment, as: LegacyGuard\n"},
+       {@body_anchor, "LegacyGuard.precheck(:import)\n" <> @body_anchor}
+     ], [:gate_order]},
+    # T3 spelling/alias controls: same selected syntax, not runtime proof.
+    {:guard_bare_underscore, [{@guard_route, "{:guard, _} = guard_refusal -> guard_refusal\n"}],
+     []},
+    {:guard_reversed_pattern,
+     [{@guard_route, "guard_refusal = {:guard, _result} -> guard_refusal\n"}], []},
+    {:guard_fully_qualified,
+     [{@guard_call, "SdrAgent.Prototype.ContainmentGuard.guard(:import)"}], []},
+    {:guard_renamed_alias,
+     [
+       {@guard_alias, "alias SdrAgent.Prototype.ContainmentGuard, as: ImportGuard\n"},
+       {@guard_call, "ImportGuard.guard(:import)"}
+     ], []},
     # :run_shape (R-a1; replaces :attach_not_first)
     {:run_extra_statement, [{@attach, @attach <> "_ = :ok\n"}], [:run_shape]},
     {:attach_zero_arity, [{@attach, "attached = SafeLog.attach()\n"}], [:run_shape]},
@@ -132,7 +259,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
        {@first_helper,
         "defp early(opts), do: DossierParser.read(opts.dossier, opts.dossier_sha256)\n" <>
           @first_helper}
-     ], [:outside_body]},
+     ], [:gate_order, :outside_body]},
     {:enter_in_an_earlier_helper,
      [
        {@enter, "enter(opts, correlation)"},
@@ -193,10 +320,10 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
     # unchanged rules, re-based on the body
     {:manifest_read_before_entry,
      [{@with, "_early = Manifest.read(opts.spotcheck, opts.spotcheck_sha256, nil)\n" <> @with}],
-     [:read_before_enter]},
+     [:gate_order, :read_before_enter]},
     {:dossier_read_before_entry,
      [{@with, "_early = DossierParser.read(opts.dossier, opts.dossier_sha256)\n" <> @with}],
-     [:read_before_enter]},
+     [:gate_order, :read_before_enter]},
     {:enter_wrong_arity, [{@enter, "Session.enter([agent: opts.agent], correlation)"}],
      [:enter_arity]},
     {:enter_twice, [{@body_anchor, "_again = Session.enter(agent: :x)\n" <> @body_anchor}],
@@ -340,7 +467,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   @violations ~w(no_module not_mix_task no_moduledoc no_run run_shape outside_body body_prologue
                  enter_count enter_arity read_before_enter missing_reader start_call env_read
                  file_call say_shape other_channel abnormal_exit indirect_dispatch
-                 unsupported_scope)a
+                 unsupported_scope gate_order)a
 
   defp occurrences(text, part), do: length(String.split(text, part)) - 1
 
