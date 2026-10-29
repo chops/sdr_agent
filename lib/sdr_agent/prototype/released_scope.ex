@@ -67,8 +67,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     in-process convention, not a capability against server code.
 
     Consumers (pinned by `ReleaseGuardTest` and the β partition probe):
-    `run/3` only by `SdrAgent.Agents.ReleasedOutput`, `original_basis/2`
-    only by `SdrAgent.Agents.Changes.ReleaseDecision`.
+    `run/3` only by `SdrAgent.Agents.ReleasedOutput` and, for the worker
+    predicates (D-237 b2d, a function that reads nothing),
+    `SdrAgent.Agents.ResultGate`; `original_basis/2` only by
+    `SdrAgent.Agents.Changes.ReleaseDecision`.
     """
 
     require Ash.Query

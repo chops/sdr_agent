@@ -243,7 +243,9 @@ defmodule SdrAgent.Agents.ResultGate do
   or withheld (REQ-07-5/6; review MF5). The
   workers never turn such a run into a success or a `:crash`; it is left
   for the gate or for run recovery (`SdrAgent.SDR.StaleRunSweeper`). A read
-  error counts as unreleased (fail closed).
+  error counts as unreleased (fail closed). In prototype runtime a verified
+  `released_unverified` release counts as released
+  (`unreleased_invocations/1`).
   """
   @spec unreleased?(struct()) :: boolean()
   def unreleased?(%AgentRun{} = run) do
@@ -257,6 +259,17 @@ defmodule SdrAgent.Agents.ResultGate do
   The run's completed generation-2 ClaudeCLI invocations with no `:released`
   release, in call order: undecided ones, and withheld ones whose run has
   not been stopped yet (review MF5). The callers ask only about running runs.
+
+  **D-237 b2d (mechanism note r3 section A, "Consumers").** In prototype
+  runtime each of them is then checked, in call order, by
+  `SdrAgent.Prototype.ReleasedScope.run/3` as the run tenant's kernel
+  actor, with a function that reads nothing: it leaves the list only when
+  the scope verifies its `released_unverified` release (the fully
+  historically verified original, then current use). A refusal
+  (`:not_found`, `:not_released`, `:basis_invalid`, `:binding_mismatch`)
+  keeps it; any other error is the list's `{:error, error}`, unchanged.
+  Nothing is written and no output is read. Ordinary runtime is unchanged;
+  the production build has the filter only.
   """
   @spec unreleased_invocations(struct()) :: {:ok, [struct()]} | {:error, term()}
   def unreleased_invocations(%AgentRun{id: run_id, tenant_id: tenant_id}) do
@@ -269,8 +282,44 @@ defmodule SdrAgent.Agents.ResultGate do
     )
     |> Ash.Query.sort(sequence_in_run: :asc)
     |> Ash.read()
+    |> verified_unreleased(tenant_id)
   rescue
     error -> {:error, error}
+  end
+
+  if @prototype_compiled do
+    # D-237 b2d: the closed refusals of ReleasedScope.run/3; each keeps the
+    # invocation unreleased. Any other error is technical and ends the list.
+    @scope_refusals [:not_found, :not_released, :basis_invalid, :binding_mismatch]
+
+    defp verified_unreleased({:ok, invocations}, tenant_id) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: unverified(invocations, Actor.system(:kernel, tenant_id), []),
+        else: {:ok, invocations}
+    end
+
+    defp verified_unreleased(error, _tenant_id), do: error
+
+    # In call order; the verifier's function reads nothing.
+    defp unverified([], _actor, kept), do: {:ok, Enum.reverse(kept)}
+
+    defp unverified([invocation | rest], actor, kept) do
+      invocation
+      |> SdrAgent.Prototype.ReleasedScope.run(actor, fn _scope -> :verified end)
+      |> case do
+        {:ok, :verified} ->
+          unverified(rest, actor, kept)
+
+        {:error, reason} when reason in @scope_refusals ->
+          unverified(rest, actor, [invocation | kept])
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+  else
+    # The production build has no prototype runtime: the filter only.
+    defp verified_unreleased(result, _tenant_id), do: result
   end
 
   ## Finalize (step 3)
