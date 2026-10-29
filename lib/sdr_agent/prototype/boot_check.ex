@@ -25,7 +25,7 @@ defmodule SdrAgent.Prototype.BootCheck do
     or `{:error, code}` with a code of `reasons/0`;
   - `verify!/0` runs `check/1` on the configured switch and, on success,
     fixes `SdrAgent.Prototype.runtime/0` for the VM; on failure it raises
-    `SdrAgent.Prototype.BootCheck.Refusal` carrying one fixed code;
+    `SdrAgent.Prototype.BootCheck.RefusalError` carrying one fixed code;
   - `start_link/1` (the supervision child) runs `verify!/0` and returns
     `:ignore` on success or `{:error, code}`, which fails the start.
 
@@ -86,7 +86,7 @@ defmodule SdrAgent.Prototype.BootCheck do
          :ok <- fix(result) do
       :ok
     else
-      {:error, code} -> raise SdrAgent.Prototype.BootCheck.Refusal, code: code
+      {:error, code} -> raise SdrAgent.Prototype.BootCheck.RefusalError, code: code
     end
   end
 
@@ -102,7 +102,7 @@ defmodule SdrAgent.Prototype.BootCheck do
     verify!(if Keyword.keyword?(arg), do: arg, else: [])
     :ignore
   rescue
-    error in SdrAgent.Prototype.BootCheck.Refusal -> {:error, error.code}
+    error in SdrAgent.Prototype.BootCheck.RefusalError -> {:error, error.code}
   end
 
   # The boot check's own read of the binding rows (at most two), as the
@@ -252,7 +252,7 @@ defmodule SdrAgent.Prototype.BootCheck do
     do: Keyword.get(Application.get_env(:sdr_agent, SdrAgent.Prototype, []), :switch, :off)
 end
 
-defmodule SdrAgent.Prototype.BootCheck.Refusal do
+defmodule SdrAgent.Prototype.BootCheck.RefusalError do
   @moduledoc """
   Raised by `SdrAgent.Prototype.BootCheck.verify!/0` with one fixed boot
   refusal `code`; its message is `"prototype boot refused: <code>"` and holds

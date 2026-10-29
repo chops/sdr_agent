@@ -154,7 +154,7 @@ defmodule SdrAgent.Prototype.BootCheckTest do
     defp verify(switch) do
       BootCheck.verify!(switch: switch)
     rescue
-      error in SdrAgent.Prototype.BootCheck.Refusal -> {:refused, error.code}
+      error in SdrAgent.Prototype.BootCheck.RefusalError -> {:refused, error.code}
     end
 
     defp fabricated_snapshot do
@@ -220,7 +220,7 @@ defmodule SdrAgent.Prototype.BootCheckTest do
         try do
           BootCheck.verify!()
         rescue
-          error in SdrAgent.Prototype.BootCheck.Refusal -> {:refused, error.code}
+          error in SdrAgent.Prototype.BootCheck.RefusalError -> {:refused, error.code}
         end
 
       assert refused == {:refused, :instance_mismatch}
@@ -311,10 +311,10 @@ defmodule SdrAgent.Prototype.BootCheckTest do
           BootCheck.verify!(switch: %{policy_id: "d237-prototype/1", instance_id: "not-a-uuid"})
           :no_raise
         rescue
-          e in SdrAgent.Prototype.BootCheck.Refusal -> e
+          e in SdrAgent.Prototype.BootCheck.RefusalError -> e
         end
 
-      assert match?(%SdrAgent.Prototype.BootCheck.Refusal{code: :switch_invalid}, error),
+      assert match?(%SdrAgent.Prototype.BootCheck.RefusalError{code: :switch_invalid}, error),
              "verify!/1 did not raise :switch_invalid: #{inspect(error)}"
 
       assert Exception.message(error) == "prototype boot refused: switch_invalid"
