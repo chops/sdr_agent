@@ -11,9 +11,9 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
 
   RED (deny-only declarations): every test fails at its first assertion
   with its fixed message; later rows of a table are unexecuted.
-  The local-fun names `-on_start/1-fun-0-` and `-on_end/1-fun-0-` are the
-  values discovery must confirm (packet r4 section 7.4); they are pinned
-  here as the reviewed expectation.
+  The local-fun names `-on_start/1-fun-1-` and `-on_end/1-fun-1-` are the
+  measured values (S4 d6, Oct 29: every cached tracer of a fresh OG-2 VM;
+  Codex 0d4c8fc1); the former source-derived `-fun-0-` names are refused.
   """
   use ExUnit.Case, async: true
 
@@ -21,14 +21,14 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
 
   @on_start %{
     module: :otel_tracer_server,
-    name: :"-on_start/1-fun-0-",
+    name: :"-on_start/1-fun-1-",
     arity: 2,
     type: :local,
     env: [[]]
   }
   @on_end %{
     module: :otel_tracer_server,
-    name: :"-on_end/1-fun-0-",
+    name: :"-on_end/1-fun-1-",
     arity: 1,
     type: :local,
     env: [[]]
@@ -101,7 +101,8 @@ defmodule SdrAgent.Prototype.ContainmentDescriptorTest do
        :tracer_processor},
       {%{@tracer | on_start: %{@on_start | env: [[{:otel_simple_processor, %{}}]]}},
        :tracer_processor},
-      {%{@tracer | on_start: %{@on_start | name: :"-on_start/1-fun-1-"}}, :tracer_processor},
+      {%{@tracer | on_start: %{@on_start | name: :"-on_start/1-fun-0-"}}, :tracer_processor},
+      {%{@tracer | on_end: %{@on_end | name: :"-on_end/1-fun-0-"}}, :tracer_processor},
       {%{@tracer | on_end: %{@on_end | type: :external}}, :tracer_processor},
       {%{tag: :otel_tracer_noop}, :tracer_noop},
       {%{tag: :otel_tracer_default}, :descriptor_unknown},
