@@ -625,7 +625,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    defmodule SdrAgent.Prototype.Authority.MaintenanceConnector do
+    defmodule Elixir.SdrAgent.Prototype.Authority.MaintenanceConnector do
       @moduledoc false
       def start_link(opts, nil), do: Postgrex.start_link(opts)
       def query(pool, sql, nil), do: Postgrex.query(pool, sql, [], timeout: 5_000)
