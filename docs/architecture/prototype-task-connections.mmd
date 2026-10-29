@@ -1,0 +1,17 @@
+flowchart TD
+  Task[TaskBoundary body / task VM]
+  Task -->|setup phase 0 only| Maintenance[Fixed-target maintenance read]
+  Maintenance -.->|monitor, no link| Helper[Per-call helper]
+  Helper -.->|owned reply alias; before absolute success deadline| Maintenance
+  Helper -->|dev fixed connector: start_link| Pool[DBConnection pool]
+  Pool -->|existing Watcher watch/unwatch| Tree[Connection supervisor]
+  Tree --> Connection[Owned socket connection]
+  Helper -->|test-seam build only; no socket| Fake[Reviewed fake pool]
+  Maintenance -->|expiry: invalidate saved reply, kill helper| Grace[Cleanup-only acknowledgement waits]
+  Grace -->|unknown cleanup is never facts| Refusal[Unavailable / cleanup-unacknowledged]
+  Task -->|non-setup operator entry| Session[Session / RepoState observation]
+  Session -->|not_started only: parent-owned start_link| Repo[Ecto Repo supervisor]
+  Session -.->|started outside transaction: reuse only| Existing[Existing owner's Repo]
+  Session -->|raced already_started: winner untouched| Error[Value-free RepoStartError]
+  Task -.->|parent-specific OTP exit / VM shutdown, not stop-on-return| Repo
+  Task -.->|VM shutdown is terminal residual for orphan helper| Helper
