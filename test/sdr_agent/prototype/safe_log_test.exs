@@ -31,8 +31,11 @@ defmodule SdrAgent.Prototype.SafeLogTest do
   # or a parenthesis. Only two exact passive reads are not output calls:
   # :logger.get_primary_config() and :logger.get_handler_ids() (Codex
   # 872f565d V-1); every other :logger. call, get_handler_config included,
-  # still is.
-  @output_call ~r/(?<![\w.])(?:Elixir\.)?(IO\.|Logger\.[a-z_])|(?<![\w.]):(?:io\.|logger\.(?!get_primary_config\(\)|get_handler_ids\(\)))|\bMix\.shell\(\)/
+  # still is. ADR-0022 adds exactly two more for LaunchPrelude (Codex
+  # 19a0b70e): the argument-free getter Logger.default_formatter() and the
+  # fixed formatter-only setter :logger.update_handler_config(:ssl_handler,
+  # :formatter, replacement); any other arguments still match.
+  @output_call ~r/(?<![\w.])(?:Elixir\.)?(IO\.|Logger\.(?!default_formatter\(\))[a-z_])|(?<![\w.]):(?:io\.|logger\.(?!get_primary_config\(\)|get_handler_ids\(\)|update_handler_config\(:ssl_handler, :formatter, replacement\)))|\bMix\.shell\(\)/
 
   setup do
     on_exit(fn -> SafeLog.detach() end)
@@ -237,7 +240,13 @@ defmodule SdrAgent.Prototype.SafeLogTest do
       "Mix.shell().info(x)",
       " :logger.get_handler_config(:default)",
       " :logger.get_handler_config()",
-      " :logger.add_handler(x)"
+      " :logger.add_handler(x)",
+      "Logger.configure(level: :none)",
+      "Logger.default_formatter(colors: [enabled: true])",
+      " :logger.update_handler_config(:ssl_handler, :level, :none)",
+      " :logger.update_handler_config(:ssl_handler, :formatter, other)",
+      " :logger.update_handler_config(:default, :formatter, replacement)",
+      " :logger.update_handler_config(:ssl_handler, %{})"
     ]
 
     paths = [
@@ -247,7 +256,9 @@ defmodule SdrAgent.Prototype.SafeLogTest do
       "require Logger",
       "Foo.IO.bar(x)",
       "case :logger.get_primary_config() do",
-      "handler_ids(:logger.get_handler_ids(), restarts)"
+      "handler_ids(:logger.get_handler_ids(), restarts)",
+      "ssl(Logger.default_formatter())",
+      "with :ok <- :logger.update_handler_config(:ssl_handler, :formatter, replacement),"
     ]
 
     for call <- calls, do: assert(Regex.match?(@output_call, call), "not matched: #{call}")
