@@ -49,7 +49,7 @@ defmodule SdrAgent.Prototype.SafeLogSetupUnexpectedTest do
   defp reasons(kind), do: Function.capture(SafeLog, :reasons, 1).(kind)
 
   test "RED: the setup family is the current one with :unexpected appended" do
-    assert reasons(:setup) == @setup_reasons ++ [:unexpected]
+    assert reasons(:setup) == @setup_reasons ++ [:unexpected, :seed_differs]
   end
 
   test "RED: the unexpected line prints for every phase" do
