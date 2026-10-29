@@ -86,12 +86,15 @@ defmodule SdrAgent.Prototype.TaskBoundaryEntryTokenTest do
   # Runs the boundary in the test process with stdout, stderr and the log
   # captured: {closed outcome summary, stdout, stderr, log}.
   defp boundary(task, body) do
-    {{{result, out}, err}, log} =
-      with_log(fn ->
-        with_io(:standard_error, fn -> with_io(fn -> outcome(task, body) end) end)
-      end)
+    {{{result, out}, err}, log} = captured(fn -> outcome(task, body) end)
 
     {summary(result), out, err, log}
+  end
+
+  # Runs `fun` with stdout, stderr and the log captured:
+  # {{{result, stdout}, stderr}, log}.
+  defp captured(fun) do
+    with_log(fn -> with_io(:standard_error, fn -> with_io(fun) end) end)
   end
 
   defp outcome(task, body) do
