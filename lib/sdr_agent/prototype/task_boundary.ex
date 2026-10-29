@@ -74,11 +74,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @typedoc "The closed set of task atoms the boundary presents."
     @type task :: :setup | :provision | :import | :op | :serve | :export
 
+    @typedoc """
+    A body's result. Only `:ok` and `:refused` are known; any other term is
+    an abort at stage `:body` (moduledoc item 7), never a refusal.
+    """
+    @type body_result :: :ok | :refused | term()
+
     @doc """
     Runs a task body inside the boundary; see the moduledoc. An outermost
     call returns `:ok` or exits; a nested call returns the body's result.
     """
-    @spec run(task(), term(), (-> :ok | :refused)) :: :ok | :refused
+    @spec run(task(), term(), (-> body_result())) :: body_result()
     def run(task, attached, body) do
       if Process.get(@nested) == true,
         do: nested(task, attached, body),
