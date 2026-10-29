@@ -73,6 +73,27 @@ defmodule SdrAgent.PrototypeMaintenanceFake do
     end
   end
 
+  @doc """
+  Test-build-only post-reply gate for the absolute-deadline regression.
+  The helper calls this only after sending its reply. The exact owned
+  notification records that send before the success deadline; no sleep
+  or generic process inspection establishes ordering. The gate waits
+  until the protocol kills the helper at its deadline.
+  """
+  @spec after_reply(map(), integer()) :: :ok
+  def after_reply(%{mode: :hold_after_reply, notify: notify}, deadline) do
+    send(
+      notify,
+      {:maintenance_fake, :replied, self(), System.monotonic_time(:millisecond), deadline}
+    )
+
+    receive do
+      :release_after_reply -> :ok
+    end
+  end
+
+  def after_reply(_script, _deadline), do: :ok
+
   defp pool(:pool_survives) do
     Process.flag(:trap_exit, true)
     loop(:pool_survives)

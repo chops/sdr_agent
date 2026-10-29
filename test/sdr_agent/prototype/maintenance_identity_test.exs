@@ -81,11 +81,11 @@ defmodule SdrAgent.Prototype.MaintenanceIdentityTest do
       refute_own_messages(helper, pool)
     end
 
-    test "a start failure is unavailable and starts no pool" do
+    test "a generic start failure without an announced pool leaves cleanup unacknowledged" do
       seam(:start_error)
       before = links_and_monitors()
 
-      assert Authority.maintenance_identity() == {:error, :maintenance_unavailable}
+      assert Authority.maintenance_identity() == {:error, :maintenance_cleanup_unacknowledged}
       refute_received {:maintenance_fake, :started, _helper, _pool}
       assert links_and_monitors() == before
       refute_received {_alias, :maintenance_reply, _result}
@@ -189,6 +189,33 @@ defmodule SdrAgent.Prototype.MaintenanceIdentityTest do
       assert_receive {:DOWN, ^helper_ref, :process, ^helper, _reason}, 2_000
       assert_receive {:DOWN, ^pool_ref, :process, ^pool, _reason}, 2_000
     end
+  end
+
+  test "a foreign maintenance connector is rejected before storage or start" do
+    assert TestSeam.maintenance() == nil
+    invalid = seam_map(:ok, self(), %{})
+    invalid = %{invalid | connector: {__MODULE__, %{}}}
+
+    assert_raise ArgumentError, "test seam: malformed maintenance seam", fn ->
+      TestSeam.put_maintenance(invalid)
+    end
+
+    assert TestSeam.maintenance() == nil
+    refute_received {:maintenance_fake, :started, _helper, _pool}
+  end
+
+  test "a timely saved reply cannot succeed after the absolute helper deadline" do
+    seam(:hold_after_reply, %{reply_ms: 1_000})
+    before = links_and_monitors()
+
+    assert Authority.maintenance_identity() == {:error, :maintenance_unavailable}
+    assert_received {:maintenance_fake, :started, helper, pool}
+    assert_received {:maintenance_fake, :replied, ^helper, sent_at, deadline}
+    assert sent_at < deadline
+    refute Process.alive?(helper)
+    refute Process.alive?(pool)
+    assert links_and_monitors() == before
+    refute_own_messages(helper, pool)
   end
 
   ## Helpers
