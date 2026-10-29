@@ -59,6 +59,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         1 + its deepest element) at most 8; nodes (every leaf and container
         1, a map entry its key's and value's nodes) at most 32768; no pid,
         port, reference, fun or float.
+      * `list_shape/2`, `projected_handler?/1` (undocumented) - the kept
+        cap walk and projected Logger-handler schema, shared with
+        `SdrAgent.Prototype.ContainmentGuard`'s view.
       * `evaluate/4` - `(gate, kind, descriptor, pinned)` with gate
         `:precheck`, `:seal` or `:advance`: `:ok` or the first failing code.
         Precedence: the gate and kind; then the descriptor's shape
@@ -714,8 +717,14 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
            do: walk_entries(rest, level, nodes)
     end
 
-    # A proper list of at most `max` elements, without walking the elements.
-    defp list_shape(list, max), do: list_shape(list, max, 0)
+    @doc false
+    # The kept cap walk (plan r5 section 4.2), also used by
+    # `ContainmentGuard`'s view: a proper list of at most `max` elements,
+    # without reading an element; `:ok`, `{:error, :descriptor_unbounded}`
+    # when a `max + 1`-th cons exists, else `{:error, :descriptor_unknown}`.
+    @spec list_shape(term(), non_neg_integer()) :: :ok | {:error, code()}
+    def list_shape(list, max), do: list_shape(list, max, 0)
+
     defp list_shape([], _max, _count), do: :ok
 
     defp list_shape([_head | _tail], max, count) when count >= max,
@@ -810,6 +819,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp projection?(_projection), do: false
+
+    @doc false
+    # The kept projected Logger-handler schema, also used by
+    # `ContainmentGuard`'s view row 3c. The caller checks `bounded?/1`
+    # first, so the list walks here see only proper bounded lists.
+    @spec projected_handler?(term()) :: boolean()
+    def projected_handler?(projection), do: projection?(projection)
 
     defp projected_schema(projection) do
       if projection?(projection), do: :ok, else: {:error, :descriptor_unknown}

@@ -28,8 +28,11 @@ defmodule SdrAgent.Prototype.SafeLogTest do
   # A module path (Logger.Formatter, SdrAgent.Logger.ExceptionFilter) is not
   # one; an explicit Elixir. prefix at a module boundary still is. Unlike a
   # leading \b, the lookbehinds also match :io. and :logger. after a space
-  # or a parenthesis.
-  @output_call ~r/(?<![\w.])(?:Elixir\.)?(IO\.|Logger\.[a-z_])|(?<![\w.]):(io|logger)\.|\bMix\.shell\(\)/
+  # or a parenthesis. Only two exact passive reads are not output calls:
+  # :logger.get_primary_config() and :logger.get_handler_ids() (Codex
+  # 872f565d V-1); every other :logger. call, get_handler_config included,
+  # still is.
+  @output_call ~r/(?<![\w.])(?:Elixir\.)?(IO\.|Logger\.[a-z_])|(?<![\w.]):(?:io\.|logger\.(?!get_primary_config\(\)|get_handler_ids\(\)))|\bMix\.shell\(\)/
 
   setup do
     on_exit(fn -> SafeLog.detach() end)
@@ -231,7 +234,10 @@ defmodule SdrAgent.Prototype.SafeLogTest do
       " :io.format(x)",
       "(:io.put_chars(x))",
       " :logger.log(:info, x)",
-      "Mix.shell().info(x)"
+      "Mix.shell().info(x)",
+      " :logger.get_handler_config(:default)",
+      " :logger.get_handler_config()",
+      " :logger.add_handler(x)"
     ]
 
     paths = [
@@ -239,7 +245,9 @@ defmodule SdrAgent.Prototype.SafeLogTest do
       "formatter({Logger.Formatter, %Logger.Formatter{}})",
       "{SdrAgent.Logger.ExceptionFilter, :filter, 2}",
       "require Logger",
-      "Foo.IO.bar(x)"
+      "Foo.IO.bar(x)",
+      "case :logger.get_primary_config() do",
+      "handler_ids(:logger.get_handler_ids(), restarts)"
     ]
 
     for call <- calls, do: assert(Regex.match?(@output_call, call), "not matched: #{call}")

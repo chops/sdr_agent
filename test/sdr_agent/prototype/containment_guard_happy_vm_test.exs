@@ -57,6 +57,19 @@ defmodule SdrAgent.Prototype.ContainmentGuardHappyVmTest do
 
   line =
     try do
+      # This child only: the accepted OG-2 prototype settings, before
+      # OpenTelemetry starts (Codex 872f565d V-2); shared config unchanged.
+      :ok =
+        Application.put_all_env(
+          opentelemetry: [
+            traces_exporter: :none,
+            span_processor: :undefined,
+            processors: [],
+            sampler: :always_off
+          ],
+          sdr_agent: [otel_capture_content: false]
+        )
+
       {:ok, _apps} = Application.ensure_all_started(:opentelemetry)
       :ok = SdrAgent.Prototype.SafeLog.attach(file: nil)
       System.put_env("ERL_CRASH_DUMP_BYTES", "0")
