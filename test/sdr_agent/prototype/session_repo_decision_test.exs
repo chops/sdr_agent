@@ -5,7 +5,7 @@ defmodule SdrAgent.Prototype.SessionRepoDecisionTest do
   start, reuse or the nesting refusal. Pure: no Repo is started, stopped
   or read here, and the fresh-VM start itself is separately owed.
 
-  RED (deny-only declaration): each test fails at its first assertion.
+  GREEN: all decision states are exercised without starting a Repo.
   """
   use ExUnit.Case, async: true
 
