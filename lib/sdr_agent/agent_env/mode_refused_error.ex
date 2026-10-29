@@ -1,4 +1,4 @@
-defmodule SdrAgent.AgentEnv.ModeRefused do
+defmodule SdrAgent.AgentEnv.ModeRefusedError do
   @moduledoc """
   Raised by `SdrAgent.AgentEnv.OperationSnapshot.enter/2` at an operation
   snapshot entry in a non-run agent-environment mode (`:check`,

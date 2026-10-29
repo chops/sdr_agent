@@ -19,7 +19,7 @@ defmodule SdrAgent.Prototype.BootCheckProductionBranchTest do
   @source "lib/sdr_agent/prototype/boot_check.ex"
   @subject "SdrAgent.Prototype.BootCheck"
   @twin SdrAgent.Prototype.BootCheckProductionTwin
-  @refusal SdrAgent.Prototype.BootCheckProductionTwin.Refusal
+  @refusal SdrAgent.Prototype.BootCheckProductionTwin.RefusalError
   @flags [:prototype_authority_compiled, :prototype_test_seams]
 
   setup_all do
