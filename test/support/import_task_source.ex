@@ -3,8 +3,9 @@ defmodule SdrAgent.ImportTaskSource do
   A pure, lexical source guard for `mix sdr.prototype.import`
   (`lib/mix/tasks/sdr.prototype.import.ex`; interfaces r6 IF-2 task row,
   IF-8 "Attached before any private input" and the prototype-code source
-  rule; supplement 1 r2 §5 "Callers"; Codex 8ff184e4; the I4 grammar r2
-  R-a1 rules, Codex d3048840). `violations/1` parses a source text (never
+  rule; supplement 1 r2 §5 "Callers"; Codex 8ff184e4; the I4 R-a1 rules
+  plus grammar-r3 tagged guard T3, plan b5e973f6 and direction 10912db7).
+  `violations/1` parses a source text (never
   runs or compiles it) and returns the closed, sorted list of rule
   violations; `[]` means the source passes every rule.
 
@@ -56,12 +57,13 @@ defmodule SdrAgent.ImportTaskSource do
   | `:no_moduledoc` | it has a non-empty `@moduledoc` |
   | `:no_run` | it defines `run/1` |
   | `:run_shape` | `run/1` is exactly two statements, `var = SafeLog.attach(file: nil)` then `TaskBoundary.run(:import, var, fn -> body(arg) end)`, with `var` one variable and `arg` `run/1`'s own parameter (a variable), and that attach is the module's only `SafeLog.attach` call (with no `run/1`, there is no `SafeLog.attach` call at all) |
-  | `:outside_body` | `Session.enter` and every `DossierParser.read` / `SpotcheckManifest.read` call sit lexically inside the `defp body/1` clause, never in `run/1`, another function or at module level |
+  | `:outside_body` | `Session.enter`, `ContainmentGuard.guard` and every `DossierParser.read` / `SpotcheckManifest.read` call sit lexically inside the `defp body/1` clause, never in `run/1`, another function or at module level |
   | `:body_prologue` | the first statement of `body/1` is exactly `Mix.Task.run("app.config", [])` and its second exactly `{:ok, <variable>} = Application.ensure_all_started(:opentelemetry)` |
   | `:enter_count` | `Session.enter` is called exactly once |
   | `:enter_arity` | it is called with exactly one argument |
   | `:read_before_enter` | every `DossierParser.read` and `SpotcheckManifest.read` call comes after it in source order |
-  | `:missing_reader` | each required call is made: `DossierParser.read/2`, `SpotcheckManifest.read/3`, `DossierImport.prepare/5`, `import/2` and `cap_used/1`, `ImportOutcome.reason/2` and `TaskBoundary.run/3` (the name is historical; it covers all seven required calls) |
+  | `:missing_reader` | each required call is made: `DossierParser.read/2`, `SpotcheckManifest.read/3`, `DossierImport.prepare/5`, `import/2` and `cap_used/1`, `ImportOutcome.reason/2`, `TaskBoundary.run/3` and `ContainmentGuard.guard/1` (the name is historical; it covers all eight required calls) |
+  | `:gate_order` | exactly one literal `ContainmentGuard.guard(:import)` is the RHS of `{:guard, :ok} <- {:guard, <call>}` in a `with` inside `body/1`; its line follows the unique session-enter line (when unique), and every reader is later, under that same with's later clauses or do block, never its else; the FIRST else clause binds the whole `{:guard, variable-or-underscore}` result to a variable and returns that variable unchanged (both match-pattern orders accepted); no legacy `Containment.precheck/seal/recheck`, `ContainmentGuard.activate/activated?/guard_vm` or `SdrAgent.AI.ModelProvider` namespace remote call, after alias expansion |
   | `:start_call` | no `BootCheck.verify!/check`, `Prototype.enter_session`, `Application.ensure_all_started/ensure_started`, `Mix.Task.run`, `Repo.start_link`, `Oban.start_link`, `Supervisor.start_link` or `Ecto.Migrator.with_repo` call (no double boot or start), except the two `:body_prologue` calls, each exempt only in its exact position and form: a second `app.config`, an argv, a reorder or an unmatched start is a violation, and there is no other startup allowance |
   | `:env_read` | the only environment read is one `System.get_env("SDR_PROTOTYPE_SESSION")` |
   | `:file_call` | no `File` or `:file` call |
@@ -71,7 +73,12 @@ defmodule SdrAgent.ImportTaskSource do
   | `:indirect_dispatch` | no `import`, `defdelegate`, `apply`, `Kernel.apply`, `:erlang.apply`, `Function.capture`, remote capture `&M.f/n`, or call on a variable module or an unexpandable alias (`__MODULE__.f()`): such dispatch is flagged, never analysed |
 
   **Honest scope.** This is a lexical, source-order guard over explicit
-  remote calls and a few literal forms. It is not control flow or runtime
+  remote calls and a few literal forms. The tagged guard rule checks lexical
+  containment in one with, not general control-flow dominance or callee purity.
+  The session-order comparison is skipped when enter is not unique (the
+  existing `:enter_count` rule refuses that); an earlier helper's enter line
+  is still a line reference, while `:outside_body` refuses that helper call.
+  It is not control flow or runtime
   dominance: it cannot show that the attach succeeded, that
   `TaskBoundary.run/3` runs `body/1` or what it does with the result, that
   the prologue starts succeed (a failed `{:ok, _} =` match still raises),
@@ -89,6 +96,10 @@ defmodule SdrAgent.ImportTaskSource do
   @safe_log SdrAgent.Prototype.SafeLog
   @session SdrAgent.Prototype.Session
   @task_boundary SdrAgent.Prototype.TaskBoundary
+  @guard SdrAgent.Prototype.ContainmentGuard
+  @containment SdrAgent.Prototype.Containment
+  @provider SdrAgent.AI.ModelProvider
+  @provider_prefix "Elixir.SdrAgent.AI.ModelProvider."
   @readers [
     {SdrAgent.Prototype.DossierParser, :read},
     {SdrAgent.Prototype.SpotcheckManifest, :read}
@@ -100,7 +111,8 @@ defmodule SdrAgent.ImportTaskSource do
     {SdrAgent.Prototype.DossierImport, :import, 2},
     {SdrAgent.Prototype.DossierImport, :cap_used, 1},
     {SdrAgent.Prototype.ImportOutcome, :reason, 2},
-    {SdrAgent.Prototype.TaskBoundary, :run, 3}
+    {SdrAgent.Prototype.TaskBoundary, :run, 3},
+    {SdrAgent.Prototype.ContainmentGuard, :guard, 1}
   ]
   @starts [
     {SdrAgent.Prototype.BootCheck, :verify!},
@@ -183,6 +195,7 @@ defmodule SdrAgent.ImportTaskSource do
       if(length(prologue) != 2, do: :body_prologue),
       enter(calls),
       read_before_enter(calls),
+      gate_order(block, aliases, calls),
       missing_reader(calls),
       if(Enum.any?(calls -- Enum.concat(prologue), &start?/1), do: :start_call),
       env_read(calls),
@@ -466,7 +479,7 @@ defmodule SdrAgent.ImportTaskSource do
 
   defp outside_body(outside) do
     if Enum.any?(outside, fn {module, fun, _args, _line} ->
-         {module, fun} in [{@session, :enter} | @readers]
+         {module, fun} in [{@session, :enter}, {@guard, :guard} | @readers]
        end),
        do: :outside_body
   end
@@ -517,6 +530,116 @@ defmodule SdrAgent.ImportTaskSource do
 
   defp read_at_or_before?({module, fun, _args, line}, enter_line),
     do: {module, fun} in @readers and line <= enter_line
+
+  # One exact guard edge, plus lexical containment of EVERY reader in that
+  # guard's with tail. A valid route in another with cannot satisfy this one.
+  defp gate_order(block, aliases, calls) do
+    guards = Enum.filter(calls, &guard_call?/1)
+    readers = reader_calls(calls)
+
+    shaped =
+      case guards do
+        [{@guard, :guard, [:import], line}] when is_integer(line) ->
+          guard_line_order?(calls, line) and
+            Enum.any?(guard_regions(block, aliases), &(Enum.sort(&1) == Enum.sort(readers)))
+
+        _none_many_or_wrong_kind ->
+          false
+      end
+
+    unless shaped and not Enum.any?(calls, &forbidden_gate_call?/1), do: :gate_order
+  end
+
+  defp guard_call?({module, fun, _args, _line}), do: {module, fun} == {@guard, :guard}
+
+  defp reader_calls(calls),
+    do: Enum.filter(calls, fn {module, fun, _args, _line} -> {module, fun} in @readers end)
+
+  defp guard_line_order?(calls, guard_line) do
+    enter_before =
+      case for({@session, :enter, _args, line} <- calls, do: line) do
+        [line] -> is_integer(line) and line < guard_line
+        _none_or_many -> true
+      end
+
+    enter_before and
+      Enum.all?(reader_calls(calls), fn {_module, _fun, _args, line} ->
+        is_integer(line) and guard_line < line
+      end)
+  end
+
+  defp guard_regions(block, aliases) do
+    {_ast, regions} =
+      Macro.prewalk(block, [], fn node, regions ->
+        case guard_region(node, aliases) do
+          nil -> {node, regions}
+          readers -> {node, [readers | regions]}
+        end
+      end)
+
+    regions
+  end
+
+  defp guard_region({:with, _meta, args}, aliases) when is_list(args) do
+    {options, clauses} = List.pop_at(args, -1)
+
+    if is_list(options) and Keyword.keyword?(options),
+      do: guarded_tail(clauses, options, aliases)
+  end
+
+  defp guard_region(_node, _aliases), do: nil
+
+  defp guarded_tail(clauses, options, aliases) do
+    guards =
+      clauses
+      |> Enum.with_index()
+      |> Enum.filter(fn {clause, _index} -> guard_step?(clause, aliases) end)
+
+    case guards do
+      [{_step, index}] -> guarded_readers(clauses, options, index, aliases)
+      _none_or_many -> nil
+    end
+  end
+
+  defp guarded_readers(clauses, options, index, aliases) do
+    if Keyword.keys(options) == [:do, :else] and guard_else?(options[:else]) do
+      tail = Enum.drop(clauses, index + 1) ++ [options[:do]]
+      tail |> Enum.flat_map(&calls(&1, aliases)) |> reader_calls()
+    end
+  end
+
+  defp guard_step?({:<-, _meta, [{:guard, :ok}, {:guard, call}]}, aliases),
+    do: import_guard?(call, aliases)
+
+  defp guard_step?(_clause, _aliases), do: false
+
+  defp import_guard?({{:., _dot, [target, :guard]}, _meta, [:import]}, aliases),
+    do: resolve(target, aliases) == @guard
+
+  defp import_guard?(_call, _aliases), do: false
+
+  defp guard_else?([{:->, _meta, [[{:=, _match, [left, right]}], returned]} | _rest]),
+    do: whole_guard_result?(left, right, returned) or whole_guard_result?(right, left, returned)
+
+  defp guard_else?(_clauses), do: false
+
+  defp whole_guard_result?({:guard, inner}, {name, _meta, _context} = bound, returned),
+    do: variable?(inner) and name != :_ and variable?(bound) and same_variable?(bound, returned)
+
+  defp whole_guard_result?(_tagged, _bound, _returned), do: false
+
+  # Exact legacy module match: a Containment prefix would also ban the valid
+  # ContainmentGuard. Provider descendants, conversely, are an explicit ban.
+  defp forbidden_gate_call?({@containment, fun, _args, _line})
+       when fun in [:precheck, :seal, :recheck],
+       do: true
+
+  defp forbidden_gate_call?({@guard, fun, _args, _line})
+       when fun in [:activate, :activated?, :guard_vm],
+       do: true
+
+  defp forbidden_gate_call?({module, _fun, _args, _line}),
+    do: module == @provider or String.starts_with?(Atom.to_string(module), @provider_prefix)
 
   defp missing_reader(calls) do
     present? = fn {module, fun, arity} ->
