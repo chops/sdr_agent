@@ -2342,6 +2342,8 @@ The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Frida
 
 <!-- END ADR-0005 D-237 PROTOTYPE AMENDMENT -->
 
+**Cross-reference (2026-10-28): ADR-0001 Amendment 2.** The D-237 amendment above says "The hosted copy stays Fake-only and synthetic (ADR-0001 Amendment 1)". That stays true for every hosted product path: the Fake model only, the real-data switch off, and no real lead, research, draft, approval or capture. Once the owner accepts its exact text, [ADR-0001 Amendment 2](0001-unattended-build-operating-charter.md) adds one display-only exception: a one-time, read-only, five-field research-list snapshot shown only to the owner, before 2026-11-07T07:00:00Z at the latest. The hosted product never processes that list. Nothing in that amendment moves the subscription login, a real model call or a real lead to the server.
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),

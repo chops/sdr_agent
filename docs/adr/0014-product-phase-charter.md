@@ -321,3 +321,15 @@ The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Frida
 **The text above is unchanged.** Amendment 3 keeps its reviewed bytes and accepted hashes (D-222). This addendum supersedes only the two instants named here.
 
 <!-- END ADR-0014 AMENDMENT 3 ADDENDUM -->
+
+## Cross-reference (2026-10-27): ADR-0001 Amendment 1
+
+[ADR-0001 Amendment 1](0001-unattended-build-operating-charter.md) (the hosted
+owner-only demo and its sign-in email) changes this charter's constraint 1 and
+its deployment decision right only for the hosted copy at https://sdr.a-z.bot
+and the owner's sign-in email, and only once the owner accepts that exact text.
+It changes nothing else here.
+
+## Cross-reference (2026-10-28): ADR-0001 Amendment 2
+
+[ADR-0001 Amendment 2](0001-unattended-build-operating-charter.md) (the owner-only hosted research list) lets the hosted copy at https://sdr.a-z.bot hold one read-only, five-field research-list snapshot and show it only to the owner, before 2026-11-07T07:00:00Z at the latest. It applies only once the owner accepts that exact text. For that one list only, it takes precedence over constraint 7 as amended, which lets real people be processed only by the owner's local instance, and over this charter's Amendment 2 retention rule that app-held copies stay on the owner's machine. It changes nothing else here. Constraints 1 to 6, the decision rights and the other rules of this charter's Amendment 2 are unchanged, and the real-data switch stays off on the hosted copy.
