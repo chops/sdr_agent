@@ -5,8 +5,12 @@ defmodule SdrAgent.Prototype.Session do
   `sdr.prototype.*` task except setup calls `enter/1` right after
   `SdrAgent.Prototype.SafeLog.attach/0`.
 
-  `enter/1` starts `app.config` and the Repo (never the application tree),
-  runs `SdrAgent.Prototype.BootCheck.verify!/0` before any read, then
+  The caller loads `app.config` in its body prologue. In a prototype build,
+  `enter/1` observes the real RepoState first: it starts the real Repo only
+  when absent, reuses an existing non-transactional Repo without owning or
+  stopping it, and refuses every other state. It never starts the product
+  application tree. It then runs `SdrAgent.Prototype.BootCheck.verify!/0`
+  before any session or domain read, followed by
   `SdrAgent.Prototype.enter_session/2` with the `agent:` option (the task's
   `--agent`) and `SDR_PROTOTYPE_SESSION`. Only with `enqueue?: true`
   (`op assign`, `op approve`) does it then start the insert-only Oban of
@@ -34,13 +38,20 @@ defmodule SdrAgent.Prototype.Session do
   - In a production build it is `:binding_mismatch`, a boot refusal code or
     `:not_prototype_runtime`.
 
+  A failed prototype Repo start raises the fixed, value-free
+  `SdrAgent.Prototype.SessionRepoStart.RepoStartError`; the calling
+  TaskBoundary owns presentation. A concurrent winner is never adopted or
+  stopped. The real Repo's OTP parent is the starting body process; no
+  survival or termination time after that body exits is promised here.
+
   These codes are not all in every task's `SdrAgent.Prototype.SafeLog`
   reason set. Printing them is the calling task's job; no such mapping
   exists here.
 
-  Stage (D-237 S1 G): `enter/1` runs the boot check, then the session
-  entry, in that order; the insert-only Oban of `enqueue?: true` is not yet
-  started here (the enqueuing commands come with their own increment).
+  The insert-only Oban of `enqueue?: true` is not yet started here (the
+  enqueuing commands come with their own increment). Production builds
+  retain the existing transaction guard and never reference the prototype
+  RepoState or startup adapter at runtime.
   """
 
   @doc "The insert-only Oban options of an enqueuing task (ruling 1)."
@@ -64,17 +75,21 @@ defmodule SdrAgent.Prototype.Session do
 
   @doc "Enters a task process; see the moduledoc."
   @spec enter(keyword()) :: {:ok, map()} | {:error, atom()}
-  def enter(opts) when is_list(opts) do
-    with :ok <- not_nested(), do: entered(opts)
-  end
-
-  # Codex f3036a14 G-R6: an open caller transaction is refused before the
-  # build branch, the boot check or any query, with enter_session/2's own
-  # nesting code. Repo.in_transaction?/0 issues no query.
-  defp not_nested,
-    do: if(SdrAgent.Repo.in_transaction?(), do: {:error, :binding_mismatch}, else: :ok)
-
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    def enter(opts) when is_list(opts) do
+      case repo_decision(SdrAgent.Prototype.RepoState.repo_state()) do
+        :start ->
+          :ok = SdrAgent.Prototype.SessionRepoStart.start!()
+          entered(opts)
+
+        :reuse ->
+          entered(opts)
+
+        {:error, :binding_mismatch} = refusal ->
+          refusal
+      end
+    end
+
     defp entered(opts) do
       with :ok <- boot(),
            {:ok, agent} <- agent(Keyword.get(opts, :agent)),
@@ -93,6 +108,14 @@ defmodule SdrAgent.Prototype.Session do
     defp correlation(value) when is_binary(value) and value != "", do: {:ok, value}
     defp correlation(_unset), do: {:error, :session_unset}
   else
+    def enter(opts) when is_list(opts) do
+      with :ok <- not_nested(), do: entered(opts)
+    end
+
+    # Production keeps the original query-free transaction guard.
+    defp not_nested,
+      do: if(SdrAgent.Repo.in_transaction?(), do: {:error, :binding_mismatch}, else: :ok)
+
     # No prototype authority in this build: the boot check runs, and the
     # entry then refuses.
     defp entered(_opts) do
