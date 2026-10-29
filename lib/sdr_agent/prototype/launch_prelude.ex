@@ -84,14 +84,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc """
     Pure: the step for one fixed `Mix.Supervisor` child. Absent is `:skip`;
-    exactly `{Mix.PubSub, pid, :supervisor, [Mix.PubSub]}` or
+    exactly `{Mix.PubSub, pid, :supervisor, [Supervisor]}` (its child spec has
+    no `:modules`, so OTP lists the start module) or
     `{Mix.Sync.PubSub, pid, :worker, [Mix.Sync.PubSub]}` is `:teardown`;
     anything else, another id included, is `:refuse`.
     """
     @spec child_step(term(), child_observation()) :: :skip | :teardown | :refuse
     def child_step(id, :absent) when id in [Mix.PubSub, Mix.Sync.PubSub], do: :skip
 
-    def child_step(Mix.PubSub, {:present, {Mix.PubSub, pid, :supervisor, [Mix.PubSub]}})
+    def child_step(Mix.PubSub, {:present, {Mix.PubSub, pid, :supervisor, [Supervisor]}})
         when is_pid(pid),
         do: :teardown
 
