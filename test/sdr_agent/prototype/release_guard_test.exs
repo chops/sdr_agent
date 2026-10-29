@@ -10,7 +10,7 @@ defmodule SdrAgent.Prototype.ReleaseGuardTest do
   | `SdrAgent.Prototype.Basis.build/1` | `SdrAgent.Prototype.Release` |
   | `SdrAgent.Prototype.Basis.verify_new/2` | `SdrAgent.Agents.Changes.ReleaseDecision` |
   | `SdrAgent.Prototype.Basis.verify_historical/2` | `SdrAgent.Prototype.ReleasedScope` |
-  | `SdrAgent.Prototype.ReleasedScope.run/3` | `SdrAgent.Agents.ReleasedOutput` (b2d adds the predicate) |
+  | `SdrAgent.Prototype.ReleasedScope.run/3` | exactly two: `SdrAgent.Agents.ReleasedOutput` and, from b2d, `SdrAgent.Agents.ResultGate` (the worker predicates) |
   | `SdrAgent.Prototype.Admission.check_recorded/3` (the closed 14-key comparator) | `SdrAgent.Prototype.Release` (launch uses it locally) |
   | `SdrAgent.Prototype.Admission.check_charge/3` (the charged grant's current checks) | `SdrAgent.Prototype.Release` (launch uses it locally) |
 
@@ -34,7 +34,6 @@ defmodule SdrAgent.Prototype.ReleaseGuardTest do
         {{SdrAgent.Prototype.Basis, :build, 1}, SdrAgent.Prototype.Release},
         {{SdrAgent.Prototype.Basis, :verify_new, 2}, SdrAgent.Agents.Changes.ReleaseDecision},
         {{SdrAgent.Prototype.Basis, :verify_historical, 2}, SdrAgent.Prototype.ReleasedScope},
-        {{SdrAgent.Prototype.ReleasedScope, :run, 3}, SdrAgent.Agents.ReleasedOutput},
         {{SdrAgent.Prototype.Admission, :check_recorded, 3}, SdrAgent.Prototype.Release},
         {{SdrAgent.Prototype.Admission, :check_charge, 3}, SdrAgent.Prototype.Release}
       ] do
@@ -44,6 +43,15 @@ defmodule SdrAgent.Prototype.ReleaseGuardTest do
       assert importers(unquote(Macro.escape(mfa))) == [unquote(importer)],
              "structural until b2c: importers #{inspect(importers(unquote(Macro.escape(mfa))))}"
     end
+  end
+
+  # D-237 b2d (mechanism note r3 section A, "Consumers"): the worker
+  # predicates are the one added importer of run/3; exactly these two.
+  test "only ReleasedOutput and ResultGate import SdrAgent.Prototype.ReleasedScope.run/3" do
+    found = Enum.sort(importers({SdrAgent.Prototype.ReleasedScope, :run, 3}))
+
+    assert found == [SdrAgent.Agents.ReleasedOutput, SdrAgent.Agents.ResultGate],
+           "importers #{inspect(found)}"
   end
 
   test "the release never calls the launch gate" do
