@@ -2342,6 +2342,86 @@ The new end is epoch 1794034800: Saturday 2026-11-07 00:00 MST, the end of Frida
 
 <!-- END ADR-0005 D-237 PROTOTYPE AMENDMENT -->
 
+<!-- BEGIN ADR-0005 D-237 TASK BOUNDARY AMENDMENT: text as accepted by the owner (D-264; Codex exact-text PASS 88e6d251) -->
+
+#### D-237 task boundary amendment (2026-10-29, PROPOSED): a value-free terminal presentation boundary for the prototype tasks
+
+**Status: PROPOSED.** Owner acceptance of these exact bytes is outstanding.
+
+- **Who decides.** Only the owner can accept this amendment, directly or by a prospective acceptance scoped to it. D-219's delegation is limited to ADR texts needed for the D-218 scope and does not extend to this amendment.
+- **What does not decide it.** D-241's build preapproval is not acceptance of these bytes. D-242 and D-249 cover only the D-237 local prototype amendment, which contains no task boundary.
+- **Before installation.** The acceptance and the exact publication pins are recorded before the `run/3` implementation is installed, not merely before it merges.
+- **No inference.** No owner quote or acceptance time is inferred.
+
+**Context.**
+
+- The prototype's SafeLog filter contains Logger output only.
+- Mix and Kernel.CLI print uncaught raises, throws, exits and linked crashes, with their values and stacktraces, to stderr (Elixir 1.20.4 `kernel/cli.ex:154-157,169-171`; `mix/cli.ex:130-151`).
+- They report several failures as status 0 (`kernel/cli.ex:147-152`).
+- `MIX_DEBUG` and enabled task profiling can expose task arguments before the task runs (`mix/task.ex:521-533`). An empty `MIX_PROFILE` still enters profiling setup and flags parsing (`mix/cli.ex:28-30`); it is not claimed by itself to print task argv (`mix/task.ex:540-546`). Invalid or leftover profile flags can be rendered by `Mix.raise` (`mix/cli.ex:32-34`).
+
+**Decision.**
+
+- Every `sdr.prototype.*` task, and `sdr.audit.export` when the prototype switch is set, has a `run/1` of exactly two statements: `attached = SafeLog.attach(file: nil)` and then `TaskBoundary.run(task, attached, body)`.
+- A future `SafeLog.attach()` (`attach/0`) form is a separately reviewed successor, after a total, fail-closed `attach/0` and the corresponding adoption grammar are ready; it is not an executable requirement of this `run/3` window. Both attachment forms remain outside boundary containment; a raise there is non-deciding.
+- `SdrAgent.Prototype.TaskBoundary.run/3` takes these steps, in order:
+  1. **Nested.** A call from a body process (it carries the boundary's nesting key) re-checks steps 2 and 3, then runs the body inline in the same process, with no catch and no presentation. A failed re-check raises a fixed implementation exception, so the outer boundary presents the outcome with the outer task.
+  2. **Inputs.** `task` is one of `:setup`, `:provision`, `:import`, `:op`, `:serve` and `:export`, and `body` is a zero-arity function, checked by guards so that no `FunctionClauseError` surfaces; otherwise it aborts at stage `entry`.
+  3. **Attach.** `attached` is exactly `:ok`; otherwise it aborts at stage `attach`. The input check precedes the attach check.
+  4. **Entry guard.** The pure `entry_decision/2` decides over two observations, each recorded as `{:returned, value}` or `{:raised, kind}` with the raised value never bound: `SdrAgent.Prototype.RepoState.repo_state/0` and `SdrAgent.AgentEnv.OperationSnapshot.current/0`.
+     - It is clear only when `repo_state/0` returned `:not_started` or `{:started, false}` and `current/0` returned `:inert` or `{:error, :snapshot_not_in_use}`; every other observation, including a raise, exit or throw, an unexpected value or a malformed observation, refuses at stage `entry`.
+     - RepoState is reached by a dynamic call, so a build without that module observes `{:raised, :error}` and refuses.
+     - The observations read the caller's process-local state plus public registry and application observations. They are bounded and not linearizable.
+  5. **Crash dumps.** It sets `ERL_CRASH_DUMP_BYTES=0` for its VM.
+  6. **Body process.** It runs the body in a fresh, unlinked, monitored process whose `$callers` is the caller followed by the caller's own `$callers`, plus the nesting key. Nothing else is copied: no caller dictionary, capability, connection or transaction is transferred. A raise in steps 5 or 6 aborts at stage `entry`.
+  7. **Outcome.** Only `:ok` (exit 0) and `:refused` (exit 2, the body having printed its closed code) are known. Every other result, raise, throw, exit or death of the body process aborts at stage `body` (exit 70). The caller takes the body's outcome message and then demonitors with flush, or takes the body's `:DOWN` with any reason as aborted. Caught values and `:DOWN` reasons are never read.
+  8. **Presentation.** `:ok` returns `:ok`; `:refused` exits `{:shutdown, 2}`; an abort prints at most one fixed line, `prototype: task_aborted task=<task> stage=<stage>`, through `SafeLog.say/2`, then exits `{:shutdown, 70}`. The line is printed inside its own catch, so a broken or refusing output device gives no line and the exit with 70 still happens. An invalid task prints SafeLog's withheld line instead.
+- There is at most one boundary-decided presentation per invocation, by the outermost boundary; an attach raise and parent death are non-deciding.
+- The boundary never reads, formats, logs or classifies a failure value, owns no transaction, and changes no Logger configuration, filter or handler.
+- The supported top-level task domain authority (session, delegation, actor, connection and transactions) is created inside the body process. This is not generic capability erasure: VM-global state stays shared with the caller.
+- The planned, held launcher `bin/d237` refuses when `MIX_DEBUG`, `MIX_PROFILE` or `MIX_PROFILE_FLAGS` is present, sets `ERL_CRASH_DUMP_BYTES=0`, and maps only `setup`, `provision`, `import`, `op` and `export`. This is the planned, held launcher contract, not a claim of measured or cleared launcher behaviour. Serve has no cleared launcher yet.
+
+**Build partition.**
+
+- `TaskBoundary` is compiled only when `:prototype_authority_compiled` is set, which `config/dev.exs` and `config/test.exs` set; the production build does not contain it.
+- RepoState is compiled under the same gate, and no production module references it.
+- It is prototype-only; production has no prototype tasks.
+- The development-build gate is not a route around this amendment's acceptance.
+
+**Alternatives rejected.**
+
+- In-process `try/catch`: exit signals cannot be caught; an author probe printed the sentinel for a linked crash and a `Task` crash.
+- Trapping exits: after a linked crash the body continues and can commit.
+
+**Consequences.**
+
+- The body's process identity, dictionary, links and connection and transaction ownership differ from the task process's.
+- After `run/3`, the caller continues on a normal return, and after an exit only if it catches it; an uncaught exit terminates it (in a fresh VM, the CLI halts with that status).
+- **There is no cancellation and no atomicity.** If the caller dies, the body keeps running and may perform effects and commit until the VM halts (a fresh CLI VM). In an existing VM it may outlive the caller, potentially indefinitely, unless the body finishes or the VM ends; existing-VM use remains unsupported. A commit made before a halt stays committed.
+- **Current residuals:**
+  - The caller's wait has no timeout, and no timeout or cancellation is promised.
+  - `ERL_CRASH_DUMP_BYTES=0` is a VM-wide setting, and it is already set when the spawn in step 6 fails.
+  - The outcome reply followed by a demonitor with flush does not acknowledge the body process's `:DOWN` before the caller returns. It is not proof of synchronous body death, resource teardown or process lifetime.
+  - Real connection and supervisor lifetimes, for processes the body starts, remain separate obligations.
+  - The K0 entry token is not implemented by this boundary.
+  - A nested call from a process the body spawned (it carries no nesting key) is treated as outermost.
+  - Output before `run/1`; direct non-launcher runs (not cleared for private data); erts halt slogans; signals (not verified); dependency writes straight to a device; descendants that leave their process group.
+  - These residuals and the non-deciding paths are disclosed, not cleared for private data.
+  - These disclosures are not general privacy clearance. D-263 already accepts real Claude CLI descendants surviving cutoff; that residual alone is not a blocker and does not require a termination solution. This does not waive the separate task-body parent-death and possible-commit residual above, and it expands no call or data permission.
+- **The status contract** 0, 2, 70 (1 = outside the boundary; 64 and 71 = launcher) is subject to the coordinator's shared agreement.
+- **No persisted change.** The SafeLog line is not an audit event.
+- **Entity and diagram.** The entity delta is Codex's scoped contract and entity r6 PASS (correlation `m_1793198546483495500_ce1130d0`). That PASS is not acceptance of this amendment. The runtime sequence diagram is due at task adoption; no existing diagram changes.
+
+**Decision scope.**
+
+- Owner acceptance of these bytes would record, in ADR-0005, the `run/1` shape, the `run/3` steps, the build partition and the residuals above.
+- It would not grant installing, measuring, merging or landing the `run/3` source. A meaningful measurement needs the exact full composite with S1's RepoState and the reviewed Part B codes and fixture, reviewed pins and a fresh execution reservation.
+- It would not grant the launcher, task adoption, the harness or any process or signal case, the status agreement, private or real data, activation, or any real call.
+- It would not change the D-237 local prototype amendment (D-249) or any other ADR-0005 text.
+- It raises no live-model provider or billing question, and it does not ask the owner to re-accept D-263 or to solve CLI descendants: D-263 stands, and direct Anthropic API use remains prohibited.
+
+<!-- END ADR-0005 D-237 TASK BOUNDARY AMENDMENT -->
+
 ### Anchoring (S11)
 
 - `SdrAgent.Audit.AnchorSink` behaviour; sinks: `FileSink` (tests),
