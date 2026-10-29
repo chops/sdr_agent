@@ -40,6 +40,9 @@ defmodule Mix.Tasks.Sdr.BootstrapAdmin do
   @doc false
   @impl Mix.Task
   def run(argv) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.bootstrap_admin") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     {opts, _args, invalid} = OptionParser.parse(argv, strict: @switches)
 
     if invalid != [],

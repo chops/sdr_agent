@@ -14,6 +14,12 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
   receipt per operation and kind: recording a kind again returns the stored
   row with no second event (the capture adapter is idempotent on the key).
 
+  D-237: in prototype runtime a NEW `captured` receipt passes the capture
+  boundary (`SdrAgent.Outreach.Changes.PrototypeCapture`: live binding, the
+  anchor's approval, the funding window, the recipient unsuppressed) or the
+  capture refuses and nothing is kept; its event carries the server-derived
+  assurance block as the argument `prototype`, outside the rendered bytes.
+
   APPEND-ONLY (trigger). Actors: DLV (`captured`, `accepted`), REC
   (`reconciled`), WHK (`delivered`, `bounced`). Reads: ADM, REV, AUR,
   DLV, REC, WHK, AUD. Audited: `outreach.delivery.receipt_recorded`.
@@ -88,6 +94,10 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
         :webhook_event_id
       ]
 
+      # D-237 (IF-5): server-derived by Changes.PrototypeCapture only; any
+      # caller value is scrubbed.
+      argument :prototype, :map
+
       upsert? true
       upsert_identity :unique_kind
       upsert_fields []
@@ -96,11 +106,13 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Research.Changes.MarkExisting
+      change SdrAgent.Outreach.Changes.PrototypeCapture
 
       change {SdrAgent.Audit.Changes.AppendEvent,
               event_type: "outreach.delivery.receipt_recorded",
               category: :delivery,
-              links: [idempotency_key: :idempotency_key]}
+              links: [idempotency_key: :idempotency_key],
+              arguments: [:prototype]}
     end
   end
 
@@ -120,6 +132,11 @@ defmodule SdrAgent.Outreach.DeliveryReceipt do
 
       authorize_if {Checks.ActorType,
                     types: [:delivery_worker, :reconciler, :webhook_ingestor, :auditor_cli]}
+
+      # D-237 review_read (supplement 2 r2 section 2): after the existing
+      # lines, the live operator AND the actual row tenant. Read only.
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :review_read}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
     end
   end
 

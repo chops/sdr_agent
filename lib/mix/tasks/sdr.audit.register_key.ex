@@ -5,6 +5,13 @@ defmodule Mix.Tasks.Sdr.Audit.RegisterKey do
 
   @impl Mix.Task
   def run(argv) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.audit.register_key") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
+    register(argv)
+  end
+
+  defp register(argv) do
     Mix.Task.run("app.start")
     {opts, [], []} = OptionParser.parse(argv, strict: [public_key: :string, key_id: :string])
     path = Keyword.get(opts, :public_key, "docs/audit/anchor-signing-key.pub")

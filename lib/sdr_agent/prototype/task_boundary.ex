@@ -37,6 +37,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
        caller followed by the caller's own `$callers`, plus the nesting
        key. Nothing else is copied into it. A raise in steps 5 or 6 aborts
        at stage `:entry`.
+       6a. Before the body's first statement, the body process adopts the
+       K0 entry token of `task` (`SdrAgent.Prototype.Containment`'s
+       `put_entry/1`; this module is its only lib caller). Only a returned
+       `:ok` runs the body; any other result or a raise (`:export` has no
+       containment kind) aborts at stage `:entry` without calling the
+       body. The caller never holds a token, and no process the body
+       starts inherits it.
     7. Only a body result of `:ok` (completed) or `:refused` (the body
        printed its own closed code) is known. Every other result, raise,
        throw, exit or death of the body's process aborts at stage `:body`.
@@ -47,15 +54,30 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
        `{:shutdown, 70}`. A caller continues after an exit only if it
        catches it (contract r6).
 
+    `launch/3` (ADR-0022) is the terminal entry of a prototype Mix task.
+    It follows the same contract with two differences:
+
+    - a nested call (step 1) raises `NestedRefusalError` without running
+      `body` and without a line of its own; the outer boundary alone
+      presents;
+    - after steps 2 to 4 and before step 5, an outermost call runs
+      `SdrAgent.Prototype.LaunchPrelude.run/0`; anything but a returned
+      `:ok` (a refusal or a raise) aborts at stage `:entry` without calling
+      the body, with no rollback of a step already done.
+
     It never reads, formats, logs or classifies a caught kind, reason,
-    exception, stacktrace or exit reason, owns no transaction and changes
-    no Logger configuration. The entry observations are bounded and
+    exception, stacktrace or exit reason and owns no transaction. `run/3`
+    changes no Logger configuration; the only Logger change of `launch/3`
+    is the prelude's formatter-only `ssl_handler` normalization (ADR-0022).
+    The entry observations are bounded and
     non-linearizable (contract r6), not transaction or capability erasure.
     A body process outlives a caller that dies after the spawn (disclosed,
-    non-deciding). The K0 entry token is not part of this module yet.
+    non-deciding).
     """
 
     alias SdrAgent.AgentEnv.OperationSnapshot
+    alias SdrAgent.Prototype.Containment
+    alias SdrAgent.Prototype.LaunchPrelude
     alias SdrAgent.Prototype.SafeLog
 
     # S1's RepoState (a3cd9b78) is reached only through a dynamic call, so
@@ -74,15 +96,33 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @typedoc "The closed set of task atoms the boundary presents."
     @type task :: :setup | :provision | :import | :op | :serve | :export
 
+    @typedoc """
+    A body's result. Only `:ok` and `:refused` are known; any other term is
+    an abort at stage `:body` (moduledoc item 7), never a refusal.
+    """
+    @type body_result :: :ok | :refused | term()
+
     @doc """
     Runs a task body inside the boundary; see the moduledoc. An outermost
     call returns `:ok` or exits; a nested call returns the body's result.
     """
-    @spec run(task(), term(), (-> :ok | :refused)) :: :ok | :refused
+    @spec run(task(), term(), (-> body_result())) :: body_result()
     def run(task, attached, body) do
       if Process.get(@nested) == true,
         do: nested(task, attached, body),
-        else: outermost(task, attached, body)
+        else: outermost(task, attached, body, &no_prelude/0)
+    end
+
+    @doc """
+    Runs a prototype Mix task body from the terminal (ADR-0022); see the
+    moduledoc. An outermost call returns `:ok` or exits; a nested call
+    raises `NestedRefusalError`.
+    """
+    @spec launch(task(), term(), (-> body_result())) :: :ok
+    def launch(task, attached, body) do
+      if Process.get(@nested) == true,
+        do: raise(NestedRefusalError),
+        else: outermost(task, attached, body, &launch_prelude/0)
     end
 
     @typedoc "One observed entry-guard result: what the guard returned, or the kind it raised."
@@ -126,11 +166,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    # Steps 2 to 8 of an outermost call; the first failure names its stage.
-    defp outermost(task, attached, body) do
+    # Steps 2 to 8 of an outermost call, with the launch/3 prelude after
+    # step 4; the first failure names its stage.
+    defp outermost(task, attached, body, prelude) do
       with :ok <- admission(task, attached, body),
            :clear <- entry_guard(),
-           {:started, monitored} <- start(body) do
+           :ok <- prelude.(),
+           {:started, monitored} <- start(task, body) do
         conclude(task, await(monitored))
       else
         :attach -> abort(task, :attach)
@@ -154,6 +196,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp repo_state, do: Function.capture(@repo_state, :repo_state, 0).()
 
+    defp no_prelude, do: :ok
+
+    # Only a returned :ok passes; a refusal or a raise (never read) is entry.
+    defp launch_prelude do
+      case observe(&LaunchPrelude.run/0) do
+        {:returned, :ok} -> :ok
+        _refused -> :entry
+      end
+    end
+
     # What a guard returned, or only the kind it raised; the raised value
     # is never read.
     defp observe(guard) do
@@ -163,23 +215,33 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     # Steps 5 and 6. A raise here is aborted entry.
-    defp start(body) do
+    defp start(task, body) do
       System.put_env(@dump_var, "0")
       caller = self()
       tag = make_ref()
       inherited = Process.get(:"$callers") || []
       callers = [caller | inherited]
-      {pid, ref} = spawn_monitor(fn -> body_process(caller, tag, callers, body) end)
+      {pid, ref} = spawn_monitor(fn -> body_process(caller, tag, callers, task, body) end)
       {:started, {pid, ref, tag}}
     catch
       _kind, _reason -> :not_started
     end
 
-    # Step 7, in the body process: only :ok and :refused are known.
-    defp body_process(caller, tag, callers, body) do
+    # Steps 6a and 7, in the body process: the entry token, then the body.
+    defp body_process(caller, tag, callers, task, body) do
       Process.put(:"$callers", callers)
       Process.put(@nested, true)
-      send(caller, {tag, outcome(body)})
+      send(caller, {tag, adopted_outcome(task, body)})
+    end
+
+    # Step 6a: the body runs only after the token adoption returned exactly
+    # :ok; any other result or a raise is :unadopted (no permissive
+    # fallback). Step 7: only :ok and :refused are known.
+    defp adopted_outcome(task, body) do
+      case observe(fn -> Containment.put_entry(task) end) do
+        {:returned, :ok} -> outcome(body)
+        _not_adopted -> :unadopted
+      end
     end
 
     defp outcome(body) do
@@ -209,6 +271,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp conclude(_task, :ok), do: :ok
     defp conclude(_task, :refused), do: exit({:shutdown, 2})
     defp conclude(task, :aborted), do: abort(task, :body)
+    defp conclude(task, :unadopted), do: abort(task, :entry)
 
     defp abort(task, stage) do
       present(task, stage)

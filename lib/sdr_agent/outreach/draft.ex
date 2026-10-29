@@ -234,6 +234,11 @@ defmodule SdrAgent.Outreach.Draft do
 
       authorize_if {Checks.ActorType,
                     types: [:agent_runtime, :delivery_worker, :webhook_ingestor, :auditor_cli]}
+
+      # D-237 review_read (supplement 2 r2 section 2): after the existing
+      # lines, the live operator AND the actual row tenant. Read only.
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :review_read}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
     end
   end
 

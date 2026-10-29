@@ -75,15 +75,29 @@ defmodule SdrAgent.SDR.Retry do
     configured |> min(@hard_limit) |> max(0)
   end
 
-  @doc "Runs the retry for an authorized active admin `actor` (see the moduledoc)."
-  def run(run_id, %User{role: :admin, status: :active, tenant_id: tenant_id} = actor)
-      when is_binary(tenant_id) do
+  @doc """
+  Runs the retry for an authorized active admin `actor` (see the moduledoc).
+
+  In D-237 prototype runtime every retry is refused (`Ash.Error.Forbidden`)
+  for every actor, before any read, lock or retry check (amendment item 3
+  "Refused for the operator"; plan r7 section 6 "Least privilege").
+  """
+  def run(run_id, actor) do
+    if prototype_runtime?(), do: {:error, Forbidden.exception([])}, else: checked(run_id, actor)
+  end
+
+  defp checked(run_id, %User{role: :admin, status: :active, tenant_id: tenant_id} = actor)
+       when is_binary(tenant_id) do
     with {:ok, seen} <- Agents.get_run(run_id, actor: actor) do
       Audit.transaction(fn -> committed(locked(seen, actor)) end)
     end
   end
 
-  def run(_run_id, _actor), do: {:error, Forbidden.exception([])}
+  defp checked(_run_id, _actor), do: {:error, Forbidden.exception([])}
+
+  # `runtime/0` is `:ordinary | :prototype`; asking "not ordinary" compiles
+  # without a type warning in the production build (always `:ordinary`).
+  defp prototype_runtime?, do: SdrAgent.Prototype.runtime() != :ordinary
 
   defp committed({:ok, value}), do: value
   defp committed({:error, reason}), do: Repo.rollback(reason)

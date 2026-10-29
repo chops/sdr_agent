@@ -24,6 +24,9 @@ defmodule Mix.Tasks.Sdr.Demo.Predeliver do
   @doc false
   @impl Mix.Task
   def run(args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.demo.predeliver") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     args == [] || Mix.raise("usage: mix sdr.demo.predeliver (it takes no options)")
 
     unless Mix.Tasks.Sdr.Demo.Seed.allowed_env?(Mix.env()) do

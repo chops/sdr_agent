@@ -29,6 +29,20 @@ case {System.get_env("SDR_PROTOTYPE"), System.get_env("SDR_PROTOTYPE_INSTANCE")}
           socket_dir: "/private/tmp/d237-pg",
           port: 5541,
           database: "sdr_agent_prototype"
+
+        # D-237 S4 OG-2 (Codex K0 GREEN r1 source review): the prototype's
+        # thin tracer settings, loaded before :opentelemetry starts. No
+        # exporter, no processor, always_off sampling, no content capture.
+        # ContainmentGuard's exporter row requires exactly these three
+        # exporter values; an SDK already started under other settings is
+        # refused by its tracers rows, never reconfigured.
+        config :opentelemetry,
+          traces_exporter: :none,
+          span_processor: :undefined,
+          processors: [],
+          sampler: :always_off
+
+        config :sdr_agent, otel_capture_content: false
     end
 end
 

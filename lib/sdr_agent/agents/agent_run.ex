@@ -519,6 +519,11 @@ defmodule SdrAgent.Agents.AgentRun do
 
     policy action_type(:read) do
       authorize_if actor_present()
+
+      # D-237 review_read (supplement 2 r2 section 2): after the existing
+      # lines, the live operator AND the actual row tenant. Read only.
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :review_read}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
     end
   end
 

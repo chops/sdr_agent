@@ -15,7 +15,9 @@ defmodule SdrAgentWeb.Layouts do
   The operator console shell (S10): a sidebar (a top bar on small screens)
   with the views the signed-in role may use, the operator's name and role,
   sign-out, and — for the auditor — a read-only notice. The role only shapes
-  navigation; every action is authorized by the domain.
+  navigation; every action is authorized by the domain. The D-237 prototype
+  banner is not rendered here but once in the root layout
+  (`prototype_banner/1`), so a composed page holds exactly one.
 
   ## Examples
 
@@ -147,6 +149,37 @@ defmodule SdrAgentWeb.Layouts do
 
     <.flash_group flash={@flash} />
     """
+  end
+
+  @doc """
+  The D-237 prototype banner (amendment r6 item 8 "UI": every prototype page
+  shows a fixed `UNVERIFIED (PROTOTYPE)` banner), rendered once per page as
+  the first element of the root layout's `<body>`, so it heads every page,
+  the sign-in page included, and survives live navigation. In prototype
+  runtime it shows the constant `SdrAgent.Prototype.label/0`
+  (`#prototype-banner`, `role="status"`); in ordinary runtime it renders
+  nothing. The label is display only, never authority.
+  """
+  def prototype_banner(assigns) do
+    assigns = assign(assigns, :label, prototype_label())
+
+    ~H"""
+    <div
+      :if={@label}
+      id="prototype-banner"
+      role="status"
+      class="flex items-center justify-center gap-2 border-b border-rose-300 bg-rose-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-rose-900"
+    >
+      <.icon name="hero-exclamation-triangle" class="size-4" />
+      <span>{@label}</span>
+    </div>
+    """
+  end
+
+  # `runtime/0` is `:ordinary | :prototype`; asking "not ordinary" compiles
+  # without a type warning in the production build.
+  defp prototype_label do
+    if SdrAgent.Prototype.runtime() != :ordinary, do: SdrAgent.Prototype.label()
   end
 
   @doc "The navigation items `scope` may use, in menu order."

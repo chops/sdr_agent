@@ -128,13 +128,21 @@ defmodule SdrAgent.Outreach.Approval do
       argument :recipient_email, :ci_string, allow_nil?: false
       argument :revision_author, :map
       argument :diff_hashes, :map
+
+      # D-237 (interfaces r6 IF-3 / IF-5; Codex b84b0491): server-derived by
+      # BindApproval only; any caller value is scrubbed.
+      argument :approval_mode, :string
+      argument :delegation_id, :uuid
+      argument :prototype, :map
       change SdrAgent.Audit.Changes.SetTenant
-      change {Changes.ActorUser, field: :approver_id}
+      change {Changes.ActorUser, field: :approver_id, prototype_anchor: true}
       change {Changes.BindApproval, verdict: :approved}
       change SdrAgent.Audit.Changes.TraceIds
 
       change {AppendEvent,
-              event_type: "outreach.approval.granted", category: :domain_change, arguments: @bound}
+              event_type: "outreach.approval.granted",
+              category: :domain_change,
+              arguments: @bound ++ [:approval_mode, :delegation_id, :prototype]}
 
       change {Changes.MoveDraft, action: :queue}
       change Changes.RequestDelivery
@@ -151,7 +159,7 @@ defmodule SdrAgent.Outreach.Approval do
       argument :revision_author, :map
       argument :diff_hashes, :map
       change SdrAgent.Audit.Changes.SetTenant
-      change {Changes.ActorUser, field: :approver_id}
+      change {Changes.ActorUser, field: :approver_id, prototype_anchor: true}
       change {Changes.BindApproval, verdict: :rejected}
       change SdrAgent.Audit.Changes.TraceIds
 
@@ -171,7 +179,7 @@ defmodule SdrAgent.Outreach.Approval do
       change get_and_lock_for_update()
       change {Transition, from: [:granted], to: :revoked, locked?: true}
       change {Stamp, fields: [:revoked_at]}
-      change {Changes.ActorUser, field: :revoked_by_id}
+      change {Changes.ActorUser, field: :revoked_by_id, prototype_anchor: true}
       change {AppendEvent, [event_type: "outreach.approval.revoked"] ++ @event}
       change {Changes.MoveDraft, action: :unqueue}
     end
@@ -201,7 +209,15 @@ defmodule SdrAgent.Outreach.Approval do
       authorize_if always()
     end
 
-    policy action([:approve, :reject, :revoke]) do
+    # D-237 (interfaces r6 IF-3; supplement 2 r2 pattern): the existing line
+    # first and unchanged, then the live operator AND the row tenant.
+    policy action(:approve) do
+      authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :approve}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
+    end
+
+    policy action([:reject, :revoke]) do
       authorize_if {Checks.ActorRole, roles: [:admin, :reviewer]}
     end
 
@@ -219,6 +235,11 @@ defmodule SdrAgent.Outreach.Approval do
 
       authorize_if {Checks.ActorType,
                     types: [:agent_runtime, :delivery_worker, :webhook_ingestor, :auditor_cli]}
+
+      # D-237 review_read (supplement 2 r2 section 2): after the existing
+      # lines, the live operator AND the actual row tenant. Read only.
+      forbid_unless {SdrAgent.Prototype.Checks.OperatorAction, action: :review_read}
+      authorize_if expr(tenant_id == ^actor(:tenant_id))
     end
   end
 
