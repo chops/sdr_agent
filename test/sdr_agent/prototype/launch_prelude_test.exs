@@ -112,7 +112,7 @@ defmodule SdrAgent.Prototype.LaunchPreludeTest do
 
       assert call(:child_step, [
                Mix.PubSub,
-               {:present, {Mix.PubSub, pid, :supervisor, [Mix.PubSub]}}
+               {:present, {Mix.PubSub, pid, :supervisor, [Supervisor]}}
              ]) ==
                {:ok, :teardown}
 
@@ -127,10 +127,13 @@ defmodule SdrAgent.Prototype.LaunchPreludeTest do
 
       cases = [
         {Mix.State, :absent},
-        {Mix.PubSub, {:present, {Mix.PubSub, pid, :worker, [Mix.PubSub]}}},
+        # Mix.PubSub.child_spec/1 has no :modules, so the real entry lists
+        # Supervisor (its start module); its own name there is not that entry.
+        {Mix.PubSub, {:present, {Mix.PubSub, pid, :supervisor, [Mix.PubSub]}}},
+        {Mix.PubSub, {:present, {Mix.PubSub, pid, :worker, [Supervisor]}}},
         {Mix.PubSub, {:present, {Mix.PubSub, pid, :supervisor, :dynamic}}},
-        {Mix.PubSub, {:present, {Mix.PubSub, :restarting, :supervisor, [Mix.PubSub]}}},
-        {Mix.PubSub, {:present, {Mix.Sync.PubSub, pid, :supervisor, [Mix.PubSub]}}},
+        {Mix.PubSub, {:present, {Mix.PubSub, :restarting, :supervisor, [Supervisor]}}},
+        {Mix.PubSub, {:present, {Mix.Sync.PubSub, pid, :supervisor, [Supervisor]}}},
         {Mix.Sync.PubSub, {:present, {Mix.Sync.PubSub, pid, :supervisor, [Mix.Sync.PubSub]}}},
         {Mix.Sync.PubSub, {:present, {Mix.Sync.PubSub, :undefined, :worker, [Mix.Sync.PubSub]}}},
         {Mix.Sync.PubSub, :unknown},
