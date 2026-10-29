@@ -75,10 +75,7 @@ defmodule SdrAgent.Prototype.ImportTaskTest do
       assert present?, "sentinel control: the argv must contain the synthetic marker"
     end
 
-    {{{result, stdout}, stderr}, log} =
-      with_log(fn ->
-        with_io(:stderr, fn -> with_io(fn -> invoke(argv) end) end)
-      end)
+    {{{result, stdout}, stderr}, log} = with_log(fn -> capture_task_io(argv) end)
 
     assert result == {:exited, {:shutdown, 2}}
     same_stdout? = stdout == @invalid
@@ -90,6 +87,10 @@ defmodule SdrAgent.Prototype.ImportTaskTest do
       leaked? = Enum.any?([stdout, stderr, log], &String.contains?(&1, sentinel))
       refute leaked?, "a synthetic argv sentinel reached a captured output channel"
     end
+  end
+
+  defp capture_task_io(argv) do
+    with_io(:stderr, fn -> with_io(fn -> invoke(argv) end) end)
   end
 
   # Dynamic call prevents a missing task from becoming a compiler/setup
