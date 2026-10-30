@@ -24,6 +24,8 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
     "lib/mix/tasks/sdr.demo.status.ex" => 1,
     "lib/sdr_agent/calibration_console.ex" => 8,
     "lib/sdr_agent/logger/exception_filter.ex" => 2,
+    # ADR-0022: exact ssl_handler formatter-only setter, no new sink.
+    "lib/sdr_agent/prototype/launch_prelude.ex" => 1,
     "lib/sdr_agent/prototype/safe_log.ex" => 2,
     "lib/sdr_agent/prototype/task_boundary.ex" => 1,
     "lib/sdr_agent/repo/query_log.ex" => 1,

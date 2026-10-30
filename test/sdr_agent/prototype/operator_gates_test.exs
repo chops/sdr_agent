@@ -367,18 +367,78 @@ defmodule SdrAgent.Prototype.OperatorGatesTest do
     end
   end
 
-  test "review_read grants no mutation: no write action of the twelve for the operator (Approval :approve aside)" do
+  # These permissions come from distinct, accepted action policies, NOT
+  # review_read. A live actor carries all of its grants; this loop cannot
+  # isolate one authorize_if line by labelling the fixture a review step.
+  @independent_mutations [
+    {SdrAgent.Sales.Account, :import_prototype},
+    {SdrAgent.Sales.Contact, :import_prototype},
+    {SdrAgent.Outreach.Approval, :approve}
+  ]
+
+  test "review_read adds no mutation beyond independently authorized imports and approval" do
     ctx = reviewed!()
 
     for resource <- @step4_reads,
         action <- Ash.Resource.Info.actions(resource),
         action.type != :read,
-        {resource, action.name} != {SdrAgent.Outreach.Approval, :approve} do
+        {resource, action.name} not in @independent_mutations do
       subject =
         if action.type in [:create, :action], do: resource, else: kernel_row!(ctx, resource)
 
       refute Ash.can?({subject, action.name}, ctx.operator) == true,
              "the operator may #{action.name} #{inspect(resource)}"
+    end
+  end
+
+  test "Account and Contact imports have separate explicit live-operator permission" do
+    ctx = reviewed!()
+
+    for resource <- [Sales.Account, Sales.Contact] do
+      assert Ash.can?({resource, :import_prototype}, ctx.operator) == true
+    end
+  end
+
+  test "import permission does not authorize ordinary company or contact mutations" do
+    ctx = reviewed!()
+
+    for {resource, actions} <- [
+          {Sales.Account, [:create, :update, :archive]},
+          {Sales.Contact, [:create, :update, :change_email, :archive]}
+        ],
+        action <- actions do
+      subject = if action == :create, do: resource, else: kernel_row!(ctx, resource)
+      refute Ash.can?({subject, action}, ctx.operator) == true
+    end
+  end
+
+  test "forged and foreign operators cannot use either explicit import action" do
+    ctx = reviewed!()
+
+    for resource <- [Sales.Account, Sales.Contact],
+        actor <- [
+          %{ctx.operator | id: Ecto.UUID.generate()},
+          %{ctx.operator | tenant_id: Ecto.UUID.generate()}
+        ] do
+      refute Ash.can?({resource, :import_prototype}, actor) == true
+    end
+  end
+
+  test "a stale binding refuses both explicit import actions" do
+    ctx = reviewed!()
+    assert PrototypeFixtures.put_live_identity(%{system_identifier: 1}) == :ok
+
+    for resource <- [Sales.Account, Sales.Contact] do
+      refute Ash.can?({resource, :import_prototype}, ctx.operator) == true
+    end
+  end
+
+  test "ordinary runtime refuses both explicit import actions for an operator struct" do
+    ctx = reviewed!()
+    assert PrototypeFixtures.leave_runtime() == :ok
+
+    for resource <- [Sales.Account, Sales.Contact] do
+      refute Ash.can?({resource, :import_prototype}, ctx.operator) == true
     end
   end
 
