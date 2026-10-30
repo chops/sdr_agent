@@ -1,22 +1,21 @@
 defmodule SdrAgent.Prototype.ImportTaskTest do
   @moduledoc """
-  T4-R1 of the D-237 import task: real task presence and four malformed
-  argv cases, with closed terminal summaries and synthetic sentinels.
+  Shared-VM entry refusal of the real D-237 import task's launch route.
 
-  This is NOT full T4. Success, replay, domain authorization, partial row
-  commit, guard refusal and Session/K0/guard adoption remain HELD in the
-  external source packet. An absent task is structural RED only: it does
-  not prove any of these runtime assertions were reached. No skipped tag,
-  fabricated task, substituted guard, synthetic success or new test seam.
+  The task must exist and export run/1. In ExUnit the terminal-only launch
+  prelude deliberately refuses at entry, before argv parsing, Session or
+  any protected reader. Each invocation therefore expects the exact fixed
+  task_aborted entry line and status70, including argv with synthetic
+  sentinels. These are not invalid-argv status2 or import behavior tests.
 
-  Only the two argv cases actually containing a sentinel claim a sentinel
-  leak check. Empty/valueless argv cases assert exact closed output only.
+  True malformed-argv status2 and import success/replay/partial-effect
+  evidence remain HELD for reviewed, bounded fresh-terminal invocations of
+  the real Mix task. This file does not fake guard success, relax launch
+  eligibility, read a dossier, create fixtures, query a database, or call a
+  model. An absent task is structural RED only, never reached entry RED.
 
-  No database fixture, dossier read, network or model call. A future real
-  task owns its existing app.config/opentelemetry body prologue; this is
-  not a fresh-VM startup proof. All cases are serialized because SafeLog
-  and ERL_CRASH_DUMP_BYTES are VM-global. Cleanup restores the variable
-  and detaches the filter, following the accepted boundary test pattern.
+  Tests are serialized because SafeLog and ERL_CRASH_DUMP_BYTES are
+  VM-global. Cleanup restores the variable and detaches the filter.
   """
   use ExUnit.Case, async: false
 
@@ -27,7 +26,7 @@ defmodule SdrAgent.Prototype.ImportTaskTest do
 
   @task Mix.Tasks.Sdr.Prototype.Import
   @dump_var "ERL_CRASH_DUMP_BYTES"
-  @invalid "prototype: import_refused reason=invalid_arguments\n"
+  @aborted "prototype: task_aborted task=import stage=entry\n"
 
   setup do
     # Deliberately outside the capture/catch: an absent task must remain
@@ -51,23 +50,23 @@ defmodule SdrAgent.Prototype.ImportTaskTest do
     assert function_exported?(@task, :run, 1), "structural prerequisite: run/1 is absent"
   end
 
-  test "empty argv is one input refusal and status2" do
-    assert_invalid([], nil)
+  test "empty argv refuses at launch entry before parsing" do
+    assert_entry_refused([], nil)
   end
 
-  test "an unknown option is refused without echoing its value", %{sentinel: sentinel} do
-    assert_invalid(["--unknown-t4-option", sentinel], sentinel)
+  test "entry refusal never echoes an unknown option value", %{sentinel: sentinel} do
+    assert_entry_refused(["--unknown-t4-option", sentinel], sentinel)
   end
 
-  test "a positional argument is refused without echoing it", %{sentinel: sentinel} do
-    assert_invalid([sentinel], sentinel)
+  test "entry refusal never echoes a positional value", %{sentinel: sentinel} do
+    assert_entry_refused([sentinel], sentinel)
   end
 
-  test "a flag without its value is one input refusal and status2" do
-    assert_invalid(["--agent"], nil)
+  test "a valueless flag refuses at launch entry before parsing" do
+    assert_entry_refused(["--agent"], nil)
   end
 
-  defp assert_invalid(argv, sentinel) do
+  defp assert_entry_refused(argv, sentinel) do
     assert function_exported?(@task, :run, 1), "structural prerequisite: run/1 is absent"
 
     if is_binary(sentinel) do
@@ -77,8 +76,8 @@ defmodule SdrAgent.Prototype.ImportTaskTest do
 
     {{{result, stdout}, stderr}, log} = with_log(fn -> capture_task_io(argv) end)
 
-    assert result == {:exited, {:shutdown, 2}}
-    same_stdout? = stdout == @invalid
+    assert result == {:exited, {:shutdown, 70}}
+    same_stdout? = stdout == @aborted
     empty_stderr? = stderr == ""
     assert same_stdout?, "stdout differs from the exact closed refusal line"
     assert empty_stderr?, "stderr is not empty"

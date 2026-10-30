@@ -14,10 +14,15 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
     have no violation. It does not exist yet, so that case fails
     structurally (`File.Error`) until the task's reviewed GREEN.
 
-  The grammar checked here (R-a1): `run/1` is exactly
+  The launch-route delta requires one literal `@requirements ["app.config"]`
+  after `use Mix.Task` and before every function definition. No Mix remote
+  call is allowed anywhere in the task module. These are source assertions,
+  not proof that the OTel-after-prelude runtime succeeds.
+
+  The grammar checked here (ADR-0022 route): `run/1` is exactly
   `attached = SafeLog.attach(file: nil)` then
-  `TaskBoundary.run(:import, attached, fn -> body(args) end)`; one private
-  `body/1` clause starts with `Mix.Task.run("app.config", [])` and
+  `TaskBoundary.launch(:import, attached, fn -> body(args) end)`; one private
+  `body/1` clause starts only with
   `{:ok, _} = Application.ensure_all_started(:opentelemetry)`, and holds the
   session entry, one tagged ContainmentGuard.guard(:import) and every reader;
   all readers are descendants of that same with's later generators or do
@@ -53,14 +58,15 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
       alias SdrAgent.Prototype.ContainmentGuard
       alias SdrAgent.Prototype.SpotcheckManifest, as: Manifest
 
+      @requirements ["app.config"]
+
       @impl Mix.Task
       def run(args) do
         attached = SafeLog.attach(file: nil)
-        TaskBoundary.run(:import, attached, fn -> body(args) end)
+        TaskBoundary.launch(:import, attached, fn -> body(args) end)
       end
 
       defp body(args) do
-        Mix.Task.run("app.config", [])
         {:ok, _started} = Application.ensure_all_started(:opentelemetry)
         correlation = System.get_env("SDR_PROTOTYPE_SESSION")
 
@@ -106,7 +112,8 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   """
 
   @attach "attached = SafeLog.attach(file: nil)\n"
-  @boundary "TaskBoundary.run(:import, attached, fn -> body(args) end)"
+  @boundary "TaskBoundary.launch(:import, attached, fn -> body(args) end)"
+  @requirements ~S|@requirements ["app.config"]| <> "\n"
   @app_config ~S|Mix.Task.run("app.config", [])| <> "\n"
   @otel "{:ok, _started} = Application.ensure_all_started(:opentelemetry)\n"
   @body_anchor ~S|correlation = System.get_env("SDR_PROTOTYPE_SESSION")| <> "\n"
@@ -130,6 +137,30 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
 
   # {label, [{text to replace (each exactly once), replacement}], expected}
   @variants [
+    # Exact Mix requirements and launch route; no body-time Mix work.
+    {:requirements_missing, [{@requirements, ""}], [:task_requirements]},
+    {:requirements_wrong, [{@requirements, ~S|@requirements ["app.start"]| <> "\n"}],
+     [:task_requirements]},
+    {:requirements_extra, [{@requirements, ~S|@requirements ["app.config", "compile"]| <> "\n"}],
+     [:task_requirements]},
+    {:requirements_dynamic, [{@requirements, "@requirements requirements()\n"}],
+     [:task_requirements]},
+    {:requirements_duplicate, [{@requirements, @requirements <> @requirements}],
+     [:task_requirements]},
+    {:requirements_before_use,
+     [{"use Mix.Task\n", ""}, {@requirements, @requirements <> "use Mix.Task\n"}],
+     [:task_requirements]},
+    {:requirements_after_run,
+     [{@requirements, ""}, {@first_helper, @requirements <> @first_helper}],
+     [:task_requirements]},
+    {:requirements_nested, [{@requirements, ""}, {@body_anchor, @requirements <> @body_anchor}],
+     [:task_requirements]},
+    {:legacy_run_entry,
+     [{@boundary, "TaskBoundary.run(:import, attached, fn -> body(args) end)"}],
+     [:missing_reader, :run_shape]},
+    {:mix_load_in_body, [{@body_anchor, "Mix.Task.load_all()\n" <> @body_anchor}], [:mix_call]},
+    {:mix_env_in_helper,
+     [{@first_helper, "defp forbidden_mix, do: Mix.env()\n" <> @first_helper}], [:mix_call]},
     # T3: literal guard edge, whole-result provenance and same-with readers.
     {:guard_missing, [{@guard_step, ""}], [:gate_order, :missing_reader]},
     {:guard_wrong_kind, [{@guard_call, "ContainmentGuard.guard(:serve)"}], [:gate_order]},
@@ -246,11 +277,11 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
     {:run_extra_statement, [{@attach, @attach <> "_ = :ok\n"}], [:run_shape]},
     {:attach_zero_arity, [{@attach, "attached = SafeLog.attach()\n"}], [:run_shape]},
     {:boundary_wrong_kind,
-     [{@boundary, "TaskBoundary.run(:setup, attached, fn -> body(args) end)"}], [:run_shape]},
-    {:boundary_other_value, [{@boundary, "TaskBoundary.run(:import, :ok, fn -> body(args) end)"}],
-     [:run_shape]},
+     [{@boundary, "TaskBoundary.launch(:setup, attached, fn -> body(args) end)"}], [:run_shape]},
+    {:boundary_other_value,
+     [{@boundary, "TaskBoundary.launch(:import, :ok, fn -> body(args) end)"}], [:run_shape]},
     {:boundary_other_argument,
-     [{@boundary, "TaskBoundary.run(:import, attached, fn -> body([]) end)"}], [:run_shape]},
+     [{@boundary, "TaskBoundary.launch(:import, attached, fn -> body([]) end)"}], [:run_shape]},
     {:attach_also_in_body, [{@body_anchor, "_ = SafeLog.attach(file: nil)\n" <> @body_anchor}],
      [:run_shape]},
     # :outside_body (R-a1; replaces :outside_run)
@@ -268,14 +299,14 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
      ], [:outside_body]},
     # :body_prologue (R-a1, new)
     {:prologue_missing_otel, [{@otel, ""}], [:body_prologue]},
-    {:prologue_swapped, [{@app_config, ""}, {@otel, @otel <> @app_config}],
-     [:body_prologue, :start_call]},
-    {:app_config_with_argv, [{@app_config, ~S|Mix.Task.run("app.config", args)| <> "\n"}],
-     [:body_prologue, :start_call]},
+    {:old_body_app_config, [{@otel, @app_config <> @otel}],
+     [:body_prologue, :mix_call, :start_call]},
+    {:app_config_with_argv, [{@otel, ~S|Mix.Task.run("app.config", args)| <> "\n" <> @otel}],
+     [:body_prologue, :mix_call, :start_call]},
     {:otel_result_unmatched, [{@otel, "Application.ensure_all_started(:opentelemetry)\n"}],
      [:body_prologue, :start_call]},
-    # :start_call (the list unchanged; only the exact prologue is exempt)
-    {:second_app_config, [{@body_anchor, @app_config <> @body_anchor}], [:start_call]},
+    # :start_call (only the exact OTel prologue is exempt)
+    {:late_app_config, [{@body_anchor, @app_config <> @body_anchor}], [:mix_call, :start_call]},
     {:start_sdr_agent,
      [{@body_anchor, "_ = Application.ensure_all_started(:sdr_agent)\n" <> @body_anchor}],
      [:start_call]},
@@ -287,7 +318,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
     {:exit_literal, [{@refused_say, @refused_say <> "exit({:shutdown, 2})\n"}], [:abnormal_exit]},
     {:kernel_exit, [{@refused_say, @refused_say <> "Kernel.exit(:refused)\n"}], [:abnormal_exit]},
     {:mix_raise, [{@refused_say, @refused_say <> ~S|Mix.raise("refused")| <> "\n"}],
-     [:abnormal_exit]},
+     [:abnormal_exit, :mix_call]},
     {:explicit_raise, [{@refused_say, @refused_say <> ~S|raise "refused"| <> "\n"}],
      [:abnormal_exit]},
     {:explicit_reraise, [{@refused_say, @refused_say <> ~S|reraise "refused", []| <> "\n"}],
@@ -309,7 +340,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
      [:say_shape]},
     {:no_import_refused_say, [{@refused_say, "_ = reason\n"}], [:say_shape]},
     # :missing_reader (the required calls, R-a1 adds ImportOutcome.reason/2 and
-    # TaskBoundary.run/3)
+    # TaskBoundary.launch/3)
     {:missing_cap_used, [{"DossierImport.cap_used(actor)", "{:ok, 0}"}], [:missing_reader]},
     {:missing_outcome,
      [
@@ -467,7 +498,7 @@ defmodule SdrAgent.Prototype.ImportTaskSourceTest do
   @violations ~w(no_module not_mix_task no_moduledoc no_run run_shape outside_body body_prologue
                  enter_count enter_arity read_before_enter missing_reader start_call env_read
                  file_call say_shape other_channel abnormal_exit indirect_dispatch
-                 unsupported_scope gate_order)a
+                 unsupported_scope gate_order task_requirements mix_call)a
 
   defp occurrences(text, part), do: length(String.split(text, part)) - 1
 
