@@ -55,10 +55,13 @@ defmodule SdrAgent.Application do
 
   # D-237 (IF-8): with the prototype switch set, the content-free SafeLog is
   # attached before any other startup work; a failure aborts the start.
-  defp attach_safe_log do
+  # D-269 M8: the implemented filter-only attach (idempotent); attach/0 is
+  # the held file-sink stub and refuses.
+  @doc false
+  def attach_safe_log do
     case Keyword.get(Application.get_env(:sdr_agent, SdrAgent.Prototype, []), :switch, :off) do
       :off -> :ok
-      _switched -> SdrAgent.Prototype.SafeLog.attach()
+      _switched -> SdrAgent.Prototype.SafeLog.attach(file: nil)
     end
   end
 
