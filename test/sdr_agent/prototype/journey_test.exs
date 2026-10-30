@@ -74,6 +74,15 @@ defmodule SdrAgent.Prototype.JourneyTest do
   defp start_cli!(variant) do
     assert File.regular?(@cli), "the journey's fake CLI #{@cli} does not exist"
     put_env!(:model_provider, ClaudeCLI)
+    test_pid = self()
+
+    # Test-seam builds: the CLI server is a supervised GenServer, so it has
+    # no `$callers` and would read ordinary runtime. Its launch admission is
+    # still the real `Agents.admit_launch/3`, run with this test's ancestry.
+    admit = fn invocation_id, profile, opts ->
+      :ok = SdrAgent.SDR.SeamCallers.adopt(%{sdr_seam_callers: [test_pid]})
+      SdrAgent.Agents.admit_launch(invocation_id, profile, opts)
+    end
 
     start_supervised!(
       {ClaudeCLI,
@@ -81,6 +90,7 @@ defmodule SdrAgent.Prototype.JourneyTest do
          name: ClaudeCLI.server(),
          command: System.find_executable("elixir"),
          test_launcher: true,
+         launch_admission: admit,
          command_args: [@cli, variant]
        ]}
     )
@@ -145,8 +155,9 @@ defmodule SdrAgent.Prototype.JourneyTest do
   # website or page artifacts, each artifact bound to one of the entry's
   # DossierSource digests (supplement 1 r2 sections 6 and 6a).
   defp assert_dossier_evidence!(ctx) do
+    # DossierSource reads are kernel-context only; this is the test's oracle read.
     {:ok, sources} =
-      Ash.read(SdrAgent.Research.DossierSource, actor: ctx.actor)
+      Ash.read(SdrAgent.Research.DossierSource, authorize?: false)
 
     source_digests =
       for source <- sources,
@@ -183,34 +194,9 @@ defmodule SdrAgent.Prototype.JourneyTest do
     refute inspect(result, limit: :infinity) =~ draft.id, "a released_unverified draft is on Home"
   end
 
-  defp journey_worksheet(root) do
-    routes =
-      for route <- ~w(prototype_binding owner_dev owner_calibration hosted other_owner) do
-        {_path, sha} = private!(root, "#{route}.receipt", "counts-only receipt #{route}\n")
-
-        %{
-          "route" => route,
-          "basis" =>
-            if(route == "prototype_binding", do: "agent_receipt", else: "owner_attestation"),
-          "consumed" => 0,
-          "evidence" => %{"path" => "#{route}.receipt", "sha256" => sha}
-        }
-      end
-
-    {_path, previous} = private!(root, "previous.receipt", "counts-only receipt previous\n")
-
-    Jason.encode!(%{
-      "schema" => "d237-budget-worksheet/1",
-      "shared_total" => 60,
-      "window_starts_at" => "2026-10-28T02:38:32.000000Z",
-      "as_of" => "2026-10-29T12:00:00Z",
-      "routes" => routes,
-      "previous_bindings" => %{
-        "consumed" => 0,
-        "evidence" => %{"path" => "previous.receipt", "sha256" => previous}
-      }
-    })
-  end
+  # D-269: the owner100 worksheet bound to the exact owner receipt.
+  defp journey_worksheet(root),
+    do: root |> SdrAgent.OwnerAllowanceFixtures.worksheet() |> Jason.encode!()
 
   defp op!(parsed, actor) do
     result = call(@op, :execute, [parsed, actor])

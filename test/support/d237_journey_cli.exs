@@ -41,7 +41,9 @@ stdin = IO.read(:stdio, :eof)
 
 input =
   case String.split(stdin, "INPUT:\n") do
-    [_ | _] = parts -> parts |> List.last() |> String.trim() |> JSON.decode!()
+    # The canonical JSON is the one line after "INPUT:"; the adapter
+    # appends its output-schema instruction after it.
+    [_ | _] = parts -> parts |> List.last() |> String.split("\n") |> hd() |> JSON.decode!()
     _ -> %{}
   end
 
