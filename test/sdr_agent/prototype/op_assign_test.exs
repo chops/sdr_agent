@@ -34,8 +34,14 @@ defmodule SdrAgent.Prototype.OpAssignTest do
   end
 
   test "Session's insert-only Oban config keeps the base and disables queues, plugins, peer and stager" do
-    base = [repo: SdrAgent.Repo, queues: [research: 2], plugins: [Oban.Plugins.Pruner], peer: Oban.Peers.Database]
-    config = Function.capture(Session, :insert_only_config, 1).(base)
+    base = [
+      repo: SdrAgent.Repo,
+      queues: [research: 2],
+      plugins: [Oban.Plugins.Pruner],
+      peer: Oban.Peers.Database
+    ]
+
+    config = Session.insert_only_config(base)
 
     assert Keyword.fetch!(config, :repo) == SdrAgent.Repo
     assert Keyword.fetch!(config, :queues) == false

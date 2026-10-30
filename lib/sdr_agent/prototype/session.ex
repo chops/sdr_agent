@@ -50,17 +50,37 @@ defmodule SdrAgent.Prototype.Session do
   reason set. Printing them is the calling task's job; no such mapping
   exists here.
 
-  The insert-only Oban of `enqueue?: true` is not yet started here (the
-  enqueuing commands come with their own increment). Production builds
+  With `enqueue?: true` the insert-only Oban starts last, after the
+  binding read, from the configured Oban options merged with
+  `oban_insert_only_opts/0` (`insert_only_config/1`), under a supervisor
+  linked to the calling body; any start failure raises the fixed,
+  value-free `ObanStartError`. Production builds
   retain the existing transaction guard and never reference the prototype
   RepoState or startup adapter at runtime.
   """
+
+  defmodule ObanStartError do
+    @moduledoc """
+    Fixed insert-only Oban start failure of an enqueuing task entry. It
+    carries no cause, options or process identifier; TaskBoundary presents
+    the existing fixed abort outcome.
+    """
+    defexception message: "prototype: oban_start_failed"
+  end
 
   @doc "The insert-only Oban options of an enqueuing task (ruling 1)."
   @spec oban_insert_only_opts() :: keyword()
   def oban_insert_only_opts do
     [queues: false, plugins: false, peer: false, stage_interval: :infinity]
   end
+
+  @doc """
+  Pure: the configured Oban options `base` with `oban_insert_only_opts/0`
+  over them, so no queue, plugin, peer or stager runs in a task process.
+  """
+  @spec insert_only_config(keyword()) :: keyword()
+  def insert_only_config(base) when is_list(base),
+    do: Keyword.merge(base, oban_insert_only_opts())
 
   @doc """
   The pure Repo decision of a task entry (S1 I4b r2 §7), over a
@@ -98,9 +118,25 @@ defmodule SdrAgent.Prototype.Session do
            {:ok, correlation} <- correlation(Keyword.get(opts, :session_correlation)),
            {:ok, delegation_id} <- SdrAgent.Prototype.enter_session(agent, correlation),
            {:ok, actor} <- SdrAgent.Prototype.operator_actor(delegation_id),
-           {:ok, binding} <- SdrAgent.Prototype.binding() do
+           {:ok, binding} <- SdrAgent.Prototype.binding(),
+           :ok <- insert_only_oban(Keyword.get(opts, :enqueue?, false)) do
         {:ok, %{actor: actor, delegation_id: delegation_id, binding: binding}}
       end
+    end
+
+    # IF-2 task kind: only an enqueuing command starts Oban, insert-only,
+    # under a supervisor linked to (and ending with) the calling body.
+    defp insert_only_oban(false), do: :ok
+
+    defp insert_only_oban(true) do
+      config = insert_only_config(Application.fetch_env!(:sdr_agent, Oban))
+
+      case Supervisor.start_link([{Oban, config}], strategy: :one_for_one) do
+        {:ok, _supervisor} -> :ok
+        _not_started -> raise ObanStartError
+      end
+    catch
+      _kind, _reason -> raise ObanStartError
     end
 
     defp agent("claude_code"), do: {:ok, :claude_code}
