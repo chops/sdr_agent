@@ -45,8 +45,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     commits inside `bootstrap/1`; no setup transaction wraps phases 2-3,
     and a phase-3 refusal leaves the phase-2 rows ("bound, unseeded").
 
-    Stage (D-237 S1, Codex b8ac3654 bounded I3): the orchestration is
-    implemented; `real_effects/1` stays deny-only (an empty map, I4).
+    `real_effects/1` constructs the real, lazy effect map without invoking
+    any effect. Repo effects reject redirection and extra application
+    startup configuration. Bootstrap passes the validated configured
+    instance explicitly; the underlying bootstrap's random default is not
+    used. The task starts no product application tree. Ecto owns temporary
+    Repo startup/reuse and cleanup; no caller-death deadline is promised.
     """
 
     alias SdrAgent.Accounts.User
@@ -54,8 +58,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Audit.Tenant
     alias SdrAgent.Operations.PrototypeDatabaseBinding
     alias SdrAgent.Operations.PrototypeDelegation
+    alias SdrAgent.Prototype
     alias SdrAgent.Prototype.Authority
     alias SdrAgent.Prototype.BootCheck
+    alias SdrAgent.Prototype.Cluster
+    alias SdrAgent.Prototype.RepoState
+    alias SdrAgent.Prototype.SafeLog
+    alias SdrAgent.Prototype.Seed
+    alias SdrAgent.Prototype.SeedDir
+    alias SdrAgent.Repo
 
     @args_keys [
       :agent,
@@ -67,6 +78,19 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     ]
     @pin_keys [:campaign, :offering_profile, :provenance, :writing_guide]
     @agents %{"claude_code" => :claude_code, "codex_cli" => :codex_cli}
+    @cluster_refusals [
+      :uid_unknown,
+      :marker_missing,
+      :marker_not_owned,
+      :marker_invalid,
+      :marker_mismatch,
+      :data_dir_not_owned,
+      :binary_mismatch,
+      :control_unreadable,
+      :control_mismatch,
+      :socket_dir_not_owned
+    ]
+    @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
     @resolve_errors [
       :not_prototype_runtime,
       :binding_mismatch,
@@ -181,14 +205,127 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def repo_state_check({:started, true}), do: {:error, :nested}
     def repo_state_check(_state), do: {:error, :unexpected}
 
-    @doc "The real effects for one run's `args` (held). RED: an empty map."
+    @doc "Constructs the real lazy effects for one run; construction performs no I/O."
     @spec real_effects(args()) :: effects()
-    def real_effects(_args), do: red(%{})
+    def real_effects(args) do
+      %{
+        attach_log: fn -> SafeLog.attach(file: nil) end,
+        environment: fn -> environment(args) end,
+        repo_config: fn -> Application.get_env(:sdr_agent, Repo, []) end,
+        cluster_marker: fn -> Cluster.marker() end,
+        maintenance_identity: fn -> Authority.maintenance_identity() end,
+        app_stopped: fn -> Authority.check_app_stopped() end,
+        read_seed: fn dir, pins -> SeedDir.read(dir, pins) end,
+        repo_state: fn -> RepoState.repo_state() end,
+        storage_status: fn -> storage_effect(:status) end,
+        storage_up: fn -> storage_effect(:up) end,
+        with_repo: fn callback -> with_real_repo(callback) end,
+        in_transaction: fn -> Repo.in_transaction?() end,
+        target_identity: fn -> Authority.live_identity() end,
+        migrate: fn -> migrate() end,
+        check_migrated: fn -> Authority.check_migrated() end,
+        check_resumable: fn -> Authority.check_resumable() end,
+        check_fresh: fn -> Authority.check_fresh() end,
+        bootstrap: fn opts -> configured_bootstrap(opts) end,
+        verify: fn _created -> BootCheck.verify!() end,
+        operator_actor: fn id -> Authority.operator_actor(id) end,
+        seed_run: fn seed, actor -> Seed.run(seed, actor) end
+      }
+    end
 
-    # RED stub result, typed dynamic() so callers compile against the stub
-    # (Elixir 1.20 infers literal returns). Read-only: nothing writes the
-    # key; removed in GREEN.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+    defp configured_switch do
+      :sdr_agent |> Application.get_env(Prototype, []) |> Keyword.get(:switch, :off)
+    end
+
+    defp environment(args) do
+      switch = configured_switch()
+
+      %{
+        mix_env: Mix.env(),
+        flag?: System.get_env("SDR_PROTOTYPE") == "d237-prototype/1",
+        switch?: match?(%{policy_id: "d237-prototype/1", instance_id: _}, switch),
+        instance?: valid_switch?(switch),
+        session?: Authority.valid_correlation?(Map.get(args, :session_correlation))
+      }
+    end
+
+    defp valid_switch?(%{policy_id: "d237-prototype/1", instance_id: id} = switch)
+         when map_size(switch) == 2, do: uuid?(id)
+
+    defp valid_switch?(_switch), do: false
+
+    defp configured_bootstrap(opts) do
+      switch = configured_switch()
+
+      if valid_switch?(switch),
+        do: Authority.bootstrap(Keyword.put(opts, :instance_id, switch.instance_id)),
+        else: {:error, :bootstrap_failed}
+    end
+
+    defp storage_effect(kind) do
+      with {:ok, config} <- real_repo_config() do
+        case kind do
+          :status -> Repo.__adapter__().storage_status(config)
+          :up -> Repo.__adapter__().storage_up(config)
+        end
+      end
+    end
+
+    defp with_real_repo(callback) do
+      with {:ok, _config} <- real_repo_config() do
+        Ecto.Migrator.with_repo(Repo, fn Repo -> callback.() end, mode: :temporary)
+      end
+    end
+
+    defp migrate do
+      with {:ok, _config} <- real_repo_config() do
+        versions =
+          Ecto.Migrator.run(Repo, Application.app_dir(:sdr_agent, "priv/repo/migrations"), :up,
+            all: true,
+            log: false,
+            log_migrations_sql: false,
+            log_migrator_sql: false
+          )
+
+        {:ok, versions}
+      end
+    end
+
+    # Check the application config before Repo.config parses/removes :url,
+    # then validate the effective config used by the real adapter as well.
+    defp real_repo_config do
+      with :ok <- real_repo_target(Application.get_env(:sdr_agent, Repo, [])),
+           config = Repo.config(),
+           :ok <- real_repo_target(config) do
+        {:ok, config}
+      end
+    end
+
+    # Ecto reads these options before and during with_repo/run. Never let
+    # migration configuration start another app/repo or redirect the target.
+    defp real_repo_target(config) do
+      with :ok <- Authority.check_repo_target(config),
+           true <-
+             Enum.all?(
+               [:migration_repo, :after_connect, :name, :template],
+               fn key -> Enum.all?(Keyword.get_values(config, key), &is_nil/1) end
+             ),
+           true <-
+             Enum.all?(
+               Keyword.get_values(config, :start_apps_before_migration),
+               &(&1 in [nil, []])
+             ),
+           true <- Keyword.get(config, :otp_app, :sdr_agent) == :sdr_agent,
+           true <- Keyword.get(config, :priv, "priv/repo") == "priv/repo",
+           true <-
+             Keyword.get(config, :migration_source, "schema_migrations") == "schema_migrations",
+           true <- Keyword.get(config, :maintenance_database, "postgres") == "postgres",
+           true <- is_nil(Keyword.get(config, :migration_default_prefix)) do
+        :ok
+      else
+        _invalid -> {:error, :repo_target_mismatch}
+      end
+    end
 
     ## Phase 0
 
@@ -273,14 +410,17 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp environment_refusal(_mix_env, _flag, _switch, _session), do: :ok
 
     defp check_repo(config) do
-      case Authority.check_repo_target(config) do
+      case real_repo_target(config) do
         :ok -> :ok
         {:error, :repo_target_mismatch} -> refused(0, :repo_target_mismatch)
       end
     end
 
-    # S4's family is not pinned: any non-success is unexpected (r3 R3).
     defp marker({:ok, marker}), do: {:ok, marker}
+
+    defp marker({:error, code}) when code in @cluster_refusals,
+      do: refused(0, :cluster_identity_mismatch)
+
     defp marker(_other), do: unexpected(0)
 
     defp maintenance({:ok, identity}), do: {:ok, identity}
@@ -295,7 +435,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp typed_marker?(%{system_identifier: id, data_dir: data_dir} = marker)
          when map_size(marker) == 2,
-         do: positive?(id) and absolute?(data_dir)
+         do: identifier?(id) and data_dir == @data_dir
 
     defp typed_marker?(_marker), do: false
 
@@ -304,11 +444,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
              identity
          )
          when map_size(identity) == 3,
-         do: is_binary(database) and positive?(id) and absolute?(data_directory)
+         do: is_binary(database) and identifier?(id) and absolute?(data_directory)
 
     defp typed_identity?(_identity), do: false
 
-    defp positive?(value), do: is_integer(value) and value > 0
+    defp identifier?(value), do: is_integer(value) and value in 1..18_446_744_073_709_551_615
 
     defp absolute?(path) when is_binary(path) and path != "", do: Path.type(path) == :absolute
     defp absolute?(_path), do: false
@@ -510,6 +650,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       do: {:ok, %{binding_id: created.binding.id, delegation_id: created.delegation.id}}
 
     defp seed({:error, code}, _created) when code in @seed_refusals, do: refused(3, :seed_failed)
+
+    defp seed({:error, code}, _created) when code in [:seed_invalid, :seed_differs],
+      do: refused(3, code)
+
     defp seed(_other, _created), do: unexpected(3)
 
     ## Shapes

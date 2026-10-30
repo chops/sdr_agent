@@ -41,6 +41,7 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
         @moduledoc "synthetic"
         use Mix.Task
         alias SdrAgent.Prototype.{SafeLog, TaskBoundary}
+        @requirements ["app.config"]
         #{extra}
         @impl Mix.Task
         #{run}
@@ -55,7 +56,7 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
     """
     def run(argv) do
         attached = SafeLog.attach(file: nil)
-        TaskBoundary.run(#{inspect(kind)}, attached, fn -> body(argv) end)
+        TaskBoundary.launch(#{inspect(kind)}, attached, fn -> body(argv) end)
       end
     """
   end
@@ -71,7 +72,7 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
       run = """
       def run(argv) do
           attached = SdrAgent.Prototype.SafeLog.attach(file: nil)
-          SdrAgent.Prototype.TaskBoundary.run(:import, attached, fn -> body(argv) end)
+          SdrAgent.Prototype.TaskBoundary.launch(:import, attached, fn -> body(argv) end)
         end
       """
 
@@ -83,10 +84,11 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
       defmodule Mix.Tasks.Sdr.Prototype.Import do
         use Mix.Task
         alias SdrAgent.Prototype.{SafeLog, TaskBoundary}
+        @requirements ["app.config"]
 
         def run(argv) do
           attached = SafeLog.attach(file: nil)
-          TaskBoundary.run(:import, attached, fn -> body(argv) end)
+          TaskBoundary.launch(:import, attached, fn -> body(argv) end)
         end
 
         defp body(_argv), do: :ok
@@ -103,42 +105,42 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
             def run(argv) do
                 attached = SafeLog.attach(file: nil)
                 Mix.Task.run("app.config", [])
-                TaskBoundary.run(:import, attached, fn -> body(argv) end)
+                TaskBoundary.launch(:import, attached, fn -> body(argv) end)
               end
             """,
             # the wrong task atom
             """
             def run(argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:op, attached, fn -> body(argv) end)
+                TaskBoundary.launch(:op, attached, fn -> body(argv) end)
               end
             """,
             # a capture instead of a zero-arity fn literal
             """
             def run(_argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:import, attached, &body/0)
+                TaskBoundary.launch(:import, attached, &body/0)
               end
             """,
             # a one-arity fn
             """
             def run(argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:import, attached, fn _x -> body(argv) end)
+                TaskBoundary.launch(:import, attached, fn _x -> body(argv) end)
               end
             """,
             # the attach result not passed
             """
             def run(argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:import, :ok, fn -> body(argv) end)
+                TaskBoundary.launch(:import, :ok, fn -> body(argv) end)
               end
             """,
             # a guard
             """
             def run(argv) when is_list(argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:import, attached, fn -> body(argv) end)
+                TaskBoundary.launch(:import, attached, fn -> body(argv) end)
               end
             """,
             # a second clause
@@ -147,7 +149,7 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
 
               def run(argv) do
                 attached = SafeLog.attach(file: nil)
-                TaskBoundary.run(:import, attached, fn -> body(argv) end)
+                TaskBoundary.launch(:import, attached, fn -> body(argv) end)
               end
             """
           ] do
@@ -160,7 +162,7 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
         run = """
         def run(argv) do
             attached = #{attach}
-            TaskBoundary.run(:import, attached, fn -> body(argv) end)
+            TaskBoundary.launch(:import, attached, fn -> body(argv) end)
           end
         """
 
@@ -168,9 +170,52 @@ defmodule SdrAgent.Prototype.TaskAdoptionTest do
       end
     end
 
-    test "RED: @requirements is reported" do
+    test "ADR-0022: non-config or duplicate requirements are reported" do
       source = module(:import, good_run(:import), ~s|@requirements ["app.start"]|)
       assert Adoption.violations(source, :import) == [:requirements]
+    end
+
+    test "ADR-0022: requirements must be one literal app.config before every function" do
+      good = module(:import, good_run(:import))
+      required = ~s|@requirements ["app.config"]|
+
+      for replacement <- [
+            "",
+            ~s|@requirements ["app.start"]|,
+            ~s|@requirements ["app.config", "app.start"]|,
+            "@requirements required_tasks()",
+            required <> "\n" <> required
+          ] do
+        assert Adoption.violations(String.replace(good, required, replacement), :import) ==
+                 [:requirements]
+      end
+
+      missing = String.replace(good, required, "")
+
+      late =
+        String.replace(
+          missing,
+          "defp body(_argv), do: :ok",
+          "defp body(_argv), do: :ok\n" <> required
+        )
+
+      nested =
+        String.replace(
+          missing,
+          "defp body(_argv), do: :ok",
+          "defp body(_argv) do\n" <> required <> "\n:ok\nend"
+        )
+
+      early = String.replace(missing, "use Mix.Task", required <> "\nuse Mix.Task")
+
+      for source <- [late, nested, early] do
+        assert Adoption.violations(source, :import) == [:requirements]
+      end
+    end
+
+    test "ADR-0022: legacy run cannot replace terminal launch" do
+      legacy = String.replace(good_run(:import), "TaskBoundary.launch(", "TaskBoundary.run(")
+      assert Adoption.violations(module(:import, legacy), :import) == [:run_shape]
     end
 
     test "RED: each forbidden call anywhere in the module is reported" do

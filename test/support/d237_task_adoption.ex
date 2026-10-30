@@ -13,13 +13,14 @@ defmodule SdrAgent.D237TaskAdoption do
     whose `do` block is the one `defmodule` (otherwise `:not_gated`);
   - exactly one `run/1` clause (`def run(argv)`, no guard), whose body is
     exactly two expressions: `attached = SafeLog.attach(file: nil)` then
-    `TaskBoundary.run(kind, attached, fn -> … end)`, with `kind` the
+    `TaskBoundary.launch(kind, attached, fn -> … end)`, with `kind` the
     literal atom for the file and the third argument a zero-arity `fn`
     literal. `SafeLog` and `TaskBoundary` may be written as the full
     `SdrAgent.Prototype.*` names or through an alias of exactly them
     (otherwise `:run_shape`; `:no_run` when there is no `run/1`);
   - the attach call is exactly `attach(file: nil)` (otherwise `:attach_form`);
-  - no `@requirements` attribute (`:requirements`);
+  - exactly one module-level literal `@requirements ["app.config"]`,
+    after `use Mix.Task` and before every function (`:requirements`);
   - no call anywhere in the module to `IO.*`, `Logger.*`, `Mix.shell/0`,
     `Mix.raise/1,2`, `System.halt/0,1`, `System.stop/0,1`,
     `:erlang.halt/0,1,2`, `:init.stop/0,1`, `exit/1` or `Process.exit/2`
@@ -181,7 +182,7 @@ defmodule SdrAgent.D237TaskAdoption do
   defp attach_statement(_statement, _scope), do: :error
 
   defp boundary_statement?(
-         {{:., _, [module, :run]}, _, [task, {:attached, _, context}, fun]},
+         {{:., _, [module, :launch]}, _, [task, {:attached, _, context}, fun]},
          scope,
          kind
        )
@@ -273,12 +274,42 @@ defmodule SdrAgent.D237TaskAdoption do
   end
 
   defp requirements(body) do
-    found? = collect(body, false, &(&2 or requirements_attribute?(&1)))
-    if found?, do: [:requirements], else: []
+    module_forms = forms(body)
+
+    count =
+      collect(body, 0, fn node, acc ->
+        if requirements_attribute?(node), do: acc + 1, else: acc
+      end)
+
+    required = Enum.find_index(module_forms, &config_requirement?/1)
+    use_task = Enum.find_index(module_forms, &use_mix_task?/1)
+    first_function = Enum.find_index(module_forms, &contains_function?/1)
+
+    if count == 1 and is_integer(required) and is_integer(use_task) and
+         is_integer(first_function) and use_task < required and required < first_function,
+       do: [],
+       else: [:requirements]
   end
 
   defp requirements_attribute?({:@, _, [{:requirements, _, _}]}), do: true
   defp requirements_attribute?(_node), do: false
+
+  defp config_requirement?({:@, _, [{:requirements, _, [["app.config"]]}]}), do: true
+  defp config_requirement?(_node), do: false
+
+  defp use_mix_task?({:use, _, [{:__aliases__, _, [:Mix, :Task]}]}), do: true
+  defp use_mix_task?(_node), do: false
+
+  defp contains_function?(form) do
+    collect(form, false, fn
+      {definition, _, _}, _acc
+      when definition in [:def, :defp, :defmacro, :defmacrop, :defdelegate, :defguard, :defguardp] ->
+        true
+
+      _node, acc ->
+        acc
+    end)
+  end
 
   defp forbidden(body) do
     bindings = bindings(body)
