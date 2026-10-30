@@ -51,6 +51,18 @@ defmodule SdrAgent.Research do
     GuardedCall.create(ResearchArtifact, :record, attrs, subject(opts, attrs, :lead_id))
   end
 
+  @doc """
+  AGT (D-237, supplement 1 r2 section 6a): the verified-excerpt bytes of
+  the dossier sources of run `agent_run_id`'s lead entry, each read through
+  the scoped, audited `Payload :read_dossier_source_content`. `selector` is
+  `:all` or `{:final_url, url}` (exactly one match). Prototype runtime only;
+  see `SdrAgent.Research.DossierSourceRead` for the checks and codes.
+  """
+  @spec read_dossier_sources(term(), term(), :all | {:final_url, String.t()}, term()) ::
+          {:ok, [map()]} | {:error, term()}
+  def read_dossier_sources(agent_run_id, lead_id, selector, actor),
+    do: SdrAgent.Research.DossierSourceRead.read(agent_run_id, lead_id, selector, actor)
+
   @doc "AGT: records a grounded claim; `content` must be the artifact's stored content."
   def record_claim(attrs, opts) do
     GuardedCall.create(EvidenceClaim, :record, attrs, subject(opts, attrs, :research_artifact_id))

@@ -96,8 +96,12 @@ defmodule SdrAgent.Research.ResearchArtifact do
       upsert_fields []
       upsert_condition Ash.Expr.expr(false)
       return_skipped_upsert? true
-      validate {SdrAgent.Sales.Validations.Reserved, attribute: :source_url, kind: :url}
+      # D-237 R8 (supplement 1 r2 section 6): ordinary runtime keeps Reserved exactly;
+      # prototype runtime binds the artifact to one dossier source and its
+      # bytes before StoreContent and any event.
+      validate SdrAgent.Research.Validations.SourceUrl
       change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Research.Changes.DossierSourceBinding
       change SdrAgent.Research.Changes.StoreContent
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Research.Changes.MarkExisting
