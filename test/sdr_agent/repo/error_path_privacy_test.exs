@@ -3,7 +3,7 @@ defmodule SdrAgent.Repo.ErrorPathPrivacyTest do
   C4-01a error-path addendum (ADR-0005 C4 amendment, "metadata-only
   database logging and spans", accepted 2026-10-14; Codex 38fd09d MF3):
   the binding error-boundary controls and the amendment's test list
-  (`docs/adr/0005-observability-wire-witness-anchoring.md` lines 224-251).
+  (`docs/adr/0005-observability-wire-witness-anchoring.md` lines 225-252).
 
     * ADR 238-241 — a synthetic query event whose `%Postgrex.Error{}`
       message, DETAIL and HINT hold a canary;

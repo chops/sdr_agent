@@ -15,7 +15,8 @@ OpenTimestamps"). Details amended by Codex consultations 11 and 13. The R0
 amendment in the wire witness section (2026-10-12) is accepted. The C4
 database-logging amendment in the OpenTelemetry section (2026-10-12) is
 accepted (2026-10-14). The R0-07 calibration harness amendment (2026-10-13)
-is accepted (2026-10-14).
+is accepted (2026-10-14). The remote-transport amendment in the wire witness
+section (2026-10-30) is accepted (D-270, ADR-0024).
 
 ## Context
 
@@ -1065,6 +1066,24 @@ releasable only after the proof and enablement. Other v4-eligible layouts
 stay withheld, with a finer code. One more projection is to be maintained.
 The proof may STOP without v4 evidence if the model replies with a single
 text block, or with a layout outside the grammar.
+
+#### Remote-transport amendment (2026-10-30; accepted, D-270)
+
+Owner acceptance was relayed as
+`m_codex_owner_source_approval_20261030T225619Z`. The design is in
+ADR-0024.
+
+- The prototype's existing exception for an absent provider wire witness
+  extends to `:claude_cli` invocations over transport `:remote`. Under that
+  exception, `:released_unverified` is reachable only through the
+  prototype gate's Prelocked context (the D-237 IF-4 partition in
+  `SdrAgent.Agents.Changes.ReleaseDecision`).
+- Assurance stays UNVERIFIED / `released_unverified`.
+- The request digest, the server-computed result digest and the immutable
+  claim binding are recorded as correlation within the trusted-worker
+  boundary. They are not presented as independent evidence that the
+  provider ran.
+- There is no Mac-side witness build, and no proof calls are required.
 
 ### Anchoring (S11)
 

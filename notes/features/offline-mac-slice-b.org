@@ -1,0 +1,817 @@
+#+title: Offline-Mac Slice B: accepted entity model and implementation plan
+#+date: 2026-10-30
+#+status: plan approved for source-only synthetic implementation (D-270, ADR-0024)
+
+This file collects the reviewed artifacts verbatim, each with its sha256. Later rounds amend earlier ones; the latest round wins where they conflict.
+
+Entity Model: trigger yes. Capabilities ai_pair=true, codex_review=true. Reviewer Codex. Verdict PASS (m_codex_sdr_offline_mac_entity_pass_b_r4a_20261030T184311Z, 2026-10-30T18:43:11Z, review sha256 17141844457e49386cc3bb8bfd6c335451afa97da8a5f42fcc2d5e19ba542cd3).
+Plan: Codex PASS (m_codex_sdr_offline_mac_plan_pass_r2_20261030T185010Z, review sha256 e70bf2cb8a532f061f3decc3c6c892f46413c084f9b7b2348ed1739f709f43e6).
+Owner acceptance: m_codex_owner_source_approval_20261030T225619Z.
+
+Ownership: Claude owns S-B1..S-B6 (branch claude/offline-mac-b). Codex owns S-B7, the Mac agent (branch codex/offline-mac-agent).
+
+* Source claude-sdr-offline-mac-entity-delta-b-r4-20261030.org (sha256 05a34102f55d3bc4a18a817d6f04315d213fa8d5a25d8a2b221741d43b4e073d)
+
+** Carried unchanged from r3
+- B1 accounting:
+  - A charge is taken at reservation, with no refunds.
+  - A RemoteModelCall is created in the reservation transaction.
+  - pending past its deadline means the invocation failed from reserved,
+    still charged.
+  - Uncharged waiting happens only before the run starts.
+- Offline queuing:
+  - The eligibility gate snoozes BEFORE the run/Operation starts (Codex V1:
+    snooze decrements the attempt, engines/basic.ex:273-281, so
+    max_attempts 1 is not exhausted).
+  - A focused regression test pins this.
+- W3: transport :remote under provider :claude_cli; the Mac agent
+  executes; queue-while-offline.
+
+Entity Model trigger: yes.
+Capabilities: ai_pair=true, codex_review=true. Reviewer: Codex.
+Verdict: UNREVIEWED.
+
+Scope note (Codex important):
+- B integrates CLI processing of real inputs that are already imported.
+- Company and contact discovery stays the existing research → spot-check
+  → import pipeline.
+- B does not establish autonomous in-app discovery.
+
+** R1: durable result and expiry contract
+*** Common lock order (extends admit_launch, agents.ex:725-738)
+MacWorker (only when the path involves the worker) → run → Operation
+(share) → invocation → RemoteModelCall → charge (grant/allocation) → chain
+head.
+
+- No path that holds a run lock or any later lock ever requests the
+  MacWorker lock.
+- Disable and pause lock only the MacWorker row (FOR UPDATE).
+- The settler never takes the MacWorker lock.
+- The clock is read once, after every lock is held, as in launch_locked.
+
+*** Claim (one transaction)
+1. Lock the MacWorker row FOR UPDATE by token digest. It must be active
+   with intake open; otherwise refuse.
+2. Pick a candidate pending call without a lock, then take the chain from
+   run to RemoteModelCall in order.
+3. Re-check: call is pending, now < claim_deadline, worker has no claimed
+   call. A unique partial index on RemoteModelCall(worker_id) WHERE state =
+   'claimed' backs the worker check. If the check fails, roll back the
+   candidate and return none.
+4. Run the existing launch check (Admission.launch_check under the charge
+   and head locks), then reserved → sent.
+5. The call becomes claimed.
+6. The commit happens before the response carries the launch input.
+
+*** Complete (one transaction, authoritative deadline)
+1. Lock MacWorker FOR SHARE, then run → … → RemoteModelCall.
+2. Read the clock once.
+   - If now ≥ result_deadline, the call becomes expired_unknown in this
+     transaction. A `late` receipt is recorded, and nothing is applied. A
+     late completion therefore never wins because the settler has not run
+     yet.
+   - If the worker is disabled, the result is refused and the call later
+     expires unknown.
+3. Otherwise, insert an immutable RemoteCallResult (call_id unique,
+   transcript bytes, digest). The call moves claimed → completed, and a
+   receipt is appended.
+4. Settlement then runs in a separate transaction using the existing domain
+   path (below).
+
+*** Settlement and crash recovery
+Settlement of a completed call:
+- The existing claude_cli init attestation and finish_result run on the
+  stored transcript, then the existing settle and the prototype release
+  gate.
+- It is idempotent because the invocation's sent → completed/failed
+  transition happens once. A second attempt sees a terminal invocation and
+  does nothing.
+- The model is never rerun.
+
+The settler cron (every minute, hosted) covers three cases:
+- claimed past result_deadline → expired_unknown, invocation unknown,
+  charged;
+- pending past claim_deadline → expired_unclaimed, invocation failed from
+  reserved, charged;
+- completed with the invocation still `sent` (the waiting process died) →
+  the settlement above, or `failed` with reason
+  remote_result_unprocessable if validation cannot run. Never withheld
+  silently.
+
+Run termination: an orphaned run is not continued. After its invocations
+are terminal, the existing StaleRunSweeper fails the abandoned run (job not
+live). Continuation of the remaining steps is out of scope.
+
+*** Immutability
+- RemoteModelCall is a state machine:
+  - pending → claimed;
+  - pending → expired_unclaimed;
+  - claimed → completed;
+  - claimed → expired_unknown.
+  Every terminal state is immutable. There is no `late` state, no
+  settled_at and no conflict_count on the row.
+- RemoteCallResult is immutable once inserted (digest and ref fixed).
+- RemoteCallReceipt is an append-only event log: accepted, duplicate_same,
+  conflict, late, refused_disabled. It holds the digest only, no content.
+  Duplicates, conflicts and late arrivals are visible there.
+- Settlement state is read from ModelInvocation, which already exists.
+
+*** Mac launch-once
+The Mac agent keeps a local launch journal, one 0600 file per call. It
+holds ids only: call_id, claim_nonce, state requested → launching →
+reported. Each state is fsynced before acting.
+- Same-nonce claim retrieval is used only while the journal says
+  `requested`.
+- `launching` is written before the CLI starts. After a restart, a
+  `launching` entry is never relaunched and never replayed; the call
+  expires unknown.
+- A lost or missing journal means the agent uses only new nonces and never
+  replays an old one. Old claims expire unknown.
+- This is not a child-kill requirement; the owner's waiver stands.
+
+** R2: identity-scoped relocation and fork-safe rollback
+Entities:
+- Relocation: relocation_id; binding_id; relocation_seq, unique per
+  binding and monotonic; from_identity and to_identity, each = (database,
+  OID, system_identifier).
+- RelocationEvent: append-only. Kinds: planned, writers_stopped, fenced,
+  restored, activated, destination_disabled, aborted. Fields:
+  relocation_id, kind, identity, recorded_at, recorded_by.
+
+Main branch: planned → writers_stopped → fenced → restored → activated.
+
+Abort branch, from any point before activated:
+1. If restored exists, the owner runs `destination_disabled` ON the
+   destination copy. The destination then refuses activation and boot for
+   that relocation whenever this event exists, and the owner verifies that
+   event's receipt.
+2. Only then is `aborted` written on the source, which lifts the source
+   fence.
+3. If the destination's state is uncertain, there is no abort; the source
+   stays fenced.
+
+Predicates:
+- Fence scope. A DB refuses writes when it holds a `fenced` event whose
+  identity equals ITS OWN live identity and that has no later `aborted`
+  for the same relocation. The copied `fenced` event names the source
+  identity, so the hosted copy is unaffected.
+- Current authority. The live identity equals the to_identity of the
+  highest-seq relocation with an `activated` event. With no activation
+  ever, it equals the binding's original identity.
+- A return relocation is simply relocation_seq + 1. The unique index is
+  (binding_id, relocation_seq), plus one `activated` per relocation_id.
+
+Final fence serialization:
+- Every audit-appending action (reserve, admit, assign, settlement and
+  job-start writes) re-checks the fence AFTER Kernel.lock_head.
+- The `fenced` event is appended under the head lock.
+- A writer that locked first commits before the fence, so it is in the
+  dump. Any later writer sees the fence and refuses.
+- pg_dump starts after the fence commits.
+
+History:
+- The binding row is never edited.
+- Grants, allocations, invocations, releases and their bases keep the
+  original identity.
+- New authority comes only from the relocation chain.
+
+** R3: hosted owner authority and the prototype release path
+*** HostedOwner (new)
+- Fields: user_id; binding_id; relocation_id, the activation that enabled
+  it; status (active, disabled); enrolled_at; disabled_at.
+- Enrollment is owner-run on the host console. It is a single-use link,
+  valid 15 min, created through a new owner-run action that is allowed
+  only while the current-authority relocation is activated and no active
+  HostedOwner exists.
+- BootCheck delta: it admits the anchor, an optional bound auditor, and at
+  most one active HostedOwner bound to the current-authority relocation.
+- Disable is terminal and revokes all tokens.
+- Actions:
+  - read: the existing review_read under prototype rules;
+  - assign: through the existing prototype OperatorAction resolver,
+    extended to accept the HostedOwner subject;
+  - MacWorker enroll, disable and intake.
+- No retry (D-237 item 3 stands), no outreach and no settings changes.
+- The kernel is never impersonated, and the auditor is never used to
+  assign.
+
+*** Authority mapping
+- authority_core live_matches? (:841-845) compares the immutable binding
+  row with the live identity. It changes to compare the CURRENT-AUTHORITY
+  identity from the relocation chain with the live identity. The binding
+  row stays the historical basis.
+- Funding is unchanged: the same grant/allocation, consumption counted
+  continuously, no reset.
+- Release: the hosted runtime IS prototype runtime. `:released_unverified`
+  stays available only through the prototype gate's Prelocked context
+  (release_decision.ex:6-18).
+- Historical releases are not rewritten. The flow never falls into
+  ordinary witness-required processing.
+
+*** Transcript attestation
+- The Mac returns the full stream-json transcript: init event, messages
+  and terminal result.
+- The hosted side runs the existing attest(init, frozen profile) checks:
+  model, CLI version, tools, MCP and slash commands (claude_cli.ex:1205-1215).
+  It then runs finish_result.
+- Binding is by call_id and request_digest echo. This is trust in the
+  worker, not independent proof (R4).
+
+*** RemoteRuntime (changed Runtime contract)
+The hosted node has no local server, reaper, shim or local pin
+(runtime.ex:12-35 does not apply).
+- Health: MacWorker presence plus intake.
+- Hold: intake paused.
+- Profile identity: a frozen profile (resolved_model, cli_version,
+  executable sha256) recorded at MacWorker enrollment from the Mac's
+  reported pins and confirmed by the owner.
+- Each heartbeat and claim carries the Mac's current pins. A mismatch
+  refuses the claim.
+- The Mac agent builds argv from its own pinned executable and code; the
+  server sends data only, so there is no caller-selected executable or
+  command.
+
+** Entity rows (B r4; deltas only)
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| RemoteModelCall | New | Charged claude_cli call awaiting the Mac | id; model_invocation_id unique; state; request_digest; profile_id; claim_deadline; result_deadline; worker_id; claim_nonce; claimed_at | 1:1 ModelInvocation; N:1 MacWorker; unique claimed per worker | State machine above; terminal immutable | Transport creates; token claims and completes; settler expires | QB3 deadlines: claim 120 s, result 600 s |
+| RemoteCallResult | New | Immutable transcript | call_id unique; transcript bytes; digest; received_at | 1:1 RemoteModelCall | Insert-only | Complete path | none |
+| RemoteCallReceipt | New, append-only | Duplicate, conflict and late visibility | call_id; kind; digest; at | N:1 RemoteModelCall | Insert-only; no content | Complete path | none |
+| MacWorker | New | Off-host executor | worker_id; token_digest; status; intake; frozen profile pins; enrolled_at; disabled_at; last_seen_at | 1 active per binding | active → disabled terminal; heartbeat writes last_seen_at only | HostedOwner enrolls, disables, sets intake; token: claim, complete, heartbeat | none |
+| HostedOwner | New | Hosted human authority | as R3 | 1 active per current-authority relocation | active → disabled terminal; token revoke | Owner-run enrollment | none |
+| Relocation / RelocationEvent | New, append-only | Single-writer move with rollback | as R2 | N:1 binding; unique (binding, seq) | Predicates as R2 | Owner-run each event | none |
+| ModelInvocation | Existing, changed | Remote launch and settlement | failure reasons remote_unclaimed, remote_result_unprocessable | 1:1 RemoteModelCall | reserved → sent only in the claim transaction; settlement only via the existing path; no refunds | Existing | none |
+| Admission / grant / allocation | Existing, changed check | Fence and authority aware | none | unchanged | Fence re-check after the head lock; arithmetic unchanged | Existing | none |
+| Prototype authority (authority_core) | Existing, changed | Live identity from the relocation chain | none | binding row historical | Binding-row identity no longer required to be the live identity | Existing | none |
+| BootCheck | Existing, changed | Admits HostedOwner; current-authority identity | none | none | As R3 | none | none |
+| Runtime → RemoteRuntime | Existing, changed | Hosted model runtime | mode :hosted_prototype; transport :remote | none | Refuses local CLI, Fake and API; prod :prototype refusal unchanged | Deploy | none |
+| AgentWorker / ReplyWorker | Existing, changed | Wait uncharged while offline | none | none | Snooze gate before run/Operation start | Existing | none |
+
+** R4: exact owner approval draft
+*** ADR-0014 Amendment 3 (proposed): hosted processing of real prospect data
+1. Placement. Real prospect data imported through the existing research →
+   spot-check → import pipeline may be stored and processed in one
+   dedicated PostgreSQL 18 database on ch-web-prod (sdr.a-z.bot). This
+   amends constraint 7 for this one host and database only.
+2. Access:
+   - The SDR app connects with an isolated database role that cannot
+     reach other databases.
+   - Host root and the cluster superuser can read everything; this is not
+     prevented, only stated.
+   - People: the owner only, through HostedOwner, plus the existing bound
+     auditor.
+3. Logging: no prospect content in app, edge, proxy or system logs. A test
+   enforces this, per rule 2.
+4. Backups:
+   - Borg already excludes SDR paths, and that stays.
+   - Hetzner Cloud backups are whole-server images, cannot exclude a path,
+     and are OFF today. This approval does NOT change them.
+   - Turning them on later would include SDR data and needs a new
+     amendment. Any effect of that on AgentBuilder belongs to that decision.
+   - Consequence: losing the host means losing the data.
+5. Restore:
+   - Only the owner restores.
+   - The dump file sits on ch-web-prod in a 0600 owner-only directory.
+   - It is deleted after the restore is verified.
+   - The restore source is the fenced 5542 archive.
+6. The Mac holds:
+   - per-call temporary prompt files, 0600, deleted after each call;
+   - a launch journal containing ids only;
+   - the fenced 5542 archive, with full content, for 30 days. The owner
+     then drops it.
+   No content logs.
+7. Retention and deletion: data is kept until the owner deletes it.
+   Deletion means dropping the whole hosted database.
+8. Model calls: only the subscription Claude CLI on the owner's Mac (no
+   direct API, D-262). Prompts and transcripts transit the hosted↔Mac HTTPS
+   channel.
+9. No outreach; delivery stays capture-only.
+
+*** ADR-0005 amendment (proposed): remote transport
+- The existing prototype exception for an absent provider wire witness
+  (released_unverified only through the prototype gate) extends to
+  claude_cli calls over transport :remote.
+- Assurance stays UNVERIFIED / released_unverified.
+- request_digest/result_digest correlation within the trusted-worker
+  boundary is recorded. It is NOT presented as independent evidence that
+  the provider ran.
+- No new witness build and no proof calls.
+
+*** Owner decisions
+1. Approve Slice B for implementation planning. Pick: yes.
+2. Offline behaviour: queue while offline. Pick: yes.
+3. Approve ADR-0014 Amendment 3 as drafted. Pick: yes.
+4. Approve the ADR-0005 remote-transport amendment as drafted. Pick: yes.
+
+None of these approve data copy, deletion, deploy or model calls. Each of
+those needs the reviewed plan and its own owner-run step.
+
+* Source claude-sdr-offline-mac-entity-delta-b-r4a-20261030.org (sha256 fee0b6d16572e7c83cf877767e2832070fcd0e7a0cd039061c1c7994965e22d0)
+
+** C1: restore never resurrects spending authority (replaces r4 R4 item 5)
+- Initial restore happens before activation.
+  - It is the only restore that can lead to an active canonical DB.
+  - Its source is the fenced 5542 dump taken after the `fenced` event.
+  - The owner then activates through the R2 event chain.
+- Disaster recovery happens after activation, when the hosted ledger is
+  lost.
+  - The only source is the stale 5542 archive. It lacks every hosted
+    record and charge made after activation.
+  - The restored DB is READ-ONLY and non-spendable:
+    - it boots in a read-only recovery mode;
+    - no reservation, admission, assign or job queue runs;
+    - prototype authority refuses spending;
+    - BootCheck refuses the spending runtime because the restored DB's
+      identity matches no activated relocation's to_identity.
+  - Re-establishing spending authority requires a separate, explicitly
+    approved recovery, with no counter reset, no history edits and no
+    recreated grant. That recovery is out of scope for this slice.
+- This is a future data-loss rule. It adds no gate to the current
+  authorized allowance.
+- Dump storage (corrected per Codex):
+  - a 0700 owner-only directory on ch-web-prod;
+  - 0600 dump files;
+  - deleted after a verified restore.
+
+** C2: nonce-to-call idempotency (replaces the r4 R1 claim steps)
+New immutable entity, ClaimNonce:
+- Fields: worker_id, claim_nonce, call_id (nullable), created_at.
+- UNIQUE (worker_id, claim_nonce). Insert-only. call_id is set in the same
+  transaction that inserts the row; it is never updated.
+
+Claim transaction:
+1. Authenticate the token. Lock MacWorker FOR UPDATE. Require active and
+   intake open.
+2. Look up ClaimNonce (worker_id, nonce).
+   - If found with call_id X:
+     - X is claimed and now < result_deadline: return X's launch input
+       again;
+     - otherwise: return X's terminal status, with no new work.
+   - If found with a null call_id (an earlier claim with that nonce found
+     no work): return "none". The nonce is spent.
+   - A nonce NEVER acquires a different call.
+3. Not found: select a pending candidate, take the run → … →
+   RemoteModelCall locks, and re-check:
+   - pending;
+   - now < claim_deadline;
+   - no claimed call for this worker (unique partial index kept).
+4. Run launch_check, then reserved → sent and pending → claimed.
+5. Insert ClaimNonce (worker_id, nonce, call_id, or null if there was no
+   candidate).
+6. Commit.
+
+Client side: the transition requested → launching is an exclusive atomic
+step across every local worker process, for example an O_EXCL create of a
+per-call launching marker. The mechanism belongs in the implementation
+plan. Only a process that wins that step launches.
+
+** C3: completion order (replaces r4 R1 "Complete")
+One transaction, under the lock order MacWorker (share) → run → Operation
+→ invocation → RemoteModelCall:
+1. Authenticate.
+2. Resolve the immutable ClaimNonce (worker, nonce) → call_id. A mismatch
+   is refused, with a receipt.
+3. Compute the digest of the received bytes on the server. Any posted
+   digest is ignored.
+4. Inspect the state:
+   - completed: the same digest returns the original receipt as a
+     duplicate_same receipt. A different digest appends a `conflict`
+     receipt. The result and state never change.
+   - expired_unknown or expired_unclaimed: append a `late` receipt only.
+   - claimed:
+     - if now ≥ result_deadline: claimed → expired_unknown, and a `late`
+       receipt;
+     - if the worker is disabled: a refused_disabled receipt, and the
+       state is unchanged; the settler expires the call later;
+     - otherwise: insert RemoteCallResult (the first result is
+       immutable), then claimed → completed and an `accepted` receipt.
+5. A receipt never changes a terminal state. Deadline expiry and result
+   insertion happen only from `claimed`. The settler uses the same locks.
+
+Deadlines are proposed, not open: claim 120 s, result 600 s.
+
+** Carried into the implementation plan (not entity blockers)
+- Existing interrupted-result-gate recovery stays active. StaleRunSweeper
+  :38-68 covers completed but unreleased invocations. A terminal
+  invocation is not treated as released.
+- HostedOwner, before code:
+  - User/token deltas;
+  - tenant-scoped FKs;
+  - the user's role;
+  - revocation;
+  - private transcript read rules.
+  Ash policies are written as Ash policies, not inferred from endpoint
+  authentication or a linked id.
+- V4, before asking the owner to accept the amendment and before deploy:
+  re-verify live Borg excludes and the Hetzner Cloud backup state. Claude's
+  record is from Oct 29 (Borg excludes SDR paths; Cloud backups off), and
+  that record is not proof. Do not change AgentBuilder backup settings.
+
+* Source claude-sdr-offline-mac-plan-r1-20261030.org (sha256 de8ac3f7c0a9ebf7f79c0c092d19d78974059dd9d0a2331578f914ddcdac68b4)
+
+** Scope and non-goals
+In scope: Slice B.
+- A hosted canonical prototype DB with a single writer, reached through the
+  relocation chain.
+- The W3 remote transport for claude_cli.
+- The Mac agent.
+- HostedOwner, for read, assign and worker control.
+- Queuing while offline.
+- Read-only recovery after a disaster.
+
+Not in scope:
+- refunds, API, retry, outreach;
+- a new budget or count gate;
+- a child-kill gate;
+- a provider witness build;
+- autonomous in-app discovery (discovery stays research → spot-check →
+  import);
+- disaster recovery with spending authority.
+
+** ADRs (owner acceptance; D-157)
+- ADR-0024: hosted prototype relocation and remote CLI transport. It covers
+  W3, the relocation event chain, RemoteRuntime, and HostedOwner. The
+  options considered are W1, W2, W3 and Slice A.
+- ADR-0014 Amendment 3: hosted storage. The text is in B r4 R4, with C1
+  restore and V4 corrections.
+- ADR-0005 amendment: remote transport keeps UNVERIFIED /
+  released_unverified.
+- Entity-model diagrams are regenerated: new resources and a new
+  cross-boundary flow.
+
+** Affected modules (new = N, changed = C)
+Domain (Ash, lib/sdr_agent/):
+- N prototype/relocation.ex and relocation_event.ex. Append-only resources;
+  owner-run actions for planned, writers_stopped, fenced, restored,
+  activated, destination_disabled and aborted. Identities: (binding_id,
+  relocation_seq), and one activated per relocation.
+- N prototype/current_authority.ex. A pure predicate over the event chain
+  and the live identity, used by BootCheck, authority_core and the fence
+  check.
+- C prototype/authority_core.ex:841-845. live_matches? compares against the
+  current-authority identity instead of the binding-row identity.
+- C prototype/boot_check.ex. Adds:
+  - the current-authority identity;
+  - an optional HostedOwner;
+  - the :hosted_prototype mode refusals (no local CLI, Fake or API);
+  - read-only recovery mode when no activation matches (C1).
+- N agents/remote_model_call.ex, remote_call_result.ex,
+  remote_call_receipt.ex and claim_nonce.ex. These are the R1/C2/C3 state
+  machines, including:
+  - the unique partial index for claimed per worker;
+  - UNIQUE (worker, nonce);
+  - insert-only results and receipts.
+- N agents/mac_worker.ex. Enroll, disable, intake and heartbeat. The token
+  digest uses the existing token hashing.
+- C agents.ex:
+  - claim_remote_call/complete_remote_call, under the lock order MacWorker
+    → run → Operation → invocation → RemoteModelCall → charge → head;
+  - a fence re-check after Kernel.lock_head in reserve, admit, assign and
+    settlement.
+- C agents/admission.ex. Fence-aware; the arithmetic is unchanged.
+- N agents/remote_settler.ex. An Oban Cron job every minute: expire
+  claimed, expire unclaimed, settle completed-but-unsettled. Idempotent.
+- C sdr/stale_run_sweeper.ex. No behaviour change. Tests prove it still
+  recovers unreleased completed invocations after a remote settlement.
+- C sdr/agent_worker.ex and reply_worker.ex. An eligibility snooze before
+  the run/Operation starts (V1, Oban 2.24.0 engines/basic.ex:273-281).
+- N accounts/hosted_owner.ex plus deltas to User and Token:
+  - tenant-scoped FK;
+  - a role that is not the anchor and not admin;
+  - revocation disables the owner and revokes every token.
+  Policies:
+  - review_read through the extended prototype OperatorAction resolver
+    (prototype/checks/operator_action.ex);
+  - assign;
+  - MacWorker control;
+  - transcript reads only by HostedOwner, never by the auditor.
+
+Provider (lib/sdr_agent/ai/model_provider/):
+- C claude_cli.ex: a transport seam. Under :remote, handle_call creates the
+  RemoteModelCall in the reservation transaction and awaits settlement,
+  either by LISTEN or by settler outcome. Not touched under :remote: the
+  local reaper, pin or port. The init attest and finish_result functions
+  are extracted unchanged so they run on the stored transcript.
+- C runtime.ex: a RemoteRuntime variant. Health comes from MacWorker
+  presence and intake; the profile from the enrolled frozen pins.
+
+Web (lib/sdr_agent_web/):
+- N controllers/worker_controller.ex: POST /worker/claim, /worker/complete
+  and /worker/heartbeat. Bearer token. Size caps. No content logged
+  (SafeLog). Only the closed launch input is returned.
+- C router.ex:
+  - a worker pipeline (no session, no CSRF, TLS only);
+  - HostedOwner routes;
+  - dev_routes, Tidewave and live_reload absent in :hosted_prototype.
+- C live/: dashboard_live and draft_live read through HostedOwner. A new
+  worker_live shows presence and intake and has enroll/disable controls.
+
+Mac agent (new, separate Mix task in the same repo,
+lib/mix/tasks/sdr.mac_agent.ex plus lib/sdr_agent/mac_agent/*):
+- An outbound HTTPS loop with claim, complete and heartbeat.
+- The executable path and sha256 are pinned in its config.
+- argv is built from allowlisted profile and model ids.
+- A per-call 0700 directory holds a 0600 prompt file that is deleted after
+  the call.
+- The launch journal uses an O_EXCL `launching` marker and stores ids only.
+- No content in logs.
+
+Infra (chops/nixos-hetzner-infra, separate repo, own review):
+- An sdr-agent :hosted_prototype release unit and a DB role without CREATE,
+  SECURITY DEFINER or ownership. A separate migration role.
+- A 0700 restore directory.
+- Borg paths unchanged (V4: they exclude SDR). Cloud backups unchanged.
+
+** TDD slices (each: RED → Codex GO → GREEN → full gate → Codex review)
+1. S-B1 relocation chain + current_authority + fence (no remote). Tests:
+   - each event order, and the abort branch only after destination_disabled;
+   - the copied fence does not refuse the hosted copy;
+   - a stale pre-fence writer is serialized by the head lock;
+   - return relocation through seq+1;
+   - read-only recovery refuses spending (C1).
+2. S-B2 RemoteModelCall, ClaimNonce, Result and Receipt with claim and
+   complete. Tests:
+   - nonce replay never acquires new work;
+   - one claimed per worker;
+   - deadline under locks;
+   - completed or expired replays only append receipts;
+   - the digest is computed on the server;
+   - lock order with no deadlock against admit_launch (concurrent test);
+   - charge on reserve, never refunded.
+3. S-B3 settler + transcript validation. Tests:
+   - completed-but-unsettled is settled via the existing path;
+   - an unprocessable result fails closed;
+   - StaleRunSweeper still recovers releases;
+   - init attest drift is refused.
+4. S-B4 claude_cli :remote transport + RemoteRuntime + worker
+   controller. Tests:
+   - no local port under :remote;
+   - only the closed launch input;
+   - no content in logs (rule 2);
+   - pin mismatch refuses the claim.
+5. S-B5 HostedOwner + policies + LiveViews. Allow and deny tests:
+   - auditor cannot assign;
+   - disabled owner's tokens revoked;
+   - transcript read scope.
+6. S-B6 offline snooze gate. Tests:
+   - snooze leaves attempt and max_attempts intact;
+   - no run or Operation before eligibility.
+7. S-B7 Mac agent. Tests:
+   - O_EXCL launch-once across two processes;
+   - restart never relaunches `launching`;
+   - argv comes only from allowlist;
+   - temp file removed.
+   Fixture-driven only. No real CLI calls in tests.
+
+** Owner-run sequence (after slices merged and approvals)
+1. Owner accepts ADR-0024, ADR-0014 Am.3 and the ADR-0005 amendment.
+2. Owner confirms the Hetzner Cloud backup state (V4 open item).
+3. Infra deploy of the :hosted_prototype release with no data.
+   Codex-reviewed.
+4. Relocation events on 5542: planned → writers_stopped → fenced. The dump
+   goes to a 0700 directory with 0600 files.
+5. Restore on the host → restored → activated → HostedOwner enrollment
+   on the host console → MacWorker enrollment, with the Mac's pins
+   confirmed.
+6. First remote call: a single assign under the existing D-269 allowance,
+   with an exact launcher ACK. Counted as usual.
+
+** Risks
+- The size is 7 slices, with no date claimed. An honest estimate needs a
+  Codex check (estimates-need-codex-check).
+- RemoteModelCall deadlines (120/600 s) versus long qualification calls:
+  seq 2 took 10 s today. Make them configurable within the ADR bounds.
+- Shared-host Postgres restarts: the SDR cluster is separate, but infra
+  changes to the shared cluster must avoid the coTenant restart.
+- Hetzner Cloud backups are unverified live (V4).
+
+** Owner decisions (exact)
+1. Approve Slice B for implementation (7 slices above). Pick: yes.
+2. Queue while offline. Pick: yes.
+3. Accept ADR-0014 Amendment 3 (hosted storage; backups exclude SDR; Cloud
+   backups stay off; 5542 archive 30 days; read-only disaster restore).
+   Pick: yes, after the Cloud check.
+4. Accept the ADR-0005 remote-transport amendment (UNVERIFIED preserved).
+   Pick: yes.
+5. Check the Hetzner console for server 119180121 Backups/Snapshots, or let
+   Codex ACK a token-header read. Pick: owner console check.
+
+* Source claude-sdr-offline-mac-plan-r2-approval-package-20261030.org (sha256 df3a95a8fa13080bbb00811fbe26ff2ea01b241382941b29e97d28ad60bc5872)
+
+** P1: remote-call creation lives in the Agents reservation (replaces plan r1 "C claude_cli.ex")
+- Changed: `Agents.reserve_model_invocation`
+  (agents.ex:415-420, :476-510).
+  - When the trusted runtime transport is :remote, a new reviewed Ash
+    change inserts the RemoteModelCall inside the reservation's own
+    transaction.
+  - The transport is selected from Runtime config, never from caller
+    input.
+  - The same insert persists the frozen launch input reference (request
+    digest, profile id, model id and request ref) and the deadlines.
+  - Both rows commit together or roll back together.
+- `provider.complete` (claude_cli :remote) runs after the commit.
+  - It looks up the call by model_invocation_id and waits on LISTEN with
+    a deadline poll.
+  - No transaction is open and no reservation lock is held while it
+    waits.
+- If the caller dies right after commit, the call stays pending or
+  claimed. The settler resolves it (r4 R1). No orphan is possible, because
+  the call row exists whenever the invocation exists.
+- Tests:
+  - an injected failure after the invocation insert rolls back both rows;
+  - killing the caller after commit leaves the settler to expire or
+    settle;
+  - the wait path holds no DB connection checkout across the wait
+    (asserted via the pool).
+
+** P2: approvals before implementation; HostedOwner exact
+Order:
+1. Codex reviews this package.
+2. The owner accepts or declines each item below.
+3. Implementation begins. A slice whose ADR is unaccepted does not start.
+
+Optional split, my pick:
+- (a) A source-only, synthetic-fixture implementation approval. It needs
+  ADR-0024 and the ADR-0005 amendment accepted.
+- (b) A separate real-data storage/operations approval. It needs ADR-0014
+  Amendment 3 plus the owner's Cloud backup check.
+- (a) can proceed while (b) waits. The backup claims stay marked
+  unverified until the owner checks.
+
+HostedOwner, exact:
+- It is an existing `users` row with the existing role `:reviewer`
+  (user.ex:76; human roles admin, reviewer, auditor), status active. It is
+  not admin, not the anchor, and not the auditor.
+- New action `enroll_hosted_owner`, run by the owner from the host
+  console:
+  - It is allowed only while the current-authority relocation is
+    `activated` and no active HostedOwner exists.
+  - It creates the reviewer user plus a HostedOwner row (user_id, tenant
+    FK, binding_id, relocation_id).
+  - It issues one single-use sign-in link, valid for 15 min, printed only
+    on the console.
+  - The prototype refusal of `create_user` is unchanged; this is a
+    separate action bound to activation.
+- Revocation: `disable_hosted_owner` (owner console or HostedOwner self)
+  disables the user and revokes every token in one transaction. This is
+  terminal.
+- Policy mapping:
+  - The prototype OperatorAction check (prototype/checks/operator_action.ex)
+    gains a resolver branch: an actor who is an active reviewer with an
+    active HostedOwner row for the current-authority relocation gets
+    `review_read` and `assign`.
+  - New policies on MacWorker allow enroll, disable and intake for that
+    actor only.
+  - Transcript reads (RemoteCallResult) are allowed for HostedOwner only;
+    the auditor gets none.
+  - Allow and deny tests for each.
+  - Endpoint authentication is not a policy. Every read goes through Ash.
+
+The secret-read item is fixed: Codex cannot grant that exception. The
+owner is asked directly to check the Hetzner console (decision 5).
+
+** P3: standalone Mac agent; inactive staging and cutover
+Mac agent bootstrap:
+- `mix sdr.mac_agent` runs `Mix.Task.run("app.config")` and then starts
+  only :req (with :finch/:mint), :crypto and :ssl.
+- It does NOT start :sdr_agent. That means no Repo, BootCheck, Oban or
+  Endpoint.
+- HTTP goes over Req.
+- The subscription CLI login stays in the Mac user's own claude config.
+  The agent never reads or copies it.
+- Check (test): running the task with no DB reachable and with
+  `:sdr_agent` unstarted works. Assertions: `Application.started_applications`
+  excludes :sdr_agent and :postgrex, and no Repo process exists.
+
+Hosted staging:
+- "Deploy with no data" means building and staging an INACTIVE release
+  artifact. No unit is started, and the existing synthetic sdr.a-z.bot
+  service on :4005 and its DB keep running unchanged.
+- Restore and activation use a reviewed release command,
+  `sdr_agent eval SdrAgent.Prototype.Relocation.CLI.<step>`.
+  - It runs the restore, then appends `restored` and `activated` without
+    booting the Endpoint, Oban or BootCheck spending paths.
+  - It is owner-run on the host.
+- Cutover: switch the service unit to the new release only after these
+  succeed:
+  - the activated event;
+  - HostedOwner enrollment;
+  - a read-only readiness probe.
+- Before activation, rollback is the R2 abort branch: destination_disabled
+  first, then the source unfences.
+- The exact service, DB, socket and port names go in the operational
+  runbook, reviewed before execution.
+  - Never touch: a-z.bot, AgentBuilder, the shared PG16 cluster, 5541, or
+    foreign local ports.
+  - Candidates, to be confirmed in the runbook: a new DB on the existing
+    sdr-agent PG18 cluster at /run/sdr-agent-postgresql, and port :4005
+    reused at cutover.
+
+** P4: lifecycle-accurate acceptance; live-check input
+- Offline (replaces plan r1 S-B6 tests):
+  - assign creates the queued run, Operation and job (sdr.ex:125-154);
+  - the gate snoozes BEFORE the START transition, the reservation and any
+    charge;
+  - the tests assert that the run and Operation stay `queued` after a
+    snooze and that the attempt bookkeeping is restored (attempt
+    decremented, max_attempts unchanged).
+- Live-check input (replaces plan r1 owner-run step 6):
+  - The retained leads are not assignable: one is disqualified and one is
+    qualifying (sdr.ex:158-165).
+  - Authorized input requires an owner-approved import of the ONE
+    remaining cap slot (max_contacts 3; cap_used 2) of a NEW
+    spot-check-PASS dossier row. The import goes through the hosted
+    canonical action path after activation, never the fenced 5542.
+  - Then one assign of that new lead, under the existing D-269 allowance,
+    with an exact launcher ACK.
+  - No retry, no reset, no lead mutation and no research restart.
+  - Until a dossier exists, the live check has no input and is not
+    scheduled.
+- Acceptance wording: "a real imported company/contact was processed by
+  the real subscription CLI through the hosted site". It does not claim
+  autonomous discovery.
+- Gates per slice:
+  - focused RED/GREEN;
+  - `mix compile --warnings-as-errors`;
+  - `mix precommit`/full gate before completion;
+  - the baseline failures recorded honestly, with no unrelated cleanup.
+- Logging redaction covers prospect content, the Authorization header and
+  enrollment links or tokens. Worker endpoints are no-session bearer
+  endpoints. Owner actions keep browser CSRF.
+
+** Approval package (DRAFT texts; the owner accepts or declines each)
+*** Draft ADR-0024 (number proposed; not created): Hosted prototype relocation and remote CLI transport
+Status: proposed.
+
+Context:
+- The owner requires the website to stay available while the Mac is
+  offline (2026-10-30).
+- Model calls must stay on the owner's subscription Claude CLI on the Mac
+  (D-262, D-269).
+
+Decision:
+1. The canonical prototype DB moves once to a dedicated DB on ch-web-prod.
+   This is done through an append-only relocation event chain:
+   - planned → writers_stopped → fenced → restored → activated;
+   - abort is allowed before activation, with destination_disabled first.
+   Spending authority follows the current-authority identity. The binding
+   row is never edited.
+2. claude_cli calls on the hosted runtime use transport :remote.
+   - The RemoteModelCall is created in the reservation transaction.
+   - The Mac agent claims ONE call through an atomic claim (launch admission
+     happens in that claim).
+   - It runs the pinned CLI locally and returns the full transcript.
+   - The server validates it with the existing attest and finish_result
+     paths and settles through the existing domain.
+   - The nonce is idempotent and the first result is immutable.
+   - Deadlines are 120 s to claim and 600 s for a result.
+   - Charges are taken at reservation and never refunded.
+3. HostedOwner is a reviewer user bound to the activation. It has read,
+   assign and worker control.
+4. Queue while offline: an eligibility snooze before START.
+5. Disaster restore after activation is read-only and non-spendable.
+
+Alternatives rejected:
+- W1, a SQL Oban node: too wide an authority, and weak revocation.
+- W2, whole-run claim: a second write path.
+- Slice A only: does not meet the full target.
+
+Consequences:
+- Model calls are not provider-witnessed. They stay UNVERIFIED.
+- The host becomes a store of real data (ADR-0014 Am. 3).
+- 7 implementation slices.
+
+*** Draft ADR-0014 Amendment 3: hosted processing of real prospect data
+Text as in B r4 R4 items 1-9, with these replacements:
+- Item 4 (backups): Borg sources are /var/lib/caddy and
+  /var/backups/postgresql only. This was verified live on 2026-10-30 (V4
+  4cb8a669), and no SDR dumps are present. Hetzner Cloud image backups
+  and snapshots are UNVERIFIED pending the owner's console check. They
+  must stay off, or this amendment is reopened.
+- Item 5 (restore):
+  - The initial restore comes from the fenced 5542 dump.
+  - Disaster restore after activation is read-only and non-spendable.
+    Hosted records made after activation are absent from the archive.
+  - Dumps go in a 0700 directory with 0600 files and are deleted after a
+    verified restore.
+- Real data covered: data imported through the research → spot-check →
+  import pipeline. There is no autonomous discovery.
+
+*** Draft ADR-0005 amendment: remote transport
+The existing prototype absent-wire-witness exception (released_unverified
+only through the prototype gate) extends to claude_cli transport :remote.
+- Digest correlation inside the trusted-worker boundary is recorded and is
+  not presented as provider evidence.
+- No witness build and no proof calls.
+
+** Owner decisions (one line each, my pick)
+1. Accept the draft ADR-0024. Pick: yes.
+2. Accept the ADR-0005 remote-transport amendment. Pick: yes.
+3. Approve source-only synthetic implementation of the 7 slices once 1 and
+   2 are accepted. Pick: yes.
+4. Accept ADR-0014 Amendment 3: real data hosted on ch-web-prod, Cloud
+   backups off, 5542 archive for 30 days. Pick: yes, after decision 5.
+5. Check the Hetzner console for server 119180121: Backups off? No
+   snapshots? Pick: you check.
+6. Later, a separate approval: one remaining import slot plus one assign
+   as the live check. Pick: decide after the slices land.
