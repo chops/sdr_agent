@@ -127,8 +127,13 @@ defmodule SdrAgent.Prototype.Session do
     # IF-2 task kind: only an enqueuing command starts Oban, insert-only,
     # under a supervisor linked to (and ending with) the calling body.
     defp insert_only_oban(false), do: :ok
+    defp insert_only_oban(true), do: start_insert_only_oban()
 
-    defp insert_only_oban(true) do
+    @doc false
+    # Public only for the cold-VM proof (test/support/session_oban_thin_child.exs);
+    # callers enter through `enter/1` with `enqueue?: true`.
+    @spec start_insert_only_oban() :: :ok
+    def start_insert_only_oban do
       config = insert_only_config(Application.fetch_env!(:sdr_agent, Oban))
 
       case Supervisor.start_link([{Oban, config}], strategy: :one_for_one) do
