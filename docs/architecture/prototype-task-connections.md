@@ -1,22 +1,30 @@
-# Prototype task connection ownership (proposed)
+# Prototype task connection ownership
 
 The source is [prototype-task-connections.mmd](prototype-task-connections.mmd).
 It distinguishes setup's conditional maintenance helper and test-only fake from
-operator entry's parent-owned Repo. It does not claim installed Session startup,
-Repo-stop-on-return, caller-death time bounds or a real connection proof.
+operator entry's parent-owned Repo. Source wiring is distinct from runtime
+proof: the diagram promises neither Repo-stop-on-return nor caller-death time
+bounds, and it supplies no new real-connection proof.
 
 The maintenance success deadline covers reply and both DOWN observations;
-post-expiry grace acknowledges cleanup only. See proposed ADR-0021 for the
+post-expiry grace acknowledges cleanup only. See accepted ADR-0021 for the
 caller-death residual and required implementation evidence.
 
 ## Terminal launch (ADR-0022)
 
-`TaskBoundary.launch/3` is the terminal entry for prototype Mix tasks. The
-product tasks do not use it yet. At G3 dfc2e05c the `op` task's `run/1` is
-still `not_implemented` and the import task does not exist, so the diagram
-shows that wiring as a dashed, planned edge. The only route measured so far
-is the A1 harness. It runs in a fresh no-start VM, attaches SafeLog and calls
-`launch/3`.
+`sdr.prototype.import` now wires the terminal `TaskBoundary.launch/3`
+route. Mix loads `app.config` through the task's requirement, then `run/1`
+attaches SafeLog and calls `launch/3`. The body starts OpenTelemetry, parses
+argv, enters Session and runs the import guard before any protected input
+reader. Only guard success reaches the existing prepare/import/cap/output
+APIs. There is no task-owned import transaction, model call or outreach.
+
+The `op` task's `run/1` remains `not_implemented`; other prototype-task launch
+wiring remains planned and dashed. The solid import edge denotes installed
+source, not successful terminal execution or imported rows. The measured A1
+harness route is separate: it starts OpenTelemetry **before** launch in a fresh
+no-start VM. The actual task's OpenTelemetry-after-prelude ordering still
+needs its own fresh-terminal proof.
 
 After the admission, attach and entry checks, the outermost call runs
 `LaunchPrelude.run/0` once. Its steps run in order and stop at the first
@@ -32,7 +40,8 @@ refusal:
 
 Any result other than `:ok` aborts at stage `entry`, and nothing an earlier
 step did is rolled back. After that the body process adopts the task's entry
-token, and the containment guard runs inside the body.
+token. In the import body, Session entry precedes the containment guard;
+the A1 harness instead calls the guard directly in its body.
 
 Measured pins:
 
@@ -46,5 +55,6 @@ Measured pins:
 
 A1 r3 proved the harness route in one fresh no-start VM at G3. Both children
 were removed, the handler was normalized, the launch returned `:ok` and the
-guard returned `:ok`. It does not prove task wiring, import or op behaviour,
-database rows or delivery.
+guard returned `:ok`. It does not prove actual import-task execution, import
+or op behaviour, database rows or delivery. Source presence and a shared-VM
+entry refusal are not a substitute for the real task's guarded runtime path.

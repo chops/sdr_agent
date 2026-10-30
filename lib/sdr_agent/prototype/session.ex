@@ -1,11 +1,13 @@
 defmodule SdrAgent.Prototype.Session do
   @moduledoc """
   The common entry of the D-237 operator task processes (interfaces r6 IF-2
-  "Process kinds", IF-3 "How a session delegation is created"): every
-  `sdr.prototype.*` task except setup calls `enter/1` right after
-  `SdrAgent.Prototype.SafeLog.attach/0`.
+  "Process kinds", IF-3 "How a session delegation is created"). Operator
+  callers enter through `enter/1`, not directly through `enter_session/2`.
 
-  The caller loads `app.config` in its body prologue. In a prototype build,
+  The terminal import caller loads `app.config` through its Mix requirement
+  before attaching SafeLog and calling `TaskBoundary.launch/3`. Its body
+  starts OpenTelemetry and parses argv before entering Session; the import
+  guard and protected readers follow successful entry. In a prototype build,
   `enter/1` observes the real RepoState first: it starts the real Repo only
   when absent, reuses an existing non-transactional Repo without owning or
   stopping it, and refuses every other state. It never starts the product

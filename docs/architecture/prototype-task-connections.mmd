@@ -15,12 +15,16 @@ flowchart TD
   Session -->|raced already_started: winner untouched| Error[Value-free RepoStartError]
   Task -.->|parent-specific OTP exit / VM shutdown, not stop-on-return| Repo
   Task -.->|VM shutdown is terminal residual for orphan helper| Helper
-  Terminal[Planned: sdr.prototype.* task run/1, not yet wired] -.->|planned: SafeLog.attach, then TaskBoundary.launch/3| Launch
+  Terminal[Wired: sdr.prototype.import run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  Planned[Other prototype tasks: launch wiring planned] -.->|planned: attach then launch/3| Launch
   Harness[Measured A1 harness: fresh no-start VM] -->|SafeLog.attach, then TaskBoundary.launch/3| Launch[launch/3: admission, attach, entry guard]
   Launch -->|outermost only; any non-:ok is entry abort, no rollback| Eligible{E: pinned, Mix-launched, non-ExUnit, product-free VM}
   Eligible -->|eligible| P1[P1 Mix.PubSub: exact entry terminated + deleted; absent skipped]
   P1 -->|:ok| P2[P2 Mix.Sync.PubSub: exact entry terminated + deleted; absent skipped]
   P2 -->|:ok| P3[P3 ssl_handler: original formatter-only update + re-read; absent or normalized skipped]
   P3 -->|:ok| Body[Body process: K0 entry token]
-  Body -->|guard kind| Guard[ContainmentGuard.guard]
-  Guard -->|:ok only| Task
+  Body -->|import body: OTel start and parse| Task
+  Session -->|import only: successful entry| Guard[ContainmentGuard.guard import]
+  Body -->|A1 harness only: OTel started before launch| Guard
+  Guard -->|:ok import only| ImportWork[Protected readers; prepare; domain import; cap and closed output]
+  Guard -->|:ok A1 only| HarnessDone[A1 harness result]
