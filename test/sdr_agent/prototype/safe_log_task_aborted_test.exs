@@ -48,8 +48,10 @@ defmodule SdrAgent.Prototype.SafeLogTaskAbortedTest do
   end
 
   test "no other code changes" do
-    # I2: the reviewed :import_refused delta is the only other addition.
-    assert codes() -- [:task_aborted, :import_refused] ==
+    # I2: the reviewed :import_refused delta, plus the reviewed additive
+    # refusal shapes :provision_refused (D-268 M6b, entity f1bffa89) and
+    # :seed_refused (op seed, entity 3cfaad3d), are the only other additions.
+    assert codes() -- [:task_aborted, :import_refused, :provision_refused, :seed_refused] ==
              Enum.sort([
                :boot,
                :setup_phase,

@@ -59,15 +59,6 @@ defmodule SdrAgent.Prototype.Session do
   RepoState or startup adapter at runtime.
   """
 
-  defmodule ObanStartError do
-    @moduledoc """
-    Fixed insert-only Oban start failure of an enqueuing task entry. It
-    carries no cause, options or process identifier; TaskBoundary presents
-    the existing fixed abort outcome.
-    """
-    defexception message: "prototype: oban_start_failed"
-  end
-
   @doc "The insert-only Oban options of an enqueuing task (ruling 1)."
   @spec oban_insert_only_opts() :: keyword()
   def oban_insert_only_opts do
@@ -98,6 +89,16 @@ defmodule SdrAgent.Prototype.Session do
   @doc "Enters a task process; see the moduledoc."
   @spec enter(keyword()) :: {:ok, map()} | {:error, atom()}
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    # Prototype builds only: production defines no module besides Session.
+    defmodule ObanStartError do
+      @moduledoc """
+      Fixed insert-only Oban start failure of an enqueuing task entry. It
+      carries no cause, options or process identifier; TaskBoundary presents
+      the existing fixed abort outcome.
+      """
+      defexception message: "prototype: oban_start_failed"
+    end
+
     def enter(opts) when is_list(opts) do
       case repo_decision(SdrAgent.Prototype.RepoState.repo_state()) do
         :start ->
