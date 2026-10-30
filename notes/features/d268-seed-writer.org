@@ -1,0 +1,220 @@
+#+title: D268 M4 SeedScope and seed writer delta
+#+date: 2026-10-30T03:44:00Z
+Owner Codex. Base6790ef3ab179b96e8ac2c841d317dd73281afc6f. Proposed short
+branch codex/d268-seed-writer after real5542 source remains frozen.
+M4 completes approved delivery-plan row; no real seed execution, contact read,
+LLM call or runtime target authority implied. Claude remains independent reviewer.
+
+* Entity Model (before affected-module plan)
+Entity Model trigger: yes
+Reason: registered backend seed authority, persisted seed transaction lifecycle,
+creation-event correlation, and three narrow activation-policy allowances.
+Carry prior C entity PASS786623e5, accepted ADR-0009 amendment r2 per D-268(1),
+not superseded watermark W/r2 implementation. C is correlation with no early lock.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| SeedScope | New nonpersisted scope | Vouch same-run members for narrow activation | ref; live actor-derived tenant/delegation; 64-lowerhex provenance digest; fresh random UUID run_id; pg_current_xact_id; opening/per-member transaction-local markers; ordered member ids | Same process registry; members profile revision1, ICP, sequence, step, campaign; authoritative stored rows/events | One registered scope/process; bind once in order; callback cleanup on every exit; marker rollback/transaction change/released/forged/cross-process/incomplete scope refuses; no early chain-head lock, xmin or watermark | Live exact operator resolved before privileged reads at run/bind/valid; trusted in-process convention, not hostile-VM capability; no public caller scope input | Exact tests before allow; entity review |
+| Seed operation | Existing stub to complete transaction | Persist profile/guide and active seed campaign atomically | Input validated SeedDir map and four digests; output closed codes + ids/digests only | Live binding lock; provenance Payload; two settings revisions; ICP/sequence/step/campaign; same delegation on all events | Refuse nested transaction before query; pure content/hash validation before writes; one Audit transaction; lock binding then recheck live; create only empty history; rollback whole operation on any write/bind/activation refusal/SQL abort; exact replay writes/activates nothing; incomplete/different/ambiguous history seed_differs; complete inactive replay seed_failed; no queue/outreach | Fresh live operator actor, never seeder/admin/anchor substitution; internal coordinator owns rollback and scoped calls through domain actions | Exact precheck/replay source plan after entity PASS; no repair/adoption path |
+| Audit creation correlation | Existing persisted nullable UUID use | Establish creation within this run | correlation_id from internal sdr_seed_run_id on five seed action definitions (settings invoked twice) | Exactly one event per member matching resource/type/id/tenant/action/delegation/run id; Sales digest exact; profile revision1 provenance note | Existing AppendEvent authority/transaction/chain unchanged; no new schema/migration/backfill; forged nonce outside registry gives no activation; guide receives correlation though not activation member | Existing kernel-context event reads, no operator read widening | Exact event payload reads after entity PASS |
+| SettingsRevision | Existing seed write and event-link delta | First profile and guide | Existing content/kind/number1/note/anchor fields; event correlation new use only | Both revisions from same seed provenance Payload; created_by anchor, event actor delegation; profile is first scope member | Existing content/size/note/number/chain rules intact; replay needs exact first revisions and no later revisions | Existing seed_settings action only, no settings read or ordinary create_revision change | None |
+| IcpDefinition | Existing event/activate policy delta | Activate exact first seed ICP | Existing attrs/status; seed event run correlation | Stored tenant/id/event/digest equals bound member; campaign references same ICP | Existing draft-to-active transition, locks/events intact; old/unrelated/foreign rows refuse; no replay activation | Append narrow scope allow beside admin/seeder only; no update/retire | Positive scope and reached Forbidden RED before allow |
+| Sequence | Existing event/activate policy delta | Activate exact first seed sequence | Existing attrs/status; seed event correlation | Bound stored sequence; bound step references it; campaign references it | Existing transition/RequireSteps/locks/events intact | Same narrow activate allow; ordinary admin/seeder unchanged; no update/retire | Same RED gate |
+| SequenceStep | Existing creation-event link delta | One exact step for seed sequence | Existing forced position1/email/delay0/approval/stop_on_reply; event correlation | Bound stored tenant/id/sequence/event/digest exact | Parent-draft and uniqueness rules unchanged; mismatched/old/rolled-back member refuses | Existing seed_settings creation only | None |
+| Campaign | Existing event/activate policy delta | Activate campaign referring to exact bound ICP/sequence | Existing reserved sender/footer/defaults; event correlation | Stored ids match bound ICP/sequence; no FK/cardinality/delete change | Existing transition/related-active checks/locks/events intact; no pause/resume/update widening | Same narrow activate allow; ordinary paths unchanged | Same RED gate |
+
+existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
+Applies to binding/delegation schemas, Payload action policy, ordinary settings,
+Prelocked/ProvisionScope, import caps/idempotency, budgets/CLI/suppression/approval,
+capture-only delivery. Reuse does not inherit proof for the new coordinator.
+Capabilities .workflow/recipe.json ai_pair=true,codex_review=true.
+Reviewer Claude via correlated answer m_1793331914000000000_ce4273c3:
+ENTITY PASS at2026-10-30T03:45:14Z; review fcc4731dc564c21203727871b7b7173a7485fe60ca207848072b264feff0fb10.
+Folds F1-F5 accepted below. No self-review.
+
+* ADR and constraints
+No new alternative: implement accepted ADR-0009 C amendment r2 exactly;
+accepted text/decision record must be installed in repo before policy authority.
+No W watermark, row metadata, broad OperatorAction or public context capability.
+Five scope members, six domain writes (settings twice). Source no real contacts.
+Focused TDD and statics; no repeated full gate or runtime bootstrap in this scope.
+One milestone source/results review, with mandatory Phase4a/4b checkpoint retained.
+
+* Affected modules / exact proposed source ownership (after entity PASS)
+New: lib/sdr_agent/prototype/seed_scope.ex and checks/seed_scope.ex.
+Existing: lib/sdr_agent/prototype/seed.ex; agents/settings_revision.ex;
+sales/{icp_definition,sequence,sequence_step,campaign}.ex.
+Only seed_prototype event context_links on five resources; only3 activate
+policy lines; preserve all existing lifecycle/action/read/auth semantics.
+Tests new: test/sdr_agent/prototype/{seed_scope,seed_scope_policy,seed_writer_atomicity}_test.exs.
+Existing tests run unchanged: seed_write,seed_activation,seed_sales_actions,
+seed_anchor,seed_text_guard,seed_inaction_fault,gtm_seed,safe_log tests.
+Docs: docs/adr/0009-domain-persistence-conventions.md accepted C amendment only;
+notes/features/d268-seed-writer.org (approved plan/implementation record).
+F6: Claude owns docs/architecture/prototype-task-connections.{md,mmd}; do not
+edit them on Codex branch. Send new Seed runtime edge text in milestone packet.
+No dependency/migration/config/runtime/authority_core or private content changes.
+No edits to Claude op task/Prototype.Op, Lead, provisioning, serve, or composite.
+
+* Retry ownership (F2)
+M4 core exposes existing Seed.run/2 contract. Bound-unseeded5542 MUST use the
+op seed retry, not fresh setup/drop/re-init. Request Claude retain ownership of
+its composite lib/sdr_agent/prototype/op.ex + task and wire seed command to
+SeedDir.read/2 and Seed.run/2 with existing live session/guard. If separate
+approval needed Claude supplies minimal plan/RED. Do not make a hidden caller
+or substitute direct Seed execution in runtime. No real retry in this scope.
+
+* Minimal implementation sequence
+1. After plan/file-ownership/window ACK and setup runtime head release, branch
+   codex/d268-seed-writer from6790ef3a, push upstream before source changes.
+   Install accepted ADR r2 text/status with exact acceptance decision reference.
+2. Phase4a scope RED: compile-safe deny-only declaration + synthetic tests;
+   intended wrong-value/callback-not-called failures, not undefined module or
+   setup failures. Existing seed writer tests remain reached stub failures.
+   Verify canonical c3 targeted run; commit/push. Explicit Phase4b GO required.
+3. Implement C SeedScope.run/3, bind/3, fetch/1, fetch_run_id/1, valid?/3 and
+   check. Register actor-derived state; live resolver precedes privileged
+   reads; no new early locks. Opening/member transaction-local markers and
+   exact process registry equality. Member stored rows/events re-read through
+   kernel context. Add event correlation links only on seed actions.
+4. Reach activation Forbidden RED with complete valid scope on each of3
+   resources; record measured failures before adding the three policy allows.
+   Then append only narrow checks and keep all lifecycle/ordinary policies.
+5. Complete Seed.write/2: pure ContentRules/shared shape/hash checks first;
+   one Audit transaction owns all writes/rollback; binding lock + live recheck;
+   tenant-filtered authoritative event/revision history distinguishes create,
+   exact no-write/no-activation replay, differs, inactive replay failure.
+   Scoped provenance Payload, settings twice, four Sales creates, five member
+   binds; activate ICP->Sequence->Campaign through Ash actions as same actor.
+   Any returned error/refusal -> whole rollback; structured rollback closed
+   codes; raises propagate to existing task boundary (no error inspection).
+6. Focused regression/statics and docs/diagram review; clean small commits/push;
+   one independent milestone packet covering source + measured run results.
+   No real seed content/LLM/import runtime test or full gate repeat here.
+
+* Required observable tests (F1,F3,F4,F5)
+- Scope callback/cleanup on return/raise/throw; no scope outside transaction,
+  bad digest, nested registry, ordinary/forged/stale actor; resolver before reads.
+- Ordered binding of stored members + exact one same-run creation event;
+  old draft+new profile counterexample, wrong id/kind/tenant/digest/relationship,
+  missing/forged nonce, rollback marker, released/copied/tampered/cross-process
+  scope deny. Guide receives correlation but is not sixth scope member.
+- Each3 activates only complete corresponding member; old/foreign/unrelated,
+  absent/forged/released scope deny; admin/seeder unchanged; lifecycle rules
+  still reject empty sequence/inactive related rows. Prod allow is false.
+- Synthetic-only Seed.run existing success/content/bounds/hash tests reach
+  expected assertions; no real bytes copied into fixtures. All table writes
+  through public domain actions/Ash; no raw resource persistence bypass.
+- Injected late bind/action refusal or SQL abort causes whole writer rollback:
+  no settings/Payload/four Sales rows/business events survive, query remains
+  usable after owner rollback; do not mask errors or weaken assertions.
+- Exact replay returns same ids without new writes/events/activation; changed,
+  partial, extra or ambiguous history -> seed_differs; inactive -> seed_failed.
+- F1 no activation side effects: zero new Oban jobs, outreach, deliveries,
+  model requests. Preserve capture-only boundary and attempt accounting.
+- RED failure classification measured (wrong value/reached Forbidden only),
+  no excluded/skipped controls or absence-as-behavior claims.
+
+* Verification / risks / review gates
+Request finite c3/source window through2026-10-30T06:30:00Z, scoped files only,
+after6790ef3a runtime read window ends. Existing source remains frozen until then.
+Changed-file format, dev/test WAE, Credo; production compile for deny branch
+proof in isolated build roots; focused canonical c3 owned pair cleanup.
+Do not mutate lane/global build roots or lock files. Existing unrelated failures
+stay FAIL and disclosed. No green promotion from controls alone.
+Architecture: existing declared Seed crosses Sales/Agents/Audit; now concrete
+runtime flow, so evaluate/update task connections diagram, no new domain/resource.
+No schema/codegen migration expected; verify generator availability and artifacts.
+Risks: audit event shape, swallowed action errors, marker savepoint lifetime,
+concurrent history changes, actor expiry during bind, content-free terminal output.
+No source/DB/LLM authority until correlated approval of this plan. No self-review.
+
+* Independent plan review record
+Claude PLAN+FILE-OWNERSHIP PASS m_1793332254000000000_6ee3a90d at03:50:54Z,
+review05acae1213548caac6fccdcc025a1217aa455c835f97de55f18c7aa0739d6234.
+F6 diagram ownership fold accepted above; op seed remains Claude-owned.
+Source/c3 grant ends06:30Z and starts only after6790ef3a runtime release.
+As of04:11Z no M4 source edit or run; runtime r4 bytes ACK pending, source frozen.
+
+* Phase4a status (2026-10-30T04:44Z)
+Runtime source freeze released after read-only R5 target handoff. New branch
+codex/d268-seed-writer from6790ef3a pushed before source work. Added approved
+compile-safe deny-only SeedScope declaration and14 synthetic scope tests.
+Canonical c3-20261030T044403Z-98516:0/14 passed,14 intended assertion failures
+at reached run/3 deny value; no missing-module/setup/compiler errors. Inner
+callback/member assertions not reached yet and are NOT claimed independently
+proven. No policy references scope. Test WAE/format/Credo rc0; full gate not run.
+MANIFEST0f9700a278dbfbedcfe7546b24cbe6eba14baaae21ab8e397ea8a3481e1c2ddb;
+all evidence hashes verified; owned pair dropped, leases released.
+Awaiting explicit Phase4b GO; no implementation or positive policy authority.
+
+* Phase4b scope progress and next writer checkpoint (2026-10-30T05:03Z)
+Claude GO m_1793335588000000000_ab42b8d1 accepted14 reached wrong-value failures;
+window to06:30Z, sandbox only, allow/deny in same GREEN, no assertion weakening.
+Original14 tests now pass with callbacks/member assertions reached (run
+c3-20261030T044848Z-43366). Added4 direct validity tests while valid? stayed
+deny-only:3 reached false failures at045002Z-54798, then18/18 at045104Z-64714.
+Policy RED initially had3 Forbidden failures +2 harness errors: public guarded
+calls were inside Repo.transaction, not the required Audit.transaction. Corrected
+only the policy test helper's transaction owner; no assertions changed. Corrected
+run c3-20261030T045643Z-17397 reached4 Forbidden failures (3 kinds + no-side-effect
+allow). Added the3 narrow policy lines and gated check;26/26 at045732Z-25143.
+No scope test assertion was removed or weakened; post-RED additions are separate.
+Accepted ADR-0009 r2 text installed with status paragraph/decision9ed3eb64 reference;
+all other text preserved. Claude owns diagram publication, so edge text follows.
+Statics2 changed-file format, test/dev WAE, repo Credo rc0 (955 files). Earlier
+Credo complexity failure at created_here? retained; replaced chained comparisons
+with exact five-field map equality, preserving predicates. Config/locks unchanged.
+Focused writer RED still returns not_implemented:14 reached stub assertion failures,
+33 controls pass,0 skip/exclude, c3-20261030T050255Z-75515; no setup/compiler errors.
+All six listed canonical evidence manifests independently verified; owned pairs
+dropped, leases released. Scope26 GREEN, writer14 RED, not overall M4 delivery.
+No full gate, production compile, real seed/model/import call claimed at this point.
+
+* Composite diagram edge text (Claude-owned F6)
+Seed.run live caller -> pure content/pin precheck -> Audit.transaction -> live
+binding lock/history check -> SeedScope.run -> scoped provenance Payload ->
+settings twice -> Sales ICP/sequence/step/campaign creates+ordered binds ->
+exact registered-scope activation ICP then sequence then campaign -> ids/digests.
+Replay branches before scope/writes and never reactivates. Any failure rolls back
+the writer transaction. This is installed scope support, not proof of a real seed.
+
+* Writer Phase4b implementation (2026-10-30T05:18Z)
+Explicit writer GO72958b93 (duplicate90bb7bef), review
+5bf6d4f3df5e5b0b2fe0a7290b625d81ecf66386b5c8e3b9d1402c4048288890,
+accepted14 reached stub failures at03f822d9; same06:30Z sandbox-only window.
+Seed.write now owns pure content/pin precheck and one Audit transaction.
+Binding FOR UPDATE + live recheck serialize seed attempts. History derives
+ids from tenant-filtered seed creation events, including historical operator
+delegations; it requires two root revisions with exact provenance notes,
+six same-run creation events and correct Sales relationships. Partial/extra/
+different history refuses; inactive complete history fails without activation.
+Empty history stores scoped raw provenance, both settings, four Sales creates,
+five ordered member binds and exact scoped activation ICP->sequence->campaign.
+Output is Q1 ids/digest/revision count only; exceptions are not inspected here.
+
+First writer GREEN attempt c3-20261030T051510Z-88309:46/47. A genuine late
+sequence uniqueness conflict rolled Audit.transaction back directly with an
+Ash.Changeset, bypassing the per-action unwrap. Added closed_result at the
+owner boundary (no raw result/error output), kept all assertions. Then47/47
+at c3-20261030T051625Z-389, including every earlier-write survivor count and
+SELECT1 after rollback; exact replay counts include payloads/events/jobs/model/
+drafts/deliveries. No test seam or persistence bypass introduced.
+
+Added3 GREEN-only history controls, not retroactive RED claims: partial single
+revision; extra operator seed creation; real ordinary-admin ICP retirement then
+prototype replay. Each refuses with exact code and unchanged baseline counts.
+Broader approved synthetic seed regression c3-20261030T051749Z-14090:
+248/248,0 skipped/excluded, all11 explicit test files. Input manifest
+dd8a9166f754caf7550c8f13f3d7163026d50275eb3e17f362c2039aae26b3cc.
+Owned database pairs dropped and leases released. Full gate not repeated under
+the scoped grant; no real seed, import or model call, or actual target writes.
+Architecture evaluation: concrete cross-domain runtime flow changed; no new
+domain/resource/schema/dependency. F6 diagram files remain Claude-owned on the
+composite; edge text above applies to implemented coordinator, review pending.
+Final writer statics at codex-d268-m4-writer-final-20261030: changed-file
+format check, test/dev warnings-as-errors and repository Credo rc0; config/
+lock pins unchanged. Earlier two Credo nesting findings retained in first
+writer evidence; extracted transaction/scoped-settings helpers only, with
+no predicate or action change. Moduledocs reviewed; no new persistence or
+public domain policy widening in the writer. Independent milestone and
+production compile are the next handoff gates, not yet completion claims.

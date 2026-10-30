@@ -226,7 +226,8 @@ defmodule SdrAgent.Agents.SettingsRevision do
       change {AppendEvent,
               event_type: "settings.revision.created",
               category: :domain_change,
-              arguments: [:expected_number]}
+              arguments: [:expected_number],
+              context_links: [correlation_id: :sdr_seed_run_id]}
     end
   end
 
