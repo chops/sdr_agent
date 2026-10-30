@@ -48,6 +48,16 @@ defmodule SdrAgent.MacAgent.Config do
 
   def new(_), do: {:error, :invalid_config}
 
+  @doc "Recheck current executable bytes/version against this enrollment's frozen pins."
+  def verify(%__MODULE__{} = config) do
+    if PinnedExecutable.verify(config.executable) == :ok and
+         PinnedExecutable.version_bound?() and
+         PinnedExecutable.identity().sha256 == config.pins["executable_sha256"] and
+         PinnedExecutable.identity().version == config.pins["cli_version"],
+       do: :ok,
+       else: {:error, :invalid_pin}
+  end
+
   @doc "Resolve a string against the closed registry without creating atoms."
   def profile(id) do
     case Enum.find(ModelProfiles.real_ids(), &(Atom.to_string(&1) == id)) do

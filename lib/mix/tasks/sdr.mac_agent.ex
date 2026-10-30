@@ -12,7 +12,8 @@ defmodule Mix.Tasks.Sdr.MacAgent do
 
   The task starts HTTP/TLS only, not SDR, Repo, Oban or Endpoint. While idle
   it polls every five seconds. Authorization loss stops it. Unknown launch
-  outcomes are reported as status atoms; calls are never replayed.
+  outcomes are reported as status atoms; model calls are never relaunched.
+  Only delivery of the same in-memory result can retry, within its deadline.
   """
   use Mix.Task
 

@@ -10,7 +10,6 @@ defmodule SdrAgent.MacAgent.Launch do
   """
 
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
-  alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
   alias SdrAgent.ChildEnv
   alias SdrAgent.MacAgent.Config
   alias SdrAgent.MacAgent.Journal
@@ -99,8 +98,7 @@ defmodule SdrAgent.MacAgent.Launch do
     with {:ok, argv} <- argv(call),
          true <- call["profile_id"] == config.pins["profile_id"],
          true <- call["model_id"] == config.pins["model_id"],
-         :ok <- PinnedExecutable.verify(config.executable),
-         true <- PinnedExecutable.version_bound?(),
+         :ok <- Config.verify(config),
          {:ok, result} <-
            with_prompt(config.journal_dir, call, &spawn_child(config, call, argv, &1, options)) do
       result
@@ -146,7 +144,10 @@ defmodule SdrAgent.MacAgent.Launch do
 
       now >= next ->
         case heartbeat.() do
-          :ok ->
+          {:error, :unauthorized} = error ->
+            error
+
+          _transient_or_healthy ->
             collect(
               port,
               deadline,
@@ -154,9 +155,6 @@ defmodule SdrAgent.MacAgent.Launch do
               size,
               {heartbeat, interval, System.monotonic_time(:millisecond) + interval}
             )
-
-          {:error, _} = error ->
-            error
         end
 
       true ->

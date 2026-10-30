@@ -3,8 +3,9 @@ defmodule SdrAgent.MacAgent.Agent do
   One-call-at-a-time outbound Mac worker orchestration (ADR-0024 S-B7).
 
   Claims are journaled before launch; no restart or rejected completion can
-  replay a launching call. Failed/uncertain completions are not retried and
-  their content is never persisted locally. The server owns admission,
+  replay a launching call. Uncertain result delivery is retried with identical
+  IDs/content in memory only, bounded by the deadline; never a second model
+  launch. The server owns admission,
   budget, attestation, deadline expiry and settlement.
   """
 
@@ -15,7 +16,8 @@ defmodule SdrAgent.MacAgent.Agent do
 
   @doc "Perform a heartbeat, one claim and at most one local CLI launch."
   def run_once(%Config{} = config, options \\ []) do
-    with :ok <- Journal.prepare(config.journal_dir),
+    with :ok <- Config.verify(config),
+         :ok <- Journal.prepare(config.journal_dir),
          {:ok, client} <- Client.new(config, options),
          :ok <- Client.heartbeat(client),
          {:ok, nonce} <- Journal.next_nonce(config.journal_dir),
@@ -35,7 +37,7 @@ defmodule SdrAgent.MacAgent.Agent do
          :ok <- Journal.launch_once(config.journal_dir, call["call_id"], nonce),
          {:ok, transcript} <-
            Launch.run(config, call, heartbeat: fn -> Client.heartbeat(client, :inflight) end),
-         {:ok, status} <- Client.complete(client, call, nonce, transcript) do
+         {:ok, status} <- Client.deliver(client, call, nonce, transcript) do
       finish(config, call, nonce, status)
     else
       false -> retire_invalid(config, nonce)

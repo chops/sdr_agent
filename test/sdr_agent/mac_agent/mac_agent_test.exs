@@ -187,6 +187,38 @@ defmodule SdrAgent.MacAgentTest do
   end
 
   describe "closed CLI input and transient prompt" do
+    test "argv stays identical to the existing reviewed local ClaudeCLI flags" do
+      source = File.read!("lib/sdr_agent/ai/model_provider/claude_cli.ex")
+      ast = Code.string_to_quoted!(source)
+
+      {_, [body]} =
+        Macro.prewalk(ast, [], fn
+          {:defp, _, [{:shell_args, _, _}, [do: body]]} = node, acc -> {node, [body | acc]}
+          node, acc -> {node, acc}
+        end)
+
+      {_, [flags]} =
+        Macro.prewalk(body, [], fn
+          ["-p", "--output-format" | _] = node, acc -> {node, [node | acc]}
+          node, acc -> {node, acc}
+        end)
+
+      reviewed =
+        Enum.map(flags, fn
+          value when is_binary(value) ->
+            value
+
+          {:sigil_s, _, [{:<<>>, _, [literal]}, []]} when is_binary(literal) ->
+            literal
+
+          expr ->
+            assert Macro.to_string(expr) == "state.profile.cli_alias"
+            "opus"
+        end)
+
+      assert {:ok, ^reviewed} = invoke(Launch, :argv, [call()])
+    end
+
     test "argv is local allowlisted code, never a server-provided command" do
       assert {:ok, argv} = invoke(Launch, :argv, [call()])
       assert ["-p", "--output-format", "stream-json", "--verbose" | _] = argv
@@ -260,6 +292,119 @@ defmodule SdrAgent.MacAgentTest do
   end
 
   describe "HTTPS worker transport" do
+    test "completion retry retains the same nonce and transcript without relaunch", ctx do
+      client = client(ctx)
+      attempts = :counters.new(1, [])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        case conn.request_path do
+          "/worker/heartbeat" ->
+            Req.Test.json(conn, %{"intake" => "open"})
+
+          "/worker/complete" ->
+            :counters.add(attempts, 1, 1)
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(self(), {:completion_body, body})
+
+            if :counters.get(attempts, 1) == 1,
+              do: Plug.Conn.send_resp(conn, 503, "uncertain completion"),
+              else: Req.Test.json(conn, %{"status" => "duplicate_same"})
+
+          _ ->
+            flunk("result delivery must never claim work")
+        end
+      end)
+
+      assert {:ok, :duplicate_same} =
+               invoke(Client, :deliver, [
+                 client,
+                 call(),
+                 @nonce,
+                 "synthetic transcript",
+                 [retry_delay: 1]
+               ])
+
+      assert_received {:completion_body, first}
+      assert_received {:completion_body, ^first}
+      assert :counters.get(attempts, 1) == 2
+    end
+
+    test "a lost completion response retries delivery without retrying the model", ctx do
+      client = client(ctx)
+      attempts = :counters.new(1, [])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        case conn.request_path do
+          "/worker/heartbeat" ->
+            Req.Test.json(conn, %{"intake" => "open"})
+
+          "/worker/complete" ->
+            :counters.add(attempts, 1, 1)
+
+            if :counters.get(attempts, 1) == 1,
+              do: Req.Test.transport_error(conn, :timeout),
+              else: Req.Test.json(conn, %{"status" => "duplicate_same"})
+
+          _ ->
+            flunk("result delivery must not claim work")
+        end
+      end)
+
+      assert {:ok, :duplicate_same} =
+               invoke(Client, :deliver, [client, call(), @nonce, "synthetic", [retry_delay: 1]])
+
+      assert :counters.get(attempts, 1) == 2
+    end
+
+    test "completion retry stops on every terminal response", ctx do
+      client = client(ctx)
+
+      for {response, expected} <- [
+            {"accepted", {:ok, :accepted}},
+            {"duplicate_same", {:ok, :duplicate_same}},
+            {"late", {:ok, :late}},
+            {"conflict", {:ok, :conflict}},
+            {403, {:error, :unauthorized}},
+            {413, {:error, :payload_too_large}}
+          ] do
+        attempts = :counters.new(1, [])
+
+        Req.Test.stub(__MODULE__, fn conn ->
+          assert conn.request_path == "/worker/complete"
+          :counters.add(attempts, 1, 1)
+
+          if is_integer(response),
+            do: Plug.Conn.send_resp(conn, response, "refused"),
+            else: Req.Test.json(conn, %{"status" => response})
+        end)
+
+        assert invoke(Client, :deliver, [client, call(), @nonce, "synthetic", [retry_delay: 1]]) ==
+                 expected
+
+        assert :counters.get(attempts, 1) == 1
+      end
+    end
+
+    test "completion retry is bounded by the result deadline", ctx do
+      client = client(ctx)
+
+      input =
+        Map.put(
+          call(),
+          "result_deadline",
+          DateTime.utc_now() |> DateTime.add(100, :millisecond) |> DateTime.to_iso8601()
+        )
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        if conn.request_path == "/worker/heartbeat",
+          do: Req.Test.json(conn, %{"intake" => "open"}),
+          else: Plug.Conn.send_resp(conn, 503, "unavailable")
+      end)
+
+      assert {:error, :result_delivery_expired} =
+               invoke(Client, :deliver, [client, input, @nonce, "synthetic", [retry_delay: 10]])
+    end
+
     test "claim uses bearer auth, fresh nonce and local pins", ctx do
       client = client(ctx)
 
@@ -344,6 +489,36 @@ defmodule SdrAgent.MacAgentTest do
   end
 
   describe "one outbound worker iteration" do
+    test "a changed local pin refuses work before even a heartbeat or claim", ctx do
+      assert {:ok, config} = invoke(Config, :new, [ctx.settings])
+      File.write!(ctx.executable, "#!/bin/sh\nexit 92\n")
+      Req.Test.stub(__MODULE__, fn _ -> flunk("pin drift must not contact the server") end)
+
+      assert {:error, :invalid_pin} =
+               invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+
+      refute File.exists?(Path.join(config.journal_dir, @call_id <> ".launching"))
+    end
+
+    test "transient in-flight heartbeat failures do not discard the charged result", ctx do
+      File.write!(
+        ctx.executable,
+        "#!/bin/sh\n/bin/cat >/dev/null\n/bin/sleep 0.05\nprintf 'synthetic transcript'\n"
+      )
+
+      PinnedCLI.inject_identity!(ctx.executable, store: Path.join(ctx.root, "fixture-store"))
+      assert {:ok, config} = invoke(Config, :new, [ctx.settings])
+
+      for reason <- [:transport_failed, :remote_refused] do
+        assert {:ok, "synthetic transcript"} =
+                 invoke(Launch, :run, [
+                   config,
+                   call(),
+                   [heartbeat: fn -> {:error, reason} end, heartbeat_interval: 5]
+                 ])
+      end
+    end
+
     test "an uncertain claim is retrieved only with the same requested nonce", ctx do
       assert {:ok, config} = invoke(Config, :new, [ctx.settings])
 

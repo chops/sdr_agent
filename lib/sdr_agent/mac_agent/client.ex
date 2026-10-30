@@ -6,6 +6,8 @@ defmodule SdrAgent.MacAgent.Client do
   disabled. Errors are closed atoms, never request/response structures that
   could expose a token, prompt or transcript. Only the server computes the
   result digest. Test plugs replace transport, not domain authorization.
+  `deliver/5` alone retries an identical completion at application level,
+  without opening a new claim or model process.
   """
 
   alias SdrAgent.MacAgent.Config
@@ -37,6 +39,7 @@ defmodule SdrAgent.MacAgent.Client do
     case post(client, "/worker/claim", %{"claim_nonce" => nonce, "pins" => client.config.pins}) do
       {:ok, %{"call" => call}} when is_map(call) or is_nil(call) -> {:ok, call}
       {:ok, _} -> {:error, :invalid_response}
+      {:error, :remote_unavailable} -> {:error, :remote_refused}
       error -> error
     end
   end
@@ -44,6 +47,68 @@ defmodule SdrAgent.MacAgent.Client do
   @doc "Submit a bounded transcript once. Late/conflicting replies are terminal."
   def complete(client, call, nonce, transcript)
       when is_binary(transcript) and byte_size(transcript) <= 2_097_152 do
+    complete_request(client, call, nonce, transcript, 15_000)
+  end
+
+  def complete(_, _, _, _), do: {:error, :transcript_too_large}
+
+  @doc """
+  Retry only uncertain result delivery, with the same nonce and in-memory
+  transcript. Backoff is capped at 15 s and the wait at the call deadline
+  (at most 600 s). Terminal replies never retry; no claim or child is opened.
+  """
+  def deliver(client, call, nonce, transcript, options \\ [])
+      when is_binary(transcript) and byte_size(transcript) <= 2_097_152 do
+    with {:ok, deadline, _} <- DateTime.from_iso8601(call["result_deadline"]),
+         delay = Keyword.get(options, :retry_delay, 1_000),
+         true <- is_integer(delay) and delay in 1..15_000 do
+      wait = min(max(DateTime.diff(deadline, DateTime.utc_now(), :millisecond), 0), 600_000)
+      until = System.monotonic_time(:millisecond) + wait
+      deliver_loop(client, call, nonce, transcript, until, delay)
+    else
+      _ -> {:error, :invalid_call}
+    end
+  end
+
+  defp deliver_loop(client, call, nonce, transcript, until, delay) do
+    case remaining(until) do
+      0 ->
+        {:error, :result_delivery_expired}
+
+      timeout ->
+        case complete_request(client, call, nonce, transcript, timeout) do
+          {:error, reason}
+          when reason in [:transport_failed, :remote_unavailable, :invalid_response] ->
+            retry_delivery(client, call, nonce, transcript, until, delay)
+
+          result ->
+            result
+        end
+    end
+  end
+
+  defp retry_delivery(client, call, nonce, transcript, until, delay) do
+    Process.sleep(min(delay, remaining(until)))
+
+    case remaining(until) do
+      0 ->
+        {:error, :result_delivery_expired}
+
+      timeout ->
+        resume_delivery(client, call, nonce, transcript, until, min(delay * 2, 15_000), timeout)
+    end
+  end
+
+  defp resume_delivery(client, call, nonce, transcript, until, delay, timeout) do
+    case post(client, "/worker/heartbeat", %{"pins" => client.config.pins}, timeout) do
+      {:error, :unauthorized} = error -> error
+      _ -> deliver_loop(client, call, nonce, transcript, until, delay)
+    end
+  end
+
+  defp remaining(until), do: min(max(until - System.monotonic_time(:millisecond), 0), 15_000)
+
+  defp complete_request(client, call, nonce, transcript, timeout) do
     payload = %{
       "call_id" => call["call_id"],
       "claim_nonce" => nonce,
@@ -51,7 +116,7 @@ defmodule SdrAgent.MacAgent.Client do
       "transcript" => transcript
     }
 
-    case post(client, "/worker/complete", payload) do
+    case post(client, "/worker/complete", payload, timeout) do
       {:ok, %{"status" => "accepted"}} -> {:ok, :accepted}
       {:ok, %{"status" => "duplicate_same"}} -> {:ok, :duplicate_same}
       {:ok, %{"status" => "late"}} -> {:ok, :late}
@@ -61,9 +126,7 @@ defmodule SdrAgent.MacAgent.Client do
     end
   end
 
-  def complete(_, _, _, _), do: {:error, :transcript_too_large}
-
-  defp post(client, path, body) do
+  defp post(client, path, body, timeout \\ 15_000) do
     options = [
       method: :post,
       url: client.config.base_url <> path,
@@ -73,14 +136,15 @@ defmodule SdrAgent.MacAgent.Client do
       retry_log_level: false,
       redirect: false,
       decode_body: false,
-      receive_timeout: 15_000,
-      connect_options: [timeout: 10_000],
+      receive_timeout: timeout,
+      connect_options: [timeout: min(timeout, 10_000)],
       into: &bounded_body/2
     ]
 
     case Req.request(options ++ client.options) do
       {:ok, %{status: status}} when status in [401, 403] -> {:error, :unauthorized}
       {:ok, %{status: 413}} -> {:error, :payload_too_large}
+      {:ok, %{status: status}} when status in 500..599 -> {:error, :remote_unavailable}
       {:ok, %{status: 200, body: bytes}} when is_binary(bytes) -> decode(bytes)
       {:ok, _} -> {:error, :remote_refused}
       {:error, _} -> {:error, :transport_failed}
