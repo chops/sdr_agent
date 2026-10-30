@@ -1,30 +1,32 @@
-# Containment pure GREEN (proposal r1). The pure functions are implemented;
-# every engine callback stays deny-only: none delegates to
-# Oban.Engines.Basic in this stage (delegating would execute production
-# behaviour that no pure test covers). Compiled only with the prototype
-# authority.
+# Compiled only with the prototype authority. The pinned Basic engine owns
+# job lifecycle operations; the three error-bearing callbacks close only
+# the new unsaved error before delegating.
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.ClosedErrorEngine do
     @moduledoc """
     E2 (containment packet r4 section 5): the prototype-runtime Oban engine.
 
-    Pure (this stage):
+    Pure helpers:
       * `closed_unsaved/1` maps `nil` to `nil` and any other value to
         `%{kind: :error, reason: %SdrAgent.Prototype.JobFailedError{}, stacktrace: []}`;
       * `delegation/0` is the reviewed table `[{callback, arity, mode}]`
         with mode `:close_then_delegate` for `discard_job/2`, `error_job/3`
         and `cancel_job/2`, and `:delegate` for the other twenty.
 
-    Held (a later, separately granted IT-2 GREEN): every callback of
+    Every callback of
     `Oban.Engines.Basic` (oban 2.24.0, basic.ex:29-377) delegates with
     identical arguments and returns Basic's result, and the three
     `:close_then_delegate` callbacks first replace the job's
     `unsaved_error` with `closed_unsaved/1` of it.
 
-    Stage: pure GREEN. Every callback returns `{:error, :not_implemented}`.
+    Historical error arrays are unchanged. This wrapper does not close raw
+    exception telemetry, start queues or change the ordinary runtime engine.
+    Basic does not export the optional insert_job/5 or insert_all_jobs/5;
+    Oban.Engine retains its existing fallback for those arities.
     """
     @behaviour Oban.Engine
 
+    alias Oban.Engines.Basic
     alias SdrAgent.Prototype.JobFailedError
 
     @delegation [
@@ -63,76 +65,78 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def delegation, do: @delegation
 
     @impl Oban.Engine
-    def init(_conf, _opts), do: red({:error, :not_implemented})
+    def init(conf, opts), do: Basic.init(conf, opts)
 
     @impl Oban.Engine
-    def put_meta(_conf, _meta, _key, _value), do: red({:error, :not_implemented})
+    def put_meta(conf, meta, key, value), do: Basic.put_meta(conf, meta, key, value)
 
     @impl Oban.Engine
-    def check_meta(_conf, _meta, _running), do: red({:error, :not_implemented})
+    def check_meta(conf, meta, running), do: Basic.check_meta(conf, meta, running)
 
     @impl Oban.Engine
-    def refresh(_conf, _meta), do: red({:error, :not_implemented})
+    def refresh(conf, meta), do: Basic.refresh(conf, meta)
 
     @impl Oban.Engine
-    def shutdown(_conf, _meta), do: red({:error, :not_implemented})
+    def shutdown(conf, meta), do: Basic.shutdown(conf, meta)
 
     @impl Oban.Engine
-    def insert_job(_conf, _changeset, _opts), do: red({:error, :not_implemented})
+    def insert_job(conf, changeset, opts), do: Basic.insert_job(conf, changeset, opts)
 
     @impl Oban.Engine
-    def insert_all_jobs(_conf, _changesets, _opts), do: red({:error, :not_implemented})
+    def insert_all_jobs(conf, changesets, opts), do: Basic.insert_all_jobs(conf, changesets, opts)
 
     @impl Oban.Engine
-    def fetch_jobs(_conf, _meta, _running), do: red({:error, :not_implemented})
+    def fetch_jobs(conf, meta, running), do: Basic.fetch_jobs(conf, meta, running)
 
     @impl Oban.Engine
-    def stage_jobs(_conf, _queryable, _opts), do: red({:error, :not_implemented})
+    def stage_jobs(conf, queryable, opts), do: Basic.stage_jobs(conf, queryable, opts)
 
     @impl Oban.Engine
-    def prune_jobs(_conf, _queryable, _opts), do: red({:error, :not_implemented})
+    def prune_jobs(conf, queryable, opts), do: Basic.prune_jobs(conf, queryable, opts)
 
     @impl Oban.Engine
-    def rescue_jobs(_conf, _queryable, _opts), do: red({:error, :not_implemented})
+    def rescue_jobs(conf, queryable, opts), do: Basic.rescue_jobs(conf, queryable, opts)
 
     @impl Oban.Engine
-    def check_available(_conf), do: red({:error, :not_implemented})
+    def check_available(conf), do: Basic.check_available(conf)
 
     @impl Oban.Engine
-    def complete_job(_conf, _job), do: red({:error, :not_implemented})
+    def complete_job(conf, job), do: Basic.complete_job(conf, job)
 
     @impl Oban.Engine
-    def discard_job(_conf, _job), do: red({:error, :not_implemented})
+    def discard_job(conf, %Oban.Job{} = job) do
+      Basic.discard_job(conf, %{job | unsaved_error: closed_unsaved(job.unsaved_error)})
+    end
 
     @impl Oban.Engine
-    def error_job(_conf, _job, _seconds), do: red({:error, :not_implemented})
+    def error_job(conf, %Oban.Job{} = job, seconds) do
+      Basic.error_job(conf, %{job | unsaved_error: closed_unsaved(job.unsaved_error)}, seconds)
+    end
 
     @impl Oban.Engine
-    def snooze_job(_conf, _job, _seconds), do: red({:error, :not_implemented})
+    def snooze_job(conf, job, seconds), do: Basic.snooze_job(conf, job, seconds)
 
     @impl Oban.Engine
-    def cancel_job(_conf, _job), do: red({:error, :not_implemented})
+    def cancel_job(conf, %Oban.Job{} = job) do
+      Basic.cancel_job(conf, %{job | unsaved_error: closed_unsaved(job.unsaved_error)})
+    end
 
     @impl Oban.Engine
-    def cancel_all_jobs(_conf, _queryable), do: red({:error, :not_implemented})
+    def cancel_all_jobs(conf, queryable), do: Basic.cancel_all_jobs(conf, queryable)
 
     @impl Oban.Engine
-    def delete_job(_conf, _job), do: red({:error, :not_implemented})
+    def delete_job(conf, job), do: Basic.delete_job(conf, job)
 
     @impl Oban.Engine
-    def delete_all_jobs(_conf, _queryable), do: red({:error, :not_implemented})
+    def delete_all_jobs(conf, queryable), do: Basic.delete_all_jobs(conf, queryable)
 
     @impl Oban.Engine
-    def retry_job(_conf, _job), do: red({:error, :not_implemented})
+    def retry_job(conf, job), do: Basic.retry_job(conf, job)
 
     @impl Oban.Engine
-    def retry_all_jobs(_conf, _queryable), do: red({:error, :not_implemented})
+    def retry_all_jobs(conf, queryable), do: Basic.retry_all_jobs(conf, queryable)
 
     @impl Oban.Engine
-    def update_job(_conf, _job, _changes), do: red({:error, :not_implemented})
-
-    # Deny-only callback result (held for IT-2), typed dynamic() so callers
-    # compile against it.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
+    def update_job(conf, job, changes), do: Basic.update_job(conf, job, changes)
   end
 end
