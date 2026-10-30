@@ -120,6 +120,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def execute(_parsed, _actor), do: {:error, :not_implemented}
 
+    @doc """
+    Maps one `seed` stage result to `{:say, code, refs}` or
+    `{:abort, {stage, value}}`. RED declaration: every value aborts.
+    """
+    @spec seed_outcome(atom(), term()) :: {:say, atom(), keyword()} | {:abort, term()}
+    def seed_outcome(stage, _value), do: {:abort, {stage, :unexpected}}
+
     @impl Mix.Task
     def run(argv) do
       attached = SafeLog.attach(file: nil)

@@ -50,7 +50,9 @@ defmodule SdrAgent.Prototype.OpAssignTest do
     assert Keyword.fetch!(config, :stage_interval) == :infinity
   end
 
-  test "source: the body enters Session enqueuing, and no owner is ever supplied" do
+  # Op seed retry (Codex ACK 0c257de5): exactly two literal Session.enter
+  # calls, assign enqueuing and seed not; neither ever supplies an owner.
+  test "source: assign enters Session enqueuing, seed without, and no owner is ever supplied" do
     {:ok, ast} = @source |> File.read!() |> Code.string_to_quoted()
 
     code =
@@ -68,8 +70,8 @@ defmodule SdrAgent.Prototype.OpAssignTest do
           {node, acc}
       end)
 
-    assert [opts] = enters, "#{@source}: expected exactly one Session.enter call"
-    assert Keyword.get(opts, :enqueue?) == true
+    assert [_, _] = enters, "#{@source}: expected exactly two Session.enter calls"
+    assert enters |> Enum.map(&Keyword.fetch!(&1, :enqueue?)) |> Enum.sort() == [false, true]
     refute Macro.to_string(code) =~ "owner_user_id"
   end
 end

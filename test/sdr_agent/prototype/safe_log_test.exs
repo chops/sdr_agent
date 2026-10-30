@@ -234,6 +234,45 @@ defmodule SdrAgent.Prototype.SafeLogTest do
       end
     end
 
+    # D-268 op seed retry (delta 8b34f015, Codex entity PASS 3cfaad3d): one
+    # closed refusal line; seed_result is unchanged.
+    test "say/2 prints seed_refused for each closed refusal reason" do
+      reasons = [
+        :seed_invalid,
+        :seed_differs,
+        :seed_failed,
+        :binding_mismatch,
+        :not_prototype_runtime,
+        :forbidden,
+        :invalid_arguments,
+        :session_unset,
+        :invalid_agent,
+        :invalid_correlation,
+        :delegation_not_found,
+        :boot_refused
+      ]
+
+      for reason <- reasons do
+        out = capture_io(fn -> assert SafeLog.say(:seed_refused, reason: reason) == :ok end)
+        assert out == "prototype: seed_refused reason=#{reason}\n", "#{reason}: #{out}"
+      end
+    end
+
+    test "seed_refused rejects :none, nil, an unknown reason, a count and extra keys" do
+      cases = [
+        none: [reason: :none],
+        nil_reason: [reason: nil],
+        unknown: [reason: :not_implemented],
+        revisions: [revisions: 2, reason: :seed_failed],
+        extra: [reason: :seed_failed, note: @marker]
+      ]
+
+      for {name, refs} <- cases do
+        out = capture_io(fn -> SafeLog.say(:seed_refused, refs) end)
+        assert out == @withheld <> "\n", "#{name}: #{out}"
+      end
+    end
+
     test "provisioned keeps its UUID requirement: a nil grant id is withheld" do
       out =
         capture_io(fn ->
