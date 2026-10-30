@@ -8,6 +8,7 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.DossierFixtures, as: F
+  alias SdrAgent.PrototypeFixtures
   alias SdrAgent.Sales
 
   @seed SdrAgent.Prototype.Seed
@@ -15,7 +16,7 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
 
   setup do
     fixture = bound!()
-    %{actor: fixture.actor, tenant: fixture.tenant}
+    %{actor: fixture.actor, tenant: fixture.tenant, fixture: fixture}
   end
 
   defp counts do
@@ -41,6 +42,61 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
     before = counts()
     assert {:ok, %{result: :replay} = second} = call(@seed, :run, [F.seed_read(), ctx.actor])
     assert Map.drop(first, [:result]) == Map.drop(second, [:result])
+    assert counts() == before
+  end
+
+  test "partial settings history is refused without completing or adopting it", ctx do
+    provenance = F.stored_provenance!(ctx.actor)
+
+    assert {:ok, _revision} =
+             SdrAgent.Agents.SettingsRevision
+             |> Ash.Changeset.for_create(
+               :seed_prototype,
+               %{
+                 kind: :writing_guide,
+                 content: F.seed_read().writing_guide,
+                 note: provenance.note
+               },
+               actor: ctx.actor
+             )
+             |> Ash.create()
+
+    before = counts()
+    assert call(@seed, :run, [F.seed_read(), ctx.actor]) == {:error, :seed_differs}
+    assert counts() == before
+  end
+
+  test "an extra historical seed creation event makes replay ambiguous", ctx do
+    seed = F.seed_read()
+    assert {:ok, %{result: :created}} = call(@seed, :run, [seed, ctx.actor])
+
+    assert {:ok, _extra} =
+             SdrAgent.Sales.IcpDefinition
+             |> Ash.Changeset.for_create(
+               :seed_prototype,
+               %{
+                 name: "Extra synthetic seed",
+                 criteria: %{industries: ["software"]},
+                 seed_provenance_sha256: seed.sha256.provenance
+               },
+               actor: ctx.actor
+             )
+             |> Ash.create()
+
+    before = counts()
+    assert call(@seed, :run, [seed, ctx.actor]) == {:error, :seed_differs}
+    assert counts() == before
+  end
+
+  test "a complete but inactive seed is not reactivated by replay", ctx do
+    assert {:ok, %{icp_id: id}} = call(@seed, :run, [F.seed_read(), ctx.actor])
+    :ok = PrototypeFixtures.leave_runtime()
+    admin = human(:admin, ctx.tenant)
+    assert {:ok, icp} = Sales.fetch(SdrAgent.Sales.IcpDefinition, id, actor: admin)
+    assert {:ok, %{status: :retired}} = Sales.update(icp, :retire, %{}, actor: admin)
+    :ok = PrototypeFixtures.enter_runtime(ctx.fixture.snapshot)
+    before = counts()
+    assert call(@seed, :run, [F.seed_read(), ctx.actor]) == {:error, :seed_failed}
     assert counts() == before
   end
 end

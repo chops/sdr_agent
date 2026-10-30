@@ -177,3 +177,44 @@ settings twice -> Sales ICP/sequence/step/campaign creates+ordered binds ->
 exact registered-scope activation ICP then sequence then campaign -> ids/digests.
 Replay branches before scope/writes and never reactivates. Any failure rolls back
 the writer transaction. This is installed scope support, not proof of a real seed.
+
+* Writer Phase4b implementation (2026-10-30T05:18Z)
+Explicit writer GO72958b93 (duplicate90bb7bef), review
+5bf6d4f3df5e5b0b2fe0a7290b625d81ecf66386b5c8e3b9d1402c4048288890,
+accepted14 reached stub failures at03f822d9; same06:30Z sandbox-only window.
+Seed.write now owns pure content/pin precheck and one Audit transaction.
+Binding FOR UPDATE + live recheck serialize seed attempts. History derives
+ids from tenant-filtered seed creation events, including historical operator
+delegations; it requires two root revisions with exact provenance notes,
+six same-run creation events and correct Sales relationships. Partial/extra/
+different history refuses; inactive complete history fails without activation.
+Empty history stores scoped raw provenance, both settings, four Sales creates,
+five ordered member binds and exact scoped activation ICP->sequence->campaign.
+Output is Q1 ids/digest/revision count only; exceptions are not inspected here.
+
+First writer GREEN attempt c3-20261030T051510Z-88309:46/47. A genuine late
+sequence uniqueness conflict rolled Audit.transaction back directly with an
+Ash.Changeset, bypassing the per-action unwrap. Added closed_result at the
+owner boundary (no raw result/error output), kept all assertions. Then47/47
+at c3-20261030T051625Z-389, including every earlier-write survivor count and
+SELECT1 after rollback; exact replay counts include payloads/events/jobs/model/
+drafts/deliveries. No test seam or persistence bypass introduced.
+
+Added3 GREEN-only history controls, not retroactive RED claims: partial single
+revision; extra operator seed creation; real ordinary-admin ICP retirement then
+prototype replay. Each refuses with exact code and unchanged baseline counts.
+Broader approved synthetic seed regression c3-20261030T051749Z-14090:
+248/248,0 skipped/excluded, all11 explicit test files. Input manifest
+dd8a9166f754caf7550c8f13f3d7163026d50275eb3e17f362c2039aae26b3cc.
+Owned database pairs dropped and leases released. Full gate not repeated under
+the scoped grant; no real seed, import or model call, or actual target writes.
+Architecture evaluation: concrete cross-domain runtime flow changed; no new
+domain/resource/schema/dependency. F6 diagram files remain Claude-owned on the
+composite; edge text above applies to implemented coordinator, review pending.
+Final writer statics at codex-d268-m4-writer-final-20261030: changed-file
+format check, test/dev warnings-as-errors and repository Credo rc0; config/
+lock pins unchanged. Earlier two Credo nesting findings retained in first
+writer evidence; extracted transaction/scoped-settings helpers only, with
+no predicate or action change. Moduledocs reviewed; no new persistence or
+public domain policy widening in the writer. Independent milestone and
+production compile are the next handoff gates, not yet completion claims.
