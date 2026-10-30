@@ -22,6 +22,7 @@ defmodule SdrAgent.SDR.Action do
   alias SdrAgent.Agents
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.SDR.Context
+  alias SdrAgent.SDR.SeamCallers
   alias SdrAgent.Telemetry.Agent, as: Spans
 
   @callback perform(params :: map(), ctx :: Context.t()) ::
@@ -51,6 +52,9 @@ defmodule SdrAgent.SDR.Action do
   # every nested entry inherit.
   @doc false
   def execute(module, params, context) do
+    # Test-seam builds: the runner ancestry Jido's timeout worker drops.
+    :ok = SeamCallers.adopt(context)
+
     OperationSnapshot.enter(:sdr_action, fn ->
       ctx = %{Context.fetch!(context) | agent_state: Map.get(context, :agent_state)}
       Spans.with_context(ctx.otel, fn -> traced(module, params, ctx) end)
