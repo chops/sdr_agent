@@ -20,6 +20,7 @@ defmodule SdrAgent.SDR.Runner do
   alias SdrAgent.Agents
   alias SdrAgent.SDR.Context
   alias SdrAgent.SDR.SDRAgent
+  alias SdrAgent.SDR.SeamCallers
   alias SdrAgent.SDR.Signals
   alias SdrAgent.Telemetry.Agent, as: Spans
 
@@ -84,7 +85,8 @@ defmodule SdrAgent.SDR.Runner do
   end
 
   defp evaluate(agent, signal, ctx) do
-    opts = [context: %{sdr: ctx}, max_concurrency: 1, timeout: @turn_timeout]
+    context = Map.put(SeamCallers.context(), :sdr, ctx)
+    opts = [context: context, max_concurrency: 1, timeout: @turn_timeout]
 
     with {:ok, agent, directives} <- Jido.Agent.cmd(agent, signal, opts),
          {:ok, run} <- Agents.get_run(ctx.run_id, actor: ctx.actor),
