@@ -34,8 +34,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     require Ash.Query
 
+    alias SdrAgent.Agents
     alias SdrAgent.Agents.RunSettings.ContentRules
-    alias SdrAgent.Agents.SettingsRevision
     alias SdrAgent.Audit
     alias SdrAgent.Audit.AuditEvent
     alias SdrAgent.Audit.Checks.PrototypeInputScope
@@ -213,10 +213,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp history(seed, actor) do
       revisions =
-        SettingsRevision
-        |> query(actor)
-        |> Ash.Query.filter(kind in ^@settings)
-        |> read!()
+        Agents.prototype_seed_settings_history(seed.sha256.provenance, actor)
+        |> seed_settings_result!()
 
       events =
         AuditEvent
@@ -227,7 +225,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         )
         |> read!()
 
-      if revisions == [] and events == [] do
+      if revisions.empty? and events == [] do
         :empty
       else
         replay(seed, actor, revisions, events)
@@ -235,7 +233,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp replay(seed, actor, revisions, events) do
-      unless matching_revisions?(revisions, seed.sha256.provenance) and
+      unless revisions.matches? and
                matching_events?(revisions, events, seed.sha256.provenance),
              do: Repo.rollback(:seed_differs)
 
@@ -264,12 +262,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {:replay, rows}
     end
 
-    defp matching_revisions?(revisions, digest) do
-      length(revisions) == 2 and
-        Enum.sort(Enum.map(revisions, & &1.kind)) == Enum.sort(@settings) and
-        Enum.all?(revisions, &(&1.number == 1 and &1.note == @note <> digest))
-    end
-
     defp matching_events?(revisions, events, digest) do
       sales_match? =
         Enum.all?(@sales, fn {resource, type} ->
@@ -283,12 +275,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           end
         end)
 
-      revision_ids = Enum.sort(Enum.map(revisions, & &1.id))
       settings_events = Enum.filter(events, &(&1.event_type == "settings.revision.created"))
 
       settings_match? =
-        Enum.all?(settings_events, &(&1.subject_resource == inspect(SettingsRevision))) and
-          Enum.sort(Enum.map(settings_events, & &1.subject_id)) == revision_ids
+        Enum.all?(settings_events, &(&1.subject_resource == revisions.subject_resource)) and
+          Enum.sort(Enum.map(settings_events, & &1.subject_id)) == revisions.ids
 
       length(events) == 6 and sales_match? and settings_match? and
         length(Enum.uniq(Enum.map(events, & &1.correlation_id))) == 1 and
@@ -327,16 +318,19 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp create_settings!(seed, actor, context, ref) do
       for kind <- @settings do
         revision =
-          create!(
-            SettingsRevision,
+          Agents.seed_prototype_settings_revision(
             %{kind: kind, content: seed[kind], note: @note <> seed.sha256.provenance},
             actor,
             context
           )
+          |> seed_settings_result!()
 
         if kind == :offering_profile, do: bind!(ref, kind, revision)
       end
     end
+
+    defp seed_settings_result!({:ok, value}), do: value
+    defp seed_settings_result!({:error, code}), do: Repo.rollback(code)
 
     defp store_provenance!(seed, actor) do
       scope =

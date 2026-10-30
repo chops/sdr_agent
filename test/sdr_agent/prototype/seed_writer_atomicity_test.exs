@@ -113,7 +113,7 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
              empty?: true,
              matches?: false,
              ids: [],
-             subject_resource: "Elixir.SdrAgent.Agents.SettingsRevision"
+             subject_resource: "SdrAgent.Agents.SettingsRevision"
            }
 
     assert {:ok, %{result: :created}} = call(@seed, :run, [seed, ctx.actor])
@@ -127,6 +127,21 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
     assert facts.matches? and not facts.empty?
     assert length(facts.ids) == 2 and facts.ids == Enum.sort(facts.ids)
     assert facts.subject_resource == empty.subject_resource
+
+    assert {:ok, {:ok, mismatch}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, [
+                 String.duplicate("a", 64),
+                 ctx.actor
+               ])
+             end)
+
+    assert mismatch == %{facts | empty?: false, matches?: false}
+
+    assert {:ok, {:error, :seed_invalid}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, ["bad", ctx.actor])
+             end)
   end
 
   test "the domain APIs refuse missing transactions before any action", ctx do
@@ -164,7 +179,7 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
   end
 
   test "the domain write accepts no context except one canonical run UUID", ctx do
-    uuid = Ecto.UUID.generate()
+    uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     before = counts()
 
     for context <- [

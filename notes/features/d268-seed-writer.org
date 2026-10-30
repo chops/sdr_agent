@@ -264,3 +264,44 @@ No compilation/setup error; inner new API assertions not reached at RED.
 Input manifest461677845d50cfa9f8196d4e821bf6ec62ee040fe11ff87387cac42e6d000012;
 complete evidence manifest verified, owned DB pair dropped, leases released.
 Phase4b GO pending. No API source implementation yet.
+
+* N3 implementation/results (2026-10-30T06:04Z)
+Explicit Phase4b GO81f975c3, review16c3aa4d5bc8066047cda7ca2202b0437d01ce0617a8443df4a629aa47a44616.
+Added two narrow Agents functions under compile-gated implementation, with
+reference-free production refusal branches. Existing matching_revisions?
+predicates moved unchanged into domain-owned metadata facts; Seed has no
+SettingsRevision reference or current_settings import. Domain write context
+accepts only one canonical run UUID, same actor and existing action policies.
+API errors immediately roll back the Seed owner; no recovery query added.
+No new module/resource/policy/persistence/dependency or Sales layering edge.
+
+First GREEN c3-20261030T060029Z-27022:33/34; boundary448 passed unchanged.
+The remaining failure was a newly authored expected resource string prefixed
+Elixir.; r2 explicitly requires inspect(SettingsRevision), whose actual result
+is SdrAgent.Agents.SettingsRevision without that prefix (same authoritative
+event string as before). Corrected that one new assertion to the explicit
+contract, without changing source or relaxing a guard. All other assertions kept.
+Added A1 bad-digest and A2 nonempty-mismatching-digest controls per GO advisory;
+both reached in GREEN. Canonical UUID context fixture made deterministic.
+
+Cross-file GREEN c3-20261030T060110Z-33666:374/374,0 skipped/excluded,
+18 explicit files including snapshot boundary, ordinary settings privacy/
+revisions/races/UI, all seed scope/action/fault/rollback/replay, provisioning
+and entry refusals. Input manifest
+708b96d798d1f8db895ef5264ca02e7b052a1b5ce5fabf9de43c03436518ae92.
+Isolated Journey c3-20261030T060322Z-53907:0/2, both at this branch's old
+op assign not_implemented. Kept FAIL; Seed already succeeded before that point.
+Do NOT call it the same cause as composite bfbd4f83 Journey failures: that
+composite reaches a failed/crash run after assign. Composite integration owns
+that direct worker-path investigation. No source/test change to Journey here.
+All owned run database pairs dropped and leases released; manifests verified
+before the final packet. No actual target seed/import/model action performed.
+
+Final N3 statics: format, test/dev WAE and repository Credo rc0. Test Seed beam
+has no SettingsRevision atom and no Agents.current_settings/1 import, proven
+by actual atom/import chunks; config/locks unchanged. Public docs reviewed.
+Architecture: restores existing domain call path, no new runtime boundary;
+Claude-owned diagram edge becomes Seed -> Agents metadata/read and seed/write
+APIs -> SettingsRevision (prototype-only implementation). Existing ordinary
+settings paths unchanged. Composite twin/full gate and real retry remain Claude
+owned. Clean production artifact proof and independent source review next.
