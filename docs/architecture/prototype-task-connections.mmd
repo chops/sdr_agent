@@ -1,6 +1,6 @@
 flowchart TD
   Task[TaskBoundary body / task VM]
-  Task -->|setup phase 0 only| Maintenance[Fixed-target maintenance read]
+  SetupWork -->|phase 0 only, after Cluster proof| Maintenance[Fixed-target maintenance read]
   Maintenance -.->|monitor, no link| Helper[Per-call helper]
   Helper -.->|owned reply alias; before absolute success deadline| Maintenance
   Helper -->|dev fixed connector: start_link| Pool[DBConnection pool]
@@ -16,6 +16,7 @@ flowchart TD
   Task -.->|parent-specific OTP exit / VM shutdown, not stop-on-return| Repo
   Task -.->|VM shutdown is terminal residual for orphan helper| Helper
   Terminal[Wired: sdr.prototype.import run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  SetupTerminal[Wired: sdr.prototype.setup run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
   Planned[Other prototype tasks: launch wiring planned] -.->|planned: attach then launch/3| Launch
   Harness[Measured A1 harness: fresh no-start VM] -->|SafeLog.attach, then TaskBoundary.launch/3| Launch[launch/3: admission, attach, entry guard]
   Launch -->|outermost only; any non-:ok is entry abort, no rollback| Eligible{E: pinned, Mix-launched, non-ExUnit, product-free VM}
@@ -24,6 +25,18 @@ flowchart TD
   P2 -->|:ok| P3[P3 ssl_handler: original formatter-only update + re-read; absent or normalized skipped]
   P3 -->|:ok| Body[Body process: K0 entry token]
   Body -->|import body: OTel start and parse| Task
+  Body -->|setup body: OTel start and strict fresh argv parse| SetupGuard[ContainmentGuard.guard setup]
+  SetupGuard -->|only :ok| SetupWork[Setup.run with lazy real effects]
+  SetupWork -->|phase 0: read-only, ordered checks| Cluster[Cluster identity proof]
+  Cluster -->|owned paths and bounded marker read| Marker[CLUSTER, data/global/control metadata]
+  Cluster -->|fixed id and pg_controldata via ChildEnv; captured output| Commands[UID and control identifier]
+  SetupWork -->|after phase 0; RepoState before storage| Storage{Fresh target absent?}
+  Storage -->|existing or uncertain: no adoption| SetupRefusal[Closed setup refusal or outer abort]
+  Storage -->|absent only| Create[Real adapter storage_up]
+  Create -->|created only| WithRepo[Ecto.Migrator.with_repo temporary start or reuse]
+  WithRepo -->|top level; target, migrations, freshness checks| Bootstrap[Phase 2 Authority.bootstrap commits]
+  Bootstrap -->|explicit configured instance UUID| SeedPhase[Phase 3 BootCheck, operator resolver, Seed.run]
+  SeedPhase -->|seed stub or later refusal: phase 2 remains committed| Partial[Bound, unseeded; not full setup success]
   Session -->|import only: successful entry| Guard[ContainmentGuard.guard import]
   Body -->|A1 harness only: OTel started before launch| Guard
   Guard -->|:ok import only| ImportWork[Protected readers; prepare; domain import; cap and closed output]

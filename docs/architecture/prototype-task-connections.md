@@ -19,12 +19,34 @@ argv, enters Session and runs the import guard before any protected input
 reader. Only guard success reaches the existing prepare/import/cap/output
 APIs. There is no task-owned import transaction, model call or outreach.
 
+`sdr.prototype.setup` also wires that terminal route. After OpenTelemetry
+and strict fresh-mode argv parsing, the real setup guard must pass before
+the lazy real effects run. Phase 0 checks the pinned cluster identity
+before the fixed maintenance reader. Cluster reads are read-only: owned
+ancestor/marker/data/control/socket checks, a bounded marker read, and
+fixed `id`/`pg_controldata` commands through ChildEnv with captured output.
+This is not an allocation bound on captured child output or a child-kill
+deadline. The same-UID filesystem race limit remains explicit.
+
+After preflight, RepoState precedes storage. An existing target refuses
+fresh setup; it is never adopted or cleaned. Only an absent target reaches
+`storage_up`, then `Ecto.Migrator.with_repo` with temporary application
+startup and its existing Repo start/reuse cleanup. Inside the callback,
+top-level, target, migration and freshness checks precede bootstrap.
+Bootstrap commits phase 2 using the validated configured instance UUID.
+Phase 3 verifies boot, resolves the operator and invokes Seed at top level.
+Seed's write remains a stub: a later refusal leaves the phase-2 binding
+**bound, unseeded**, not a fully successful setup. Import does not require
+a seed or model grant. No product tree, model call or outreach is started
+by setup, and no stop-on-return or caller-death timing promise is added.
+
 The `op` task's `run/1` remains `not_implemented`; other prototype-task launch
-wiring remains planned and dashed. The solid import edge denotes installed
-source, not successful terminal execution or imported rows. The measured A1
+wiring remains planned and dashed. Solid import/setup edges denote installed
+source, not real provisioning, successful import or imported rows. The measured A1
 harness route is separate: it starts OpenTelemetry **before** launch in a fresh
-no-start VM. The actual task's OpenTelemetry-after-prelude ordering still
-needs its own fresh-terminal proof.
+no-start VM. The setup task's OpenTelemetry-after-prelude ordering still
+needs its own fresh-terminal proof. Its focused source/parser and
+filesystem-refusal checks do not establish a healthy real cluster or setup.
 
 After the admission, attach and entry checks, the outermost call runs
 `LaunchPrelude.run/0` once. Its steps run in order and stop at the first
