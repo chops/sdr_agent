@@ -22,6 +22,9 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
     "lib/mix/tasks/sdr.demo.reply.ex" => 1,
     "lib/mix/tasks/sdr.demo.serve.ex" => 5,
     "lib/mix/tasks/sdr.demo.status.ex" => 1,
+    # D-268 M7: serve-only fixed endpoint override (4120, server: true)
+    # after guard and preflight; app env only, no handler or sink.
+    "lib/mix/tasks/sdr.prototype.serve.ex" => 1,
     "lib/sdr_agent/calibration_console.ex" => 8,
     "lib/sdr_agent/logger/exception_filter.ex" => 2,
     # ADR-0022: exact ssl_handler formatter-only setter, no new sink.
