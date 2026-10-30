@@ -35,8 +35,15 @@ startup and its existing Repo start/reuse cleanup. Inside the callback,
 top-level, target, migration and freshness checks precede bootstrap.
 Bootstrap commits phase 2 using the validated configured instance UUID.
 Phase 3 verifies boot, resolves the operator and invokes Seed at top level.
-Seed's write remains a stub: a later refusal leaves the phase-2 binding
-**bound, unseeded**, not a fully successful setup. Import does not require
+Seed (D-268 M4) prechecks pins and content, then runs one
+`Audit.transaction`: it locks the binding, rechecks it live and reads the
+seed history. Exact complete history is a replay with no writes. Empty
+history opens a prototype-only SeedScope, stores the provenance Payload,
+both settings revisions and the four Sales members, then activates the
+ICP, sequence and campaign through the scope check. Any refusal or late
+failure rolls the whole seed back and leaves the phase-2 binding **bound,
+unseeded**, not a fully successful setup. These edges are installed source
+with synthetic sandbox results only, not a committed real seed. Import does not require
 a seed or model grant. No product tree, model call or outreach is started
 by setup, and no stop-on-return or caller-death timing promise is added.
 
@@ -57,8 +64,7 @@ transaction. `op seed` (D-268 op seed retry) enters Session without Oban,
 checks the op guard, then reads the seed directory against the four pinned
 digests and calls `Seed.run/2` at top level; it prints one `seed_result` or
 `seed_refused` line. Its edge to the bound, unseeded target is dashed: the
-source is wired, but no real seed run is proven, and Seed.write is still a
-stub until M4. Other prototype-task launch wiring remains planned and dashed. Solid import/setup edges denote installed
+source is wired, but no real seed run is proven. Other prototype-task launch wiring remains planned and dashed. Solid import/setup edges denote installed
 source, not real provisioning, successful import or imported rows. The measured A1
 harness route is separate: it starts OpenTelemetry **before** launch in a fresh
 no-start VM. The setup task's OpenTelemetry-after-prelude ordering still

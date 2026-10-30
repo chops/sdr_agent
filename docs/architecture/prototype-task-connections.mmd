@@ -42,10 +42,18 @@ flowchart TD
   Create -->|created only| WithRepo[Ecto.Migrator.with_repo temporary start or reuse]
   WithRepo -->|top level; target, migrations, freshness checks| Bootstrap[Phase 2 Authority.bootstrap commits]
   Bootstrap -->|explicit configured instance UUID| SeedPhase[Phase 3 BootCheck, operator resolver, Seed.run]
-  SeedPhase -->|seed stub or later refusal: phase 2 remains committed| Partial[Bound, unseeded; not full setup success]
+  SeedPhase -->|Seed.run top level| SeedRun[Seed.run: nested refusal, live actor, pure pin and content precheck]
+  SeedPhase -->|seed refusal: phase 2 remains committed| Partial[Bound, unseeded; not full setup success]
+  SeedRun -->|one Audit.transaction| SeedLock[Binding FOR UPDATE, live recheck, history]
+  SeedLock -->|exact complete history: replay, no writes, never reactivates| SeedDone[ids and digests: created or replay]
+  SeedLock -->|empty history| SeedScopeRun[SeedScope.run: registered transaction scope, prototype only]
+  SeedScopeRun -->|scoped provenance Payload; settings twice; ICP, sequence, step, campaign creates with ordered binds| SeedActivate[Scope-checked activate: ICP, then sequence, then campaign]
+  SeedActivate -->|commit| SeedDone
+  SeedLock -.->|any refusal or late failure: whole seed rolls back| Partial
   Body -->|op seed body: OTel, parse, Session enqueue? false| OpSeedGuard[ContainmentGuard.guard op]
-  OpSeedGuard -->|only :ok| OpSeedWork[SeedDir.read P,G,C,V pins; Seed.run top level; one seed_result or seed_refused line]
-  OpSeedWork -.->|retry target: source wiring only, no real seed run proven| Partial
+  OpSeedGuard -->|only :ok| OpSeedWork[SeedDir.read P,G,C,V pins; one seed_result or seed_refused line]
+  OpSeedWork -->|top level| SeedRun
+  OpSeedWork -.->|retry of a bound, unseeded target: no real seed run proven| Partial
   Session -->|import only: successful entry| Guard[ContainmentGuard.guard import]
   Body -->|A1 harness only: OTel started before launch| Guard
   Guard -->|:ok import only| ImportWork[Protected readers; prepare; domain import; cap and closed output]
