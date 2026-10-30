@@ -43,6 +43,9 @@ flowchart TD
   WithRepo -->|top level; target, migrations, freshness checks| Bootstrap[Phase 2 Authority.bootstrap commits]
   Bootstrap -->|explicit configured instance UUID| SeedPhase[Phase 3 BootCheck, operator resolver, Seed.run]
   SeedPhase -->|seed stub or later refusal: phase 2 remains committed| Partial[Bound, unseeded; not full setup success]
+  Body -->|op seed body: OTel, parse, Session enqueue? false| OpSeedGuard[ContainmentGuard.guard op]
+  OpSeedGuard -->|only :ok| OpSeedWork[SeedDir.read P,G,C,V pins; Seed.run top level; one seed_result or seed_refused line]
+  OpSeedWork -.->|retry target: source wiring only, no real seed run proven| Partial
   Session -->|import only: successful entry| Guard[ContainmentGuard.guard import]
   Body -->|A1 harness only: OTel started before launch| Guard
   Guard -->|:ok import only| ImportWork[Protected readers; prepare; domain import; cap and closed output]

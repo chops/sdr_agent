@@ -158,6 +158,24 @@ defmodule SdrAgent.Prototype.SafeLog do
                                  :boot_refused
                                ]
 
+  # A seed retry refusal (D-268 op seed, delta 8b34f015, Codex entity PASS
+  # 3cfaad3d): Seed's refusal atoms, then the six input-stage atoms.
+  # `seed_result` is unchanged.
+  @seed_refused_reasons [
+    :seed_invalid,
+    :seed_differs,
+    :seed_failed,
+    :binding_mismatch,
+    :not_prototype_runtime,
+    :forbidden,
+    :invalid_arguments,
+    :session_unset,
+    :invalid_agent,
+    :invalid_correlation,
+    :delegation_not_found,
+    :boot_refused
+  ]
+
   @op_reasons [
     :none,
     :invalid_arguments,
@@ -180,6 +198,7 @@ defmodule SdrAgent.Prototype.SafeLog do
       reason: {:enum, @setup_reasons}
     ],
     seed_result: [revisions: :count, result: {:enum, [:ok, :replay, :refused]}],
+    seed_refused: [reason: {:enum, @seed_refused_reasons}],
     import_row: [
       row_index: {:count, 0..14},
       result: {:enum, [:imported, :replay, :skipped, :refused]},
@@ -217,6 +236,7 @@ defmodule SdrAgent.Prototype.SafeLog do
           :boot
           | :setup_phase
           | :seed_result
+          | :seed_refused
           | :import_row
           | :import_summary
           | :import_refused
@@ -237,7 +257,7 @@ defmodule SdrAgent.Prototype.SafeLog do
 
   @doc """
   A closed reason enum: `:boot`, `:setup`, `:import`, `:import_refused`,
-  `:provision`, `:provision_refused` or `:op`.
+  `:provision`, `:provision_refused`, `:seed_refused` or `:op`.
   """
   @spec reasons(
           :boot
@@ -246,6 +266,7 @@ defmodule SdrAgent.Prototype.SafeLog do
           | :import_refused
           | :provision
           | :provision_refused
+          | :seed_refused
           | :op
         ) :: [atom()]
   def reasons(:boot), do: @boot_reasons
@@ -254,6 +275,7 @@ defmodule SdrAgent.Prototype.SafeLog do
   def reasons(:import_refused), do: @import_refused_reasons
   def reasons(:provision), do: @provision_reasons
   def reasons(:provision_refused), do: @provision_refused_reasons
+  def reasons(:seed_refused), do: @seed_refused_reasons
   def reasons(:op), do: @op_reasons
 
   @doc """

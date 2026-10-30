@@ -41,7 +41,7 @@ a seed or model grant. No product tree, model call or outreach is started
 by setup, and no stop-on-return or caller-death timing promise is added.
 
 `sdr.prototype.op` and `sdr.prototype.serve` also wire the terminal route
-(D-268 M7). Only `op assign` executes; its other commands stay
+(D-268 M7). Only `op assign` and `op seed` execute; the other commands stay
 `not_implemented`. For `assign`, Session starts the `:oban` application
 (a cold `app.config` terminal has no `Oban.Registry`), then a task-local
 insert-only Oban instance with no queues, plugins, peer or stager; the job
@@ -53,7 +53,12 @@ provider and a free port 4120 before `app.start`. `sdr.prototype.provision`
 (D-268 M6b) enters Session without Oban, checks its guard, reads the
 worksheet privately from the fixed evidence root and calls the result
 companion, whose replay/mint branch comes from the existing binding-locked
-transaction. Other prototype-task launch wiring remains planned and dashed. Solid import/setup edges denote installed
+transaction. `op seed` (D-268 op seed retry) enters Session without Oban,
+checks the op guard, then reads the seed directory against the four pinned
+digests and calls `Seed.run/2` at top level; it prints one `seed_result` or
+`seed_refused` line. Its edge to the bound, unseeded target is dashed: the
+source is wired, but no real seed run is proven, and Seed.write is still a
+stub until M4. Other prototype-task launch wiring remains planned and dashed. Solid import/setup edges denote installed
 source, not real provisioning, successful import or imported rows. The measured A1
 harness route is separate: it starts OpenTelemetry **before** launch in a fresh
 no-start VM. The setup task's OpenTelemetry-after-prelude ordering still

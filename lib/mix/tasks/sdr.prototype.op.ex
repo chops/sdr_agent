@@ -35,19 +35,31 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     id. Its job is only inserted, inside the action's transaction; it runs
     only in serve. Every other command returns `{:error, :not_implemented}`.
 
+    `seed` (the separate retry for a bound, unseeded target; delta 8b34f015)
+    runs in the body itself: Session without Oban, the real op guard, then
+    `SdrAgent.Prototype.SeedDir.read/2` with the four digests in P,G,C,V
+    order and `SdrAgent.Prototype.Seed.run/2` at top level, in its own
+    transaction. `seed_outcome/2` maps each stage to its one line,
+    `seed_result` or `seed_refused`; an invalid `seed` argument list is
+    `seed_refused reason=invalid_arguments`. It enqueues no job and calls
+    no model.
+
     Mix loads app.config through the requirement before SafeLog attaches and
     the terminal launch (ADR-0022). The body starts only OpenTelemetry,
     parses argv, enters `SdrAgent.Prototype.Session` (with the insert-only
     Oban for `assign`), then checks the real op guard before the action.
-    The one result line is SafeLog's closed `op_result` with the lead id.
+    The one `assign` result line is SafeLog's closed `op_result` with the lead id.
     An invalid argument, an unimplemented command, a Session code outside
     the op reasons and every non-success guard result are returned tagged
     to TaskBoundary for its one fixed abort line; nothing else is printed.
     """
     use Mix.Task
 
+    alias SdrAgent.Prototype.BootCheck
     alias SdrAgent.Prototype.ContainmentGuard
     alias SdrAgent.Prototype.SafeLog
+    alias SdrAgent.Prototype.Seed
+    alias SdrAgent.Prototype.SeedDir
     alias SdrAgent.Prototype.Session
     alias SdrAgent.Prototype.TaskBoundary
     alias SdrAgent.Sales
@@ -82,6 +94,26 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # Session and action codes printed as themselves; every other code is
     # an outer abort, never relabelled.
     @passed_codes [:binding_mismatch, :not_prototype_runtime]
+
+    # Seed retry Session codes printed as themselves (as provision, ruling
+    # f1bffa89) and Seed.run/2's known refusal atoms.
+    @session_codes [
+      :binding_mismatch,
+      :not_prototype_runtime,
+      :session_unset,
+      :invalid_agent,
+      :invalid_correlation,
+      :delegation_not_found
+    ]
+
+    @seed_codes [
+      :seed_invalid,
+      :seed_differs,
+      :seed_failed,
+      :binding_mismatch,
+      :not_prototype_runtime,
+      :forbidden
+    ]
 
     @doc "Validates `argv`; `{:ok, parsed}` or `{:error, :invalid_arguments}`."
     @spec parse([String.t()]) :: {:ok, map()} | {:error, atom()}
@@ -121,11 +153,38 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def execute(_parsed, _actor), do: {:error, :not_implemented}
 
     @doc """
-    Maps one `seed` stage result to `{:say, code, refs}` or
-    `{:abort, {stage, value}}`. RED declaration: every value aborts.
+    Maps one `seed` stage result (`:arguments`, `:session`, `:read` or
+    `:seed`) to `{:say, :seed_result | :seed_refused, refs}` or
+    `{:abort, {stage, value}}`. Only a returned Session code of the six
+    listed ones is printed as itself, and only a returned
+    `BootCheck.reasons/0` code becomes `:boot_refused`; a returned seed
+    directory error is `:seed_invalid`; Seed's `:created` branch is
+    `result=ok` and `:replay` is `replay`, each with the returned
+    non-negative count; Seed's known refusal atoms are refusals. Every
+    other value is an outer abort, never a coerced reason.
     """
     @spec seed_outcome(atom(), term()) :: {:say, atom(), keyword()} | {:abort, term()}
-    def seed_outcome(stage, _value), do: {:abort, {stage, :unexpected}}
+    def seed_outcome(:arguments, {:error, :invalid_arguments}),
+      do: seed_refused(:invalid_arguments)
+
+    def seed_outcome(:session, {:error, code}) when code in @session_codes,
+      do: seed_refused(code)
+
+    def seed_outcome(:session, {:error, code}) when is_atom(code) do
+      if code in BootCheck.reasons(),
+        do: seed_refused(:boot_refused),
+        else: {:abort, {:session, code}}
+    end
+
+    def seed_outcome(:read, {:error, {file, reason}}) when is_binary(file) and is_atom(reason),
+      do: seed_refused(:seed_invalid)
+
+    def seed_outcome(:seed, {:ok, %{result: branch, revisions: revisions}})
+        when branch in [:created, :replay] and is_integer(revisions) and revisions >= 0,
+        do: {:say, :seed_result, [revisions: revisions, result: seed_branch(branch)]}
+
+    def seed_outcome(:seed, {:error, code}) when code in @seed_codes, do: seed_refused(code)
+    def seed_outcome(stage, value), do: {:abort, {stage, abort_value(value)}}
 
     @impl Mix.Task
     def run(argv) do
@@ -135,9 +194,53 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp body(argv) do
       {:ok, _started} = Application.ensure_all_started(:opentelemetry)
+      correlation = System.get_env("SDR_PROTOTYPE_SESSION")
 
-      with {:ok, %{command: :assign} = parsed} <- parse(argv),
-           correlation = System.get_env("SDR_PROTOTYPE_SESSION"),
+      case {argv, parse(argv)} do
+        {_argv, {:ok, %{command: :seed} = parsed}} ->
+          seed(parsed, correlation)
+
+        {["seed" | _rest], {:error, :invalid_arguments} = error} ->
+          seed_finish(seed_outcome(:arguments, error))
+
+        {_argv, parsed} ->
+          command(parsed, correlation)
+      end
+    end
+
+    # The separate seed retry: Session without Oban, the op guard, then the
+    # pinned seed directory read and Seed's own top-level transaction.
+    defp seed(parsed, correlation) do
+      with {:ok, %{actor: actor}} <-
+             seed_at(
+               :session,
+               Session.enter(
+                 agent: Atom.to_string(parsed.agent),
+                 session_correlation: correlation,
+                 enqueue?: false
+               )
+             ),
+           {:guard, :ok} <- {:guard, ContainmentGuard.guard(:op)},
+           [offering_profile, writing_guide, campaign, provenance] = parsed.seed_sha256,
+           {:ok, seed} <-
+             seed_at(
+               :read,
+               SeedDir.read(parsed.seed_dir, %{
+                 offering_profile: offering_profile,
+                 writing_guide: writing_guide,
+                 campaign: campaign,
+                 provenance: provenance
+               })
+             ) do
+        :seed |> seed_outcome(Seed.run(seed, actor)) |> seed_finish()
+      else
+        {:guard, _result} = guard_refusal -> guard_refusal
+        {:stage, stage, error} -> seed_finish(seed_outcome(stage, error))
+      end
+    end
+
+    defp command(parsed_result, correlation) do
+      with {:ok, %{command: :assign} = parsed} <- parsed_result,
            {:ok, %{actor: actor}} <- enter(parsed, correlation),
            {:guard, :ok} <- {:guard, ContainmentGuard.guard(:op)} do
         result(parsed, execute(parsed, actor))
@@ -173,6 +276,30 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
       :refused
     end
+
+    defp seed_at(_stage, {:ok, value}), do: {:ok, value}
+    defp seed_at(stage, error), do: {:stage, stage, error}
+
+    defp seed_finish({:say, :seed_result, refs}) do
+      :ok = SafeLog.say(:seed_result, refs)
+      :ok
+    end
+
+    defp seed_finish({:say, :seed_refused, refs}) do
+      :ok = SafeLog.say(:seed_refused, refs)
+      :refused
+    end
+
+    defp seed_finish({:abort, tagged}), do: tagged
+
+    defp seed_refused(reason), do: {:say, :seed_refused, [reason: reason]}
+
+    defp seed_branch(:created), do: :ok
+    defp seed_branch(:replay), do: :replay
+
+    # The abort keeps an atom code; any other value is not carried.
+    defp abort_value({:error, code}) when is_atom(code), do: code
+    defp abort_value(_value), do: :unexpected
 
     defp reason(%Ash.Error.Forbidden{}), do: :forbidden
     defp reason(%Ash.Error.Query.NotFound{}), do: :not_found

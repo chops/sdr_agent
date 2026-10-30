@@ -172,9 +172,12 @@ defmodule SdrAgent.Prototype.OpSeedTest do
         assert outcome(:seed, {:error, code}) == refused(code), "#{code}"
       end
 
-      assert outcome(:seed, {:error, :not_implemented}) == {:abort, {:seed, :not_implemented}}
+      # An unknown atom keeps its code in the abort, never a refusal line.
+      for code <- [:not_implemented, :none] do
+        assert outcome(:seed, {:error, code}) == {:abort, {:seed, code}}, "#{code}"
+      end
 
-      for error <- [:none, %RuntimeError{message: "x"}, {:nested, :seed_failed}] do
+      for error <- [%RuntimeError{message: "x"}, {:nested, :seed_failed}] do
         assert outcome(:seed, {:error, error}) == {:abort, {:seed, :unexpected}},
                "#{inspect(error)} was not an outer abort"
       end
@@ -198,6 +201,9 @@ defmodule SdrAgent.Prototype.OpSeedTest do
         node, acc ->
           {node, acc}
       end)
+
+    # Source order: the accumulator is prepended, so sort by line.
+    calls = Enum.sort_by(calls, &elem(&1, 3))
 
     enters =
       for {:Session, :enter, [opts], line} <- calls, do: {Keyword.get(opts, :enqueue?), line}

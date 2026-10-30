@@ -124,6 +124,7 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
       boot: [result: :refused, reason: :binding_absent],
       setup_phase: [phase: 2, result: :rolled_back, reason: :migration_failed],
       seed_result: [revisions: 4, result: :replay],
+      seed_refused: [reason: :seed_differs],
       import_row: [row_index: 14, result: :skipped, reason: :role_mailbox],
       import_summary: [imported: 1, replayed: 0, refused: 2, cap_used: 3],
       import_refused: [reason: :digest_mismatch],
