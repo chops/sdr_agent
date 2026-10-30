@@ -25,7 +25,7 @@ defmodule SdrAgent.Prototype.ClusterRuntimeTest do
     paths = %{
       root: root,
       socket_dir: Path.join(root, "socket"),
-      port: 5541,
+      port: 5542,
       pg_bin: Cluster.pinned().pg_bin
     }
 

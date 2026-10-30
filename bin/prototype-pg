@@ -7,7 +7,7 @@
 #
 # - The roots, the socket directory, the port and the executable are the
 #   pinned constants below. The socket is the only endpoint
-#   (listen_addresses = ''); 5541 names the socket only.
+#   (listen_addresses = ''); 5542 names the socket only.
 # - owned (the identity proof) runs before start, status and stop: the
 #   marker, the data directory, the binary, the control file and the socket
 #   directory. A running cluster must also answer with the marker's
@@ -24,9 +24,9 @@
 # running|stopped" (exit 0), or "prototype-pg: refused <code>" (exit 2).
 
 readonly PG_BIN='/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin'
-readonly ROOT='/Users/charles/.local/state/sdr-agent/prototype/d237'
-readonly SOCKET_DIR='/private/tmp/d237-pg'
-readonly PORT='5541'
+readonly ROOT='/Users/charles/.local/state/sdr-agent/prototype/d237-5542'
+readonly SOCKET_DIR='/private/tmp/d237-pg-5542'
+readonly PORT='5542'
 readonly LSOF='/usr/sbin/lsof'
 readonly STAT='/usr/bin/stat'
 

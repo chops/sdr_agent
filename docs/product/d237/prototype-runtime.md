@@ -10,17 +10,24 @@ checks that they do (`test/scripts/prototype_pg_test.exs`, ruling 3).
 facts file is a `seed_once` unit pinned by the workflow receipt; any future
 edit to it goes through the reviewed receipt-revision process.
 
+The owner authorized port 5542 on 2026-10-29 because port 5541 belongs to an
+active project. The previous failed-attempt root
+`/Users/charles/.local/state/sdr-agent/prototype/d237` and socket directory
+`/private/tmp/d237-pg` are retained, inactive artifacts. Their marker and
+data are not rewritten, adopted or deleted; the active pins below use a
+fresh namespace. No prototype command stops or reconfigures the other project.
+
 ## Two PostgreSQL services, never mixed
 
 | Port | Service | Endpoint | Owner |
 |---|---|---|---|
 | 5520 | the ordinary development PostgreSQL service (devenv; `config/dev.exs`) | TCP on localhost | the owner's dev, test and calibration databases |
-| 5541 | the isolated prototype cluster's socket endpoint only | the Unix socket in `/private/tmp/d237-pg`; no TCP listener | the D-237 prototype database `sdr_agent_prototype` |
+| 5542 | the isolated prototype cluster's socket endpoint only | the Unix socket in `/private/tmp/d237-pg-5542`; no TCP listener | the D-237 prototype database `sdr_agent_prototype` |
 
 - 5520 is the ordinary service. Nothing in the prototype connects to it, reads
   an owner database (`sdr_agent_dev`, `sdr_agent_calibration`) or changes its
   roles or configuration.
-- 5541 names the prototype cluster's Unix socket only:
+- 5542 names the prototype cluster's Unix socket only:
   `listen_addresses = ''`, so it has no TCP listener. Being socket-only does
   not make it any less a service fact, which is why it is recorded here.
 
@@ -29,12 +36,12 @@ edit to it goes through the reviewed receipt-revision process.
 | Fact | Value |
 |---|---|
 | Executable | `/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin` (the devenv PostgreSQL 18 store path, recorded in the marker at init) |
-| Root | `/Users/charles/.local/state/sdr-agent/prototype/d237` (mode 0700) |
+| Root | `/Users/charles/.local/state/sdr-agent/prototype/d237-5542` (mode 0700) |
 | Data directory | `<root>/pgdata` (mode 0700) |
-| Ownership marker | `<root>/CLUSTER` (mode 0600), one line: `{"system_identifier":"<digits>","data_dir":"<root>/pgdata","socket_dir":"/private/tmp/d237-pg","port":5541,"binary":"<executable>"}` |
+| Ownership marker | `<root>/CLUSTER` (mode 0600), one line: `{"system_identifier":"<digits>","data_dir":"<root>/pgdata","socket_dir":"/private/tmp/d237-pg-5542","port":5542,"binary":"<executable>"}` |
 | Server log | `<root>/log/postgres.log` (mode 0600; `logging_collector = off`, stderr to this one file) |
-| Socket directory | `/private/tmp/d237-pg` (mode 0700) |
-| Socket pair | `.s.PGSQL.5541` and `.s.PGSQL.5541.lock` |
+| Socket directory | `/private/tmp/d237-pg-5542` (mode 0700) |
+| Socket pair | `.s.PGSQL.5542` and `.s.PGSQL.5542.lock` |
 | Superuser | `postgres`, local trust over the private 0700 socket directory only; host connections rejected |
 | Database | `sdr_agent_prototype`, created by `mix sdr.prototype.setup` |
 
@@ -56,7 +63,7 @@ edit to it goes through the reviewed receipt-revision process.
    - requires `pg_ctl status` to report not running;
    - requires both socket-pair files to be absent (a residual pair is
      refused, never removed or adopted);
-   - requires `lsof -nP -iTCP:5541 -sTCP:LISTEN` to give its documented
+   - requires `lsof -nP -iTCP:5542 -sTCP:LISTEN` to give its documented
      no-match result (exit 1, no output); a listener, a failed or unavailable
      probe, or a signal refuses before anything starts;
    - starts with `pg_ctl -l <root>/log/postgres.log`, then requires the
@@ -89,8 +96,8 @@ cleans anything. Its children run with an empty environment.
 
 ```
 listen_addresses = ''
-unix_socket_directories = '/private/tmp/d237-pg'
-port = 5541
+unix_socket_directories = '/private/tmp/d237-pg-5542'
+port = 5542
 log_min_messages = fatal
 log_min_error_statement = panic
 log_statement = none

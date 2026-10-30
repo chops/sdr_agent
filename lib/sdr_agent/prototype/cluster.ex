@@ -122,9 +122,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     ]
     # bin/prototype-pg:26-29 (S4 09ad3ce).
     @pinned %{
-      root: "/Users/charles/.local/state/sdr-agent/prototype/d237",
-      socket_dir: "/private/tmp/d237-pg",
-      port: 5541,
+      root: "/Users/charles/.local/state/sdr-agent/prototype/d237-5542",
+      socket_dir: "/private/tmp/d237-pg-5542",
+      port: 5542,
       pg_bin: "/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin"
     }
     @path_keys [:pg_bin, :port, :root, :socket_dir]
