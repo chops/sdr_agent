@@ -19,6 +19,31 @@ defmodule SdrAgent.Prototype.CRMPrototypeTest do
   @seed SdrAgent.Prototype.Seed
   @import SdrAgent.Prototype.DossierImport
 
+  defmodule RecordingCRM do
+    @moduledoc false
+    # Reports every call to the calling process and answers with a known
+    # fixture CRM record, whatever the id.
+    alias SdrAgent.Demo.Fixtures
+    alias SdrAgent.Integrations.Fixtures, as: CRMFixtures
+
+    def fetch_contact(crm_id) do
+      send(self(), {:crm_called, crm_id})
+      [contact | _] = Fixtures.contacts()
+      {:ok, CRMFixtures.crm_record(contact.crm_external_id)}
+    end
+  end
+
+  setup do
+    integrations = Application.get_env(:sdr_agent, :integrations, [])
+
+    SdrAgent.OutreachFixtures.put_env!(
+      :integrations,
+      Keyword.put(integrations, :crm, RecordingCRM)
+    )
+
+    :ok
+  end
+
   setup do
     fixture = bound!()
     enter_window!(fixture)
@@ -60,11 +85,18 @@ defmodule SdrAgent.Prototype.CRMPrototypeTest do
   test "an imported contact in prototype runtime has no CRM artifact and no adapter call", ctx do
     before = artifacts()
     assert perform(ctx) == {:ok, %{artifacts: []}, [], []}
+    refute_received {:crm_called, _id}
     assert artifacts() == before
   end
 
-  test "ordinary runtime keeps the CRM adapter path", ctx do
+  test "ordinary runtime keeps the CRM adapter path and records its record", ctx do
     SdrAgent.PrototypeFixtures.leave_runtime()
-    refute perform(ctx) == {:ok, %{artifacts: []}, [], []}
+    before = artifacts()
+
+    assert {:ok, %{artifacts: [artifact]}, [], [_ref]} = perform(ctx)
+    assert_received {:crm_called, nil}
+    assert artifact.source_type == :crm_record
+    assert artifact.trust_level == :high
+    assert artifacts() == before + 1
   end
 end
