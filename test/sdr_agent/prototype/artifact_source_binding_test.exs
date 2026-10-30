@@ -157,6 +157,40 @@ defmodule SdrAgent.Prototype.ArtifactSourceBindingTest do
     assert writes() == before
   end
 
+  # Two sources of one lead entry sharing a final_url (s1 also carries a
+  # verified fact, so both become DossierSources): no first-row-wins.
+  test "two sources of the lead sharing a final_url are :dossier_source_ambiguous", ctx do
+    url = "https://www.acme3.test/about"
+
+    row =
+      F.company(3)
+      |> Map.update!("sources", fn [s1, s2] ->
+        [%{s1 | "original_url" => url, "final_url" => url}, s2]
+      end)
+      |> Map.update!("facts", fn [f1 | rest] -> [%{f1 | "source_id" => "s1"} | rest] end)
+
+    [routed] = F.route_rows!([row], ["row-3"])
+
+    {:ok, :imported, %{lead_id: lead_id, entry_id: entry_id}} =
+      call(@import, :import_row, [routed, ctx.fixture.actor])
+
+    {:ok, all} = Ash.read(Research.DossierSource, authorize?: false)
+    shared = Enum.filter(all, &(&1.entry_id == entry_id and &1.final_url == url))
+    assert length(shared) == 2, "the fixture must store two sources at one URL"
+
+    content = payload!(hd(shared).content_sha256)
+    before = writes()
+
+    result =
+      Research.record_artifact(
+        attrs(ctx, %{lead_id: lead_id, source_url: url, content: content}),
+        actor: ctx.agent
+      )
+
+    assert refused?(result, :dossier_source_ambiguous), inspect(result)
+    assert writes() == before
+  end
+
   test "a replay returns the same artifact", ctx do
     {:ok, first} = Research.record_artifact(attrs(ctx), actor: ctx.agent)
     {:ok, again} = Research.record_artifact(attrs(ctx, %{title: "other"}), actor: ctx.agent)

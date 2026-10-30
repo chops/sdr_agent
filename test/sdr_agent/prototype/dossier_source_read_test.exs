@@ -13,8 +13,6 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
   """
   use SdrAgent.PrototypeCase, async: false
 
-  require Ash.Query
-
   import SdrAgent.PrototypeOutreachFixtures, only: [enter_window!: 1]
 
   alias SdrAgent.Agents
@@ -45,7 +43,7 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
       lead_id: lead_id,
       entry_id: entry_id,
       run: running_run!(fixture.tenant, agent, lead_id),
-      sources: sources!(actor, entry_id)
+      sources: sources!(entry_id)
     }
   end
 
@@ -57,7 +55,7 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
     run
   end
 
-  defp sources!(actor, entry_id) do
+  defp sources!(entry_id) do
     # Setup read only (the operator has no DossierSource read); never the subject.
     {:ok, sources} = Ash.read(SdrAgent.Research.DossierSource, authorize?: false)
     sources |> Enum.filter(&(&1.entry_id == entry_id)) |> Enum.sort_by(& &1.source_id)
@@ -76,6 +74,15 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
       )
 
     n
+  end
+
+  defp scoped_read(ctx, sha256, context) do
+    SdrAgent.Audit.Payload
+    |> Ash.ActionInput.for_action(:read_dossier_source_content, %{sha256: sha256},
+      actor: ctx.agent,
+      context: context
+    )
+    |> Ash.run_action()
   end
 
   defp read(ctx, selector, actor \\ nil),
@@ -160,7 +167,9 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
         SdrAgent.Audit.Payload
         |> Ash.ActionInput.for_action(
           :read_content,
-          %{sha256: source.content_sha256, purpose: "d237_dossier_source"}, actor: ctx.agent)
+          %{sha256: source.content_sha256, purpose: "d237_dossier_source"},
+          actor: ctx.agent
+        )
         |> Ash.run_action()
 
       assert match?({:error, _}, result)
@@ -169,6 +178,44 @@ defmodule SdrAgent.Prototype.DossierSourceReadTest do
     test "ordinary runtime is :not_prototype_runtime", ctx do
       SdrAgent.PrototypeFixtures.leave_runtime()
       assert read(ctx, :all) == {:error, :not_prototype_runtime}
+    end
+  end
+
+  describe "deny: tenant and scope" do
+    test "an AGT actor of another tenant is :forbidden, with no payload view", ctx do
+      before = views()
+      foreign = SdrAgent.Actor.system(:agent_runtime, Ecto.UUID.generate())
+      assert read(ctx, :all, foreign) == {:error, :forbidden}
+      assert views() == before
+    end
+
+    test "the scoped payload action refuses AGT with no scope", ctx do
+      [source | _] = ctx.sources
+      assert match?({:error, _}, scoped_read(ctx, source.content_sha256, %{}))
+    end
+
+    test "the scoped payload action refuses AGT with a forged scope", ctx do
+      [source | _] = ctx.sources
+
+      forged =
+        SdrAgent.Audit.Checks.DossierSourceScope.context(%{
+          tenant_id: ctx.fixture.tenant.id,
+          agent_run_id: ctx.run.id,
+          lead_id: ctx.lead_id,
+          entry_id: ctx.entry_id,
+          sha256s: [:crypto.hash(:sha256, "another source")]
+        })
+
+      assert match?({:error, _}, scoped_read(ctx, source.content_sha256, forged))
+
+      malformed = %{
+        sdr_dossier_source_scope: %{
+          tenant_id: ctx.fixture.tenant.id,
+          sha256s: [source.content_sha256]
+        }
+      }
+
+      assert match?({:error, _}, scoped_read(ctx, source.content_sha256, malformed))
     end
   end
 
