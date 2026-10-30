@@ -144,6 +144,20 @@ defmodule SdrAgent.Prototype.SafeLog do
     :provision_failed
   ]
 
+  # A provision refusal with no grant (D-268 M6b, Codex rulings a3f14552,
+  # f1bffa89): the provision reasons without :none, then the six input-stage
+  # atoms of `@import_refused_reasons`. `@provision_reasons` and
+  # `provisioned` are unchanged.
+  @provision_refused_reasons (@provision_reasons -- [:none]) ++
+                               [
+                                 :invalid_arguments,
+                                 :session_unset,
+                                 :invalid_agent,
+                                 :invalid_correlation,
+                                 :delegation_not_found,
+                                 :boot_refused
+                               ]
+
   @op_reasons [
     :none,
     :invalid_arguments,
@@ -178,6 +192,7 @@ defmodule SdrAgent.Prototype.SafeLog do
       result: {:enum, [:created, :replay, :refused]},
       reason: {:enum, @provision_reasons}
     ],
+    provision_refused: [reason: {:enum, @provision_refused_reasons}],
     op_result: [
       command: {:enum, [:assign, :review, :approve, :reject, :revoke, :seed, :status]},
       id: :uuid,
@@ -206,6 +221,7 @@ defmodule SdrAgent.Prototype.SafeLog do
           | :import_summary
           | :import_refused
           | :provisioned
+          | :provision_refused
           | :op_result
           | :bundle_written
           | :status_counts
@@ -221,14 +237,23 @@ defmodule SdrAgent.Prototype.SafeLog do
 
   @doc """
   A closed reason enum: `:boot`, `:setup`, `:import`, `:import_refused`,
-  `:provision` or `:op`.
+  `:provision`, `:provision_refused` or `:op`.
   """
-  @spec reasons(:boot | :setup | :import | :import_refused | :provision | :op) :: [atom()]
+  @spec reasons(
+          :boot
+          | :setup
+          | :import
+          | :import_refused
+          | :provision
+          | :provision_refused
+          | :op
+        ) :: [atom()]
   def reasons(:boot), do: @boot_reasons
   def reasons(:setup), do: @setup_reasons
   def reasons(:import), do: @import_reasons
   def reasons(:import_refused), do: @import_refused_reasons
   def reasons(:provision), do: @provision_reasons
+  def reasons(:provision_refused), do: @provision_refused_reasons
   def reasons(:op), do: @op_reasons
 
   @doc """

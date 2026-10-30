@@ -49,8 +49,11 @@ is only inserted and runs only in serve. The configured engine is
 `Oban.Engines.Basic`. `ClosedErrorEngine` delegates its callbacks to Basic,
 but it is not wired as the engine under D-256 reduced containment, so its
 edge is dashed and conditional. Serve's preflight requires the ClaudeCLI
-provider and a free port 4120 before `app.start`. Other prototype-task
-launch wiring remains planned and dashed. Solid import/setup edges denote installed
+provider and a free port 4120 before `app.start`. `sdr.prototype.provision`
+(D-268 M6b) enters Session without Oban, checks its guard, reads the
+worksheet privately from the fixed evidence root and calls the result
+companion, whose replay/mint branch comes from the existing binding-locked
+transaction. Other prototype-task launch wiring remains planned and dashed. Solid import/setup edges denote installed
 source, not real provisioning, successful import or imported rows. The measured A1
 harness route is separate: it starts OpenTelemetry **before** launch in a fresh
 no-start VM. The setup task's OpenTelemetry-after-prelude ordering still

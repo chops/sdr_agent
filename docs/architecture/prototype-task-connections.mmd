@@ -19,6 +19,7 @@ flowchart TD
   SetupTerminal[Wired: sdr.prototype.setup run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
   OpTerminal[Wired: sdr.prototype.op run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
   ServeTerminal[Wired: sdr.prototype.serve run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  ProvisionTerminal[Wired: sdr.prototype.provision run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
   Session -->|op assign only: enqueue? true; ensure_all_started :oban| InsertOnly[Task-local insert-only Oban: no queues, plugins, peer or stager]
   InsertOnly -->|configured engine| Basic[Oban.Engines.Basic]
   ClosedEngine[ClosedErrorEngine] -.->|conditional, not wired under D-256: delegates callbacks| Basic

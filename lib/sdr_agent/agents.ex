@@ -2117,7 +2117,21 @@ defmodule SdrAgent.Agents do
   the prototype authority, every caller is refused.
   """
   @spec provision_prototype_grant(map(), keyword()) :: {:ok, struct()} | {:error, term()}
-  def provision_prototype_grant(attrs, opts), do: provision_or_refuse(attrs, opts)
+  def provision_prototype_grant(attrs, opts) do
+    with {:ok, %{grant: grant}} <- provision_or_refuse(attrs, opts), do: {:ok, grant}
+  end
+
+  @doc """
+  OPR: `provision_prototype_grant/2` with the branch it actually took
+  (D-268 M6b; Codex rulings a3f14552, f1bffa89): `{:ok, %{grant: grant,
+  result: :created | :replay}}`. The tag is chosen by the mint or replay
+  path inside the same binding-locked transaction and returned only after
+  it commits; checks, refusals, rollback and replay are the same calls, so
+  errors are identical. No clock or prior read decides the branch.
+  """
+  @spec provision_prototype_grant_result(map(), keyword()) ::
+          {:ok, %{grant: struct(), result: :created | :replay}} | {:error, term()}
+  def provision_prototype_grant_result(attrs, opts), do: provision_or_refuse(attrs, opts)
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Agents.Errors.ProvisionRefused
@@ -2177,7 +2191,7 @@ defmodule SdrAgent.Agents do
       with {:ok, grant, allocations} <- Provisioning.lock_grant(snapshot, grant_id),
            true <- Provisioning.unchanged?(grant, allocations),
            true <- Provisioning.digest(event) == digest do
-        grant
+        {:replay, grant}
       else
         _changed_or_different -> Repo.rollback(:grant_exists)
       end
@@ -2191,7 +2205,7 @@ defmodule SdrAgent.Agents do
              actor: actor,
              guarded?: true
            ) do
-        {:ok, grant} -> grant
+        {:ok, grant} -> {:created, grant}
         {:error, error} -> Repo.rollback(refusal(error))
       end
     end
@@ -2210,6 +2224,7 @@ defmodule SdrAgent.Agents do
     defp provision_result({:error, %Ash.Changeset{errors: errors}}),
       do: {:error, refusal(Ash.Error.to_error_class(errors))}
 
+    defp provision_result({:ok, {branch, grant}}), do: {:ok, %{grant: grant, result: branch}}
     defp provision_result(result), do: result
   else
     # No prototype authority in this build (production): every caller is

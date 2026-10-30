@@ -128,6 +128,7 @@ defmodule SdrAgent.Prototype.SafeLogContractTest do
       import_summary: [imported: 1, replayed: 0, refused: 2, cap_used: 3],
       import_refused: [reason: :digest_mismatch],
       provisioned: [grant_id: uuid, result: :created, reason: :none],
+      provision_refused: [reason: :grant_exists],
       op_result: [command: :approve, id: uuid, result: :refused, reason: :stale_review],
       bundle_written: [bundle_id: uuid, items: 7],
       status_counts: [
