@@ -54,7 +54,7 @@ defmodule SdrAgent.SDR.Actions.ValidatePersonalization do
   @doc false
   def validate(ctx, lead_id, draft, rule) do
     with :ok <- Preconditions.declared(ctx, rule.action),
-         {:ok, %{decision: decision, invocation: invocation, proposal: proposal}} <-
+         {:ok, %{decision: decision, invocation_ref: invocation, proposal: proposal}} <-
            Support.authoritative_draft(ctx, lead_id, draft),
          {:ok, accepted} <- accepted(ctx, lead_id) do
       record(ctx, lead_id, rule, decision, invocation, proposal, accepted)

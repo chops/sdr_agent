@@ -69,8 +69,15 @@ defmodule SdrAgent.SDR.Support do
   """
   def authoritative_draft(%Context{} = ctx, lead_id, %{} = draft) do
     with {:ok, decision, invocation} <- draft_pair(ctx, lead_id, draft),
-         {:ok, proposal} <- released_proposal(ctx, invocation) do
-      {:ok, %{decision: decision, invocation: invocation, proposal: proposal}}
+         {:ok, proposal} <- released_proposal(ctx, invocation),
+         {:ok, invocation_ref} <- released_ref(ctx, invocation) do
+      {:ok,
+       %{
+         decision: decision,
+         invocation: invocation,
+         invocation_ref: invocation_ref,
+         proposal: proposal
+       }}
     end
   end
 
@@ -123,6 +130,16 @@ defmodule SdrAgent.SDR.Support do
 
       {:error, _other} ->
         Model.halt_fail(ctx, nil, :crash, @not_this_draft)
+    end
+  end
+
+  # The invocation's input ref behind the same gate (D-269 G4): the agent's
+  # plain read masks a gated output, so its hash is never taken from it.
+  defp released_ref(ctx, invocation) do
+    case Agents.released_output_ref(invocation, actor: ctx.actor) do
+      {:ok, ref} -> {:ok, ref}
+      {:error, :result_not_released} -> {:error, {:halt, :result_not_released}}
+      {:error, _other} -> Model.halt_fail(ctx, nil, :crash, @not_this_draft)
     end
   end
 

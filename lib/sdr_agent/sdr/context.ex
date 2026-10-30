@@ -55,4 +55,9 @@ defmodule SdrAgent.SDR.Context do
 
   defp input_ref(%resource{id: id} = record),
     do: %{resource: inspect(resource), id: id, record_sha256: RecordHash.hex(record)}
+
+  # A ref computed behind its gated read (`SdrAgent.Agents.released_output_ref/2`).
+  defp input_ref(%{resource: resource, id: id, record_sha256: hash} = ref)
+       when is_binary(resource) and is_binary(id) and is_binary(hash) and map_size(ref) == 3,
+       do: ref
 end

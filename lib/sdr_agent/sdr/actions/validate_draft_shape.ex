@@ -39,7 +39,13 @@ defmodule SdrAgent.SDR.Actions.ValidateDraftShape do
   @impl SdrAgent.SDR.Action
   def perform(%{lead_id: lead_id, draft: draft}, ctx) do
     with :ok <- Preconditions.declared(ctx, __MODULE__),
-         {:ok, %{decision: decision, invocation: invocation, proposal: proposal}} <-
+         {:ok,
+          %{
+            decision: decision,
+            invocation: invocation,
+            invocation_ref: invocation_ref,
+            proposal: proposal
+          }} <-
            Support.authoritative_draft(ctx, lead_id, draft) do
       reasons = reasons(proposal)
 
@@ -60,7 +66,7 @@ defmodule SdrAgent.SDR.Actions.ValidateDraftShape do
                  outcome_detail: %{"reasons" => reasons}
                },
                "validate",
-               [decision, invocation]
+               [decision, invocation_ref]
              ) do
         {:ok, %{passed: reasons == [], decision_id: shape.id}}
       end

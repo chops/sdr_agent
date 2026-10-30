@@ -1644,6 +1644,18 @@ defmodule SdrAgent.Agents do
     end)
   end
 
+  @doc """
+  The input ref of one invocation (D-269 G4): `{:ok, %{resource:, id:,
+  record_sha256:}}` behind the same read and refusals as
+  `released_output/2`, for a Decision's `input_refs`; never the output.
+  See `SdrAgent.Agents.ReleasedOutput.fetch_ref/2`.
+  """
+  def released_output_ref(invocation, opts) do
+    OperationSnapshot.enter(:released_output, fn ->
+      ReleasedOutput.fetch_ref(invocation, Keyword.get(opts, :actor))
+    end)
+  end
+
   ## Helpers
 
   defp create(resource, action, attrs, opts, subject_id \\ nil) do

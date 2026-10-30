@@ -35,6 +35,7 @@ defmodule SdrAgent.Agents.ReleasedOutput do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ModelResultRelease
   alias SdrAgent.Audit.Kernel
+  alias SdrAgent.Audit.RecordHash
 
   @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
@@ -45,8 +46,29 @@ defmodule SdrAgent.Agents.ReleasedOutput do
   """
   @spec fetch(struct() | Ecto.UUID.t(), term()) ::
           {:ok, term()} | {:error, :result_not_released | :not_found | term()}
-  def fetch(invocation, actor),
-    do: OperationSnapshot.enter(:released_output_fetch, fn -> read(invocation, actor) end)
+  def fetch(invocation, actor) do
+    OperationSnapshot.enter(:released_output_fetch, fn ->
+      with {:ok, row} <- read(invocation, actor), do: {:ok, row.parsed_output}
+    end)
+  end
+
+  @doc """
+  The input ref of `invocation` (D-269 G4): `{:ok, %{resource:, id:,
+  record_sha256:}}`, the `SdrAgent.Audit.RecordHash` of the whole row read
+  through exactly the read `fetch/2` uses, with exactly its refusals. Only
+  the ref leaves: never the output, never a masked row's hash.
+  """
+  @spec fetch_ref(struct() | Ecto.UUID.t(), term()) ::
+          {:ok, %{resource: String.t(), id: Ecto.UUID.t(), record_sha256: String.t()}}
+          | {:error, :result_not_released | :not_found | term()}
+  def fetch_ref(invocation, actor) do
+    OperationSnapshot.enter(:released_output_fetch, fn ->
+      with {:ok, row} <- read(invocation, actor) do
+        {:ok,
+         %{resource: inspect(ModelInvocation), id: row.id, record_sha256: RecordHash.hex(row)}}
+      end
+    end)
+  end
 
   defp read(%ModelInvocation{id: id}, actor), do: read(id, actor)
 
@@ -105,8 +127,8 @@ defmodule SdrAgent.Agents.ReleasedOutput do
         {:ok, %ModelInvocation{parsed_output: %Ash.ForbiddenField{}}} ->
           {:error, :result_not_released}
 
-        {:ok, %ModelInvocation{parsed_output: output}} ->
-          {:ok, output}
+        {:ok, %ModelInvocation{} = row} ->
+          {:ok, row}
 
         {:ok, nil} ->
           {:error, :not_found}
@@ -140,7 +162,7 @@ defmodule SdrAgent.Agents.ReleasedOutput do
   defp output(invocation) do
     if gated?(invocation) and not released?(invocation),
       do: {:error, :result_not_released},
-      else: {:ok, invocation.parsed_output}
+      else: {:ok, invocation}
   end
 
   defp released?(invocation) do
