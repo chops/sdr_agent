@@ -6,6 +6,16 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
     1. Statically: an allowed disposition/reason pair
        (`ModelResultRelease.allowed_pair?/2`); `evidence_sha256` present for
        `:calibration` and absent otherwise; a link for `:released`.
+       The D-237 runtime partition (interfaces r6 IF-4) follows the context
+       check, before any read: in prototype runtime `:released` is refused;
+       `:released_unverified` and `:prototype_authority_refused` are refused
+       outside it; `:released_unverified` is refused outside the prototype
+       gate's own Prelocked context; a caller-built `basis` or
+       `basis_sha256` is refused on every other decision;
+       `prototype_authority_refused` carries exactly one
+       `prototype_refusal` code (refused on any other reason); the
+       `:reconciled` classification only with the code
+       `witness_mode_mismatch`.
     2. Before the insert, with no row lock requested after the chain head
        (the event is appended in an after-action hook): the invocation is
        re-read **in the release's tenant** and locked `FOR SHARE`, then the
@@ -16,9 +26,27 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
        included, matches) they are read with no lock clause; a refused
        context writes nothing.
        When the invocation already has a release, nothing else is checked:
-       the upsert returns that row and step 4 compares it.
+       the upsert returns that row and step 4 compares it. D-237 b2c β: a
+       `:released_unverified` request on an existing `released_unverified`
+       release is first compared with the ORIGINAL event's arguments
+       (`SdrAgent.Prototype.ReleasedScope.original_basis/2`,
+       `SdrAgent.Prototype.Basis.compare_existing/2`): identical is a
+       replay, a valid different basis a `ReleaseConflict`, anything
+       invalid is refused on `:basis` ("must be a valid d237-basis/1 with
+       its digest"); never the current grant or window. That original is
+       fully historically verified first (B1): an invalid original is
+       refused on `:basis`, never a replay or a `ReleaseConflict`.
     3. Per disposition (any validated link's projection and method are
        copied onto the release, whatever the disposition):
+       * D-237 b2c α, a NEW `:released_unverified` in the prototype gate's
+         own context: its instant is the context's bound `decided_at` (the
+         gate's one under-head clock read) or else this action's own, set
+         on the row; the supplied `basis` and `basis_sha256` must pass
+         `SdrAgent.Prototype.Basis.verify_new/2` against the basis rebuilt
+         from the boot snapshot, the compiled entries, the invocation, its
+         run, its charged grant and that instant, else it is refused on
+         `:basis` ("must be a valid d237-basis/1 with its digest"); a read
+         error keeps its identity;
        * `:released` / `:withheld`: a completed generation-2 ClaudeCLI
          invocation of a non-`:proof` run; `:released` also needs a `:valid`
          output and a link that is this invocation's current, reconciled
@@ -59,6 +87,9 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
   @terminal [:completed, :failed, :unknown]
   @fingerprint [:disposition, :reason, :wire_witness_link_id, :evidence_sha256]
+  # D-237: prototype runtime exists only in builds with the prototype
+  # authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @impl true
   def change(changeset, _opts, _context) do
@@ -110,6 +141,7 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
     with {:ok, mode} <- lock_mode(changeset.context, ids),
          :ok <- check_gate_cause(changeset, mode),
+         :ok <- prototype_rules(changeset, mode),
          {:ok, invocation} <- fetch(ModelInvocation, get.(:model_invocation_id), tenant_id, mode),
          {:ok, link} <- fetch_link(get.(:wire_witness_link_id), tenant_id, mode) do
       changeset =
@@ -119,13 +151,21 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
 
       case existing(invocation) do
         # The upsert returns the existing row; `check_replay/2` compares it.
+        # D-237 b2c β: a released_unverified request on an existing
+        # released_unverified release is first compared with its ORIGINAL
+        # event (`unverified_existing/2`).
         :exists ->
-          provenance(changeset, link)
+          changeset
+          |> unverified_existing(invocation)
+          |> provenance(link)
 
         # Every disposition with a validated link records the link's
         # evaluated projection and method (item 5, code review MF2).
+        # D-237 α: a NEW released_unverified decision is checked against the
+        # basis rebuilt from the locked facts first.
         :none ->
           changeset
+          |> unverified_new(invocation, mode)
           |> check_disposition(get.(:disposition), invocation, link)
           |> check_link(invocation, link)
           |> provenance(link)
@@ -168,6 +208,262 @@ defmodule SdrAgent.Agents.Changes.ReleaseDecision do
       true -> {:error, :gate_cause_id, "must be the finalizer's selected receipt"}
     end
   end
+
+  ## D-237 runtime partition (interfaces r6 IF-4; amendment item 5)
+
+  # In prototype runtime the ordinary :released decision is unreachable;
+  # the prototype values are decided only in prototype runtime. A
+  # released_unverified decision is refused outside the prototype gate's own
+  # Prelocked context (finalizer :prototype_gate); inside it, its closed
+  # basis (d237-basis/1) is checked after the existing-release read. A
+  # prototype_authority_refused decision carries exactly one closed code,
+  # and only it may record the :reconciled classification, with the code
+  # witness_mode_mismatch (Codex 2c9450b7 ruling 3b).
+  defp prototype_rules(changeset, mode) do
+    disposition = Ash.Changeset.get_attribute(changeset, :disposition)
+    reason = Ash.Changeset.get_attribute(changeset, :reason)
+    code = Ash.Changeset.get_argument(changeset, :prototype_refusal)
+    classification = Ash.Changeset.get_argument(changeset, :gate_classification)
+
+    with :ok <- runtime_partition(disposition, reason),
+         :ok <- unverified(disposition, mode),
+         :ok <- no_basis(disposition, changeset),
+         :ok <- refusal_code(reason, code) do
+      reconciled(classification, {reason, code})
+    end
+  end
+
+  # D-237 RED-b2c deny-only (Codex 3122b0d4): a caller-built basis is never
+  # recorded on any other decision. Value-free: the refusal names the field
+  # only. (A released_unverified decision is still refused above.)
+  defp no_basis(disposition, changeset) do
+    supplied? =
+      not is_nil(Ash.Changeset.get_argument(changeset, :basis)) or
+        not is_nil(Ash.Changeset.get_argument(changeset, :basis_sha256))
+
+    if supplied? and disposition != :released_unverified,
+      do: {:error, :basis, "is recorded only for a released_unverified decision"},
+      else: :ok
+  end
+
+  if @prototype_compiled do
+    @basis_refused "must be a valid d237-basis/1 with its digest"
+
+    # D-237 α (correction r2 N1/N2; boundary delta a7bbcac3): a NEW
+    # released_unverified decision in the prototype gate's own context. Its
+    # instant is the context's bound `decided_at` (the gate's one under-head
+    # Clock read) or, without one, this action's own instant, forced onto the
+    # row so that the row and the basis agree. The supplied basis is only
+    # compared with the one rebuilt from the facts; never trusted.
+    defp unverified_new(changeset, invocation, {:prelocked, %Prelocked{} = context}) do
+      if Ash.Changeset.get_attribute(changeset, :disposition) == :released_unverified and
+           context.finalizer == :prototype_gate,
+         do: check_basis(changeset, invocation, context),
+         else: changeset
+    end
+
+    defp unverified_new(changeset, _invocation, _mode), do: changeset
+
+    # D-237 b2c β (packet r1 section 3.5, delta r2 section 1): a
+    # released_unverified request on an EXISTING release (reached only in
+    # the gate's own context, `unverified/2`). An existing release that is
+    # not released_unverified keeps `check_replay/2`'s ReleaseConflict. For
+    # a released_unverified one the request is compared with the ORIGINAL
+    # event's arguments (`ReleasedScope.original_basis/2`), never re-derived
+    # from the current grant or window and never time-forced: identical is
+    # a replay (the upsert returns the row, no event), a valid different
+    # basis is a ReleaseConflict, anything invalid is refused on :basis; a
+    # read error keeps its identity. The original is fully historically
+    # verified by `original_basis/2` (B1), so an invalid one is refused.
+    defp unverified_existing(changeset, invocation) do
+      if Ash.Changeset.get_attribute(changeset, :disposition) == :released_unverified,
+        do: compare_original(changeset, invocation),
+        else: changeset
+    end
+
+    defp compare_original(changeset, invocation) do
+      requested = %{
+        basis: Ash.Changeset.get_argument(changeset, :basis),
+        basis_sha256: Ash.Changeset.get_argument(changeset, :basis_sha256)
+      }
+
+      case existing_release(invocation) do
+        {:ok, %ModelResultRelease{disposition: :released_unverified} = release} ->
+          release
+          |> SdrAgent.Prototype.ReleasedScope.original_basis(invocation)
+          |> compared(requested, release, changeset)
+
+        {:ok, %ModelResultRelease{}} ->
+          changeset
+
+        {:ok, nil} ->
+          invalid(changeset, :basis, @basis_refused)
+
+        {:error, error} ->
+          Ash.Changeset.add_error(changeset, error)
+      end
+    end
+
+    defp compared({:ok, original}, requested, release, changeset) do
+      case SdrAgent.Prototype.Basis.compare_existing(requested, original) do
+        :replay ->
+          changeset
+
+        :conflict ->
+          Ash.Changeset.add_error(
+            changeset,
+            ReleaseConflict.exception(
+              model_invocation_id: release.model_invocation_id,
+              existing_id: release.id,
+              existing_cause_id: nil
+            )
+          )
+
+        {:error, :basis_invalid} ->
+          invalid(changeset, :basis, @basis_refused)
+      end
+    end
+
+    defp compared({:error, :basis_invalid}, _requested, _release, changeset),
+      do: invalid(changeset, :basis, @basis_refused)
+
+    defp compared({:error, error}, _requested, _release, changeset),
+      do: Ash.Changeset.add_error(changeset, error)
+
+    # A plain read (no lock clause) of the invocation's existing release.
+    defp existing_release(invocation) do
+      ModelResultRelease
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(invocation.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^invocation.tenant_id and model_invocation_id == ^invocation.id
+      )
+      |> Ash.read_one()
+    end
+
+    defp check_basis(changeset, invocation, context) do
+      at = decision_instant(changeset, context)
+      changeset = Ash.Changeset.force_change_attribute(changeset, :decided_at, at)
+
+      supplied = %{
+        basis: Ash.Changeset.get_argument(changeset, :basis),
+        basis_sha256: Ash.Changeset.get_argument(changeset, :basis_sha256)
+      }
+
+      with {:ok, facts} <- basis_facts(invocation, at),
+           :ok <- SdrAgent.Prototype.Basis.verify_new(supplied, facts) do
+        changeset
+      else
+        {:error, :basis_invalid} ->
+          invalid(changeset, :basis, @basis_refused)
+
+        {:error, :not_prototype_runtime} ->
+          invalid(changeset, :disposition, "is decided only in prototype runtime")
+
+        {:error, error} ->
+          Ash.Changeset.add_error(changeset, error)
+      end
+    end
+
+    defp decision_instant(_changeset, %Prelocked{decided_at: %DateTime{} = bound}), do: bound
+
+    defp decision_instant(changeset, _context),
+      do: Ash.Changeset.get_attribute(changeset, :decided_at) || SdrAgent.Clock.utc_now()
+
+    # The server's facts at `at`: the boot snapshot, the compiled entries,
+    # the stored invocation, its run and its charged grant (plain reads with
+    # no lock clause: the gate's own context holds the locks).
+    defp basis_facts(invocation, at) do
+      with {:ok, snapshot} <- SdrAgent.Prototype.binding(),
+           {:ok, entry} <- SdrAgent.Prototype.policy_entry(),
+           {:ok, funding} <- SdrAgent.Prototype.funding_entry(),
+           {:ok, run} <- plain(AgentRun, invocation.agent_run_id, invocation.tenant_id),
+           {:ok, grant} <-
+             plain(SdrAgent.Agents.ModelCallGrant, invocation.grant_id, invocation.tenant_id) do
+        {:ok,
+         %{
+           snapshot: snapshot,
+           entry: entry,
+           funding: funding,
+           invocation: invocation,
+           run: run,
+           grant: grant,
+           decided_at: at
+         }}
+      end
+    end
+
+    # An absent row is a named absence (no basis can be rebuilt); a read
+    # error keeps its identity.
+    defp plain(resource, id, tenant_id) when is_binary(id) do
+      resource
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+      |> Ash.Query.filter(id == ^id and tenant_id == ^tenant_id)
+      |> Ash.read_one()
+      |> case do
+        {:ok, nil} -> {:error, :basis_invalid}
+        result -> result
+      end
+    end
+
+    defp plain(_resource, _id, _tenant_id), do: {:error, :basis_invalid}
+  else
+    # The production build has no prototype runtime: nothing to check here.
+    defp unverified_new(changeset, _invocation, _mode), do: changeset
+    defp unverified_existing(changeset, _invocation), do: changeset
+  end
+
+  if @prototype_compiled do
+    defp runtime_partition(disposition, reason) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> prototype_partition(disposition)
+        _ordinary -> ordinary_partition(disposition, reason)
+      end
+    end
+
+    defp prototype_partition(:released),
+      do: {:error, :disposition, "the ordinary release is unreachable in prototype runtime"}
+
+    defp prototype_partition(_disposition), do: :ok
+  else
+    # The production build has no prototype runtime.
+    defp runtime_partition(disposition, reason), do: ordinary_partition(disposition, reason)
+  end
+
+  defp ordinary_partition(disposition, reason)
+       when disposition == :released_unverified or reason == :prototype_authority_refused,
+       do: {:error, :disposition, "is decided only in prototype runtime"}
+
+  defp ordinary_partition(_disposition, _reason), do: :ok
+
+  # Allowed only in the prototype gate's own context; its basis is checked
+  # after the existing-release read (`unverified_new/3`, `unverified_existing/1`).
+  defp unverified(:released_unverified, {:prelocked, %Prelocked{finalizer: :prototype_gate}}),
+    do: :ok
+
+  defp unverified(:released_unverified, _mode),
+    do: {:error, :disposition, "is decided only by the prototype gate's own context"}
+
+  defp unverified(_disposition, _mode), do: :ok
+
+  defp refusal_code(:prototype_authority_refused, code) do
+    if code in ModelResultRelease.prototype_codes(),
+      do: :ok,
+      else: {:error, :prototype_refusal, "must be one prototype refusal code"}
+  end
+
+  defp refusal_code(_reason, nil), do: :ok
+
+  defp refusal_code(_reason, _code),
+    do: {:error, :prototype_refusal, "is recorded only for a prototype refusal"}
+
+  defp reconciled(:reconciled, {:prototype_authority_refused, :witness_mode_mismatch}), do: :ok
+
+  defp reconciled(:reconciled, _refusal),
+    do:
+      {:error, :gate_classification,
+       "reconciled is recorded only by the prototype gate's witness_mode_mismatch refusal"}
+
+  defp reconciled(_classification, _refusal), do: :ok
 
   # The receipt, when bound, is this invocation's reconciliation cause.
   defp check_receipt(%Prelocked{receipt_id: nil}), do: :ok

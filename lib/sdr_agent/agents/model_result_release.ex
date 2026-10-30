@@ -30,8 +30,11 @@ defmodule SdrAgent.Agents.ModelResultRelease do
       `:owner_prototype_unverified` with no link, projection, method or
       evidence (the `model_result_releases_pair` CHECK), and the withheld
       reason `:prototype_authority_refused` (`prototype_withheld_reasons/0`,
-      codes `prototype_codes/0`). `allowed_pair?/2` and the decision
-      behaviour for them are S2's and not yet in place.
+      codes `prototype_codes/0`). A `:released_unverified` decision is made
+      only by the prototype gate's own context, with its closed
+      `d237-basis/1` (`basis`, `basis_sha256`), and appends one
+      `model.result.released_unverified` event recording exactly those two
+      arguments (`SdrAgent.Agents.Changes.ReleaseDecision`).
 
   `:released` and `:withheld` need a completed generation-2 ClaudeCLI
   invocation outside a `:proof` run. The invocation is never updated for
@@ -122,6 +125,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
     context_links: [agent_run_id: :model_result_release_agent_run_id],
     arguments: [:gate_cause_id, :gate_classification]
   ]
+  # D-237 IF-4: a prototype refusal's withheld event also records its closed
+  # code (`@prototype_codes`).
+  @refusal_event Keyword.put(@event, :arguments, [
+                   :gate_cause_id,
+                   :gate_classification,
+                   :prototype_refusal
+                 ])
+  # D-237 (amendment item 6): a released_unverified decision's one event
+  # records exactly its closed `d237-basis/1` and that basis's SHA256.
+  @unverified_event Keyword.put(@event, :arguments, [:basis, :basis_sha256])
 
   postgres do
     table "model_result_releases"
@@ -230,6 +243,28 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         constraints one_of: @gate_classifications
       end
 
+      # D-237 IF-4 (amendment item 5): the closed code of a
+      # prototype_authority_refused decision (SdrAgent.Prototype.Release);
+      # ReleaseDecision requires it there and refuses it anywhere else.
+      argument :prototype_refusal, :atom do
+        constraints one_of: @prototype_codes
+      end
+
+      # D-237 (Codex 3122b0d4; b2c α): the caller-built d237-basis/1 and its
+      # digest, untrusted input, redacted from any inspection. ReleaseDecision
+      # accepts them only for a NEW released_unverified decision in the
+      # prototype gate's own context, and only when they equal the basis it
+      # rebuilds from the locked facts (`SdrAgent.Prototype.Basis`); they are
+      # refused on every other decision. The decision's one event records
+      # exactly these two arguments.
+      argument :basis, :map do
+        sensitive? true
+      end
+
+      argument :basis_sha256, :string do
+        sensitive? true
+      end
+
       change SdrAgent.Audit.Changes.SetTenant
       change SdrAgent.Audit.Changes.TraceIds
       change SdrAgent.Agents.Changes.ReleaseDecision
@@ -238,10 +273,22 @@ defmodule SdrAgent.Agents.ModelResultRelease do
         where: [attribute_equals(:disposition, :released)]
 
       change {AppendEvent, [event_type: "model.result.withheld"] ++ @event},
-        where: [attribute_equals(:disposition, :withheld)]
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_does_not_equal(:reason, :prototype_authority_refused)
+        ]
+
+      change {AppendEvent, [event_type: "model.result.withheld"] ++ @refusal_event},
+        where: [
+          attribute_equals(:disposition, :withheld),
+          attribute_equals(:reason, :prototype_authority_refused)
+        ]
 
       change {AppendEvent, [event_type: "model.result.calibration"] ++ @event},
         where: [attribute_equals(:disposition, :calibration)]
+
+      change {AppendEvent, [event_type: "model.result.released_unverified"] ++ @unverified_event},
+        where: [attribute_equals(:disposition, :released_unverified)]
     end
   end
 
@@ -338,8 +385,16 @@ defmodule SdrAgent.Agents.ModelResultRelease do
   @doc "The typed classifications of a withheld gate outcome (R0-07 slice C, G2)."
   def gate_classifications, do: @gate_classifications
 
-  @doc "Whether `{disposition, reason}` is an allowed pair."
+  @doc """
+  Whether `{disposition, reason}` is an allowed pair. D-237 (amendment
+  items 5 and 6): `:released_unverified` pairs only with
+  `:owner_prototype_unverified`, and `:withheld` also pairs with
+  `:prototype_authority_refused`; neither new value pairs with an ordinary
+  one. This is the static pair rule only.
+  """
   def allowed_pair?(:released, :reconciled), do: true
+  def allowed_pair?(:released_unverified, :owner_prototype_unverified), do: true
+  def allowed_pair?(:withheld, :prototype_authority_refused), do: true
   def allowed_pair?(:withheld, reason), do: reason in @withheld_reasons
   def allowed_pair?(:calibration, :calibration), do: true
   def allowed_pair?(_disposition, _reason), do: false

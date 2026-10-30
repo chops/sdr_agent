@@ -104,6 +104,9 @@ defmodule SdrAgent.Agents.ResultGate do
   defp config, do: Application.get_env(:sdr_agent, __MODULE__, [])
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  # D-237: the prototype gate exists only in builds with the prototype
+  # authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   # Test-seam builds only (`:claude_cli_test_seams`, config/test.exs): a
   # `before_gate: fun/1` in this module's Application env runs on the
@@ -194,6 +197,8 @@ defmodule SdrAgent.Agents.ResultGate do
   run}`, or `{:error, reason}` — no business output, the run left
   recoverable by `SdrAgent.SDR.StaleRunSweeper`.
 
+  In prototype runtime a refused finalization is returned unchanged (D-237 TF-1).
+
   C2* operation snapshot entry `:result_gate` (ADR-0005 C2* item 2): it
   inherits from the owning action, or owns when top-level.
   """
@@ -214,9 +219,22 @@ defmodule SdrAgent.Agents.ResultGate do
   defp finalized(invocation, gate, outcome, opts) do
     case finalize(invocation, gate, outcome, opts) do
       {:error, reason} when reason in @final -> {:error, reason}
-      {:error, _refused} -> __MODULE__.Recovery.run(invocation, gate, opts)
+      {:error, _refused} = refused -> after_refused(refused, invocation, gate, opts)
       result -> result
     end
+  end
+
+  if @prototype_compiled do
+    # D-237 TF-1 (Codex eff38bd0): in prototype runtime a refused or failed
+    # finalization (recheck_failed included) is returned unchanged.
+    defp after_refused(refused, invocation, gate, opts) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: refused,
+        else: __MODULE__.Recovery.run(invocation, gate, opts)
+    end
+  else
+    defp after_refused(_refused, invocation, gate, opts),
+      do: __MODULE__.Recovery.run(invocation, gate, opts)
   end
 
   @doc """
@@ -225,7 +243,9 @@ defmodule SdrAgent.Agents.ResultGate do
   or withheld (REQ-07-5/6; review MF5). The
   workers never turn such a run into a success or a `:crash`; it is left
   for the gate or for run recovery (`SdrAgent.SDR.StaleRunSweeper`). A read
-  error counts as unreleased (fail closed).
+  error counts as unreleased (fail closed). In prototype runtime a verified
+  `released_unverified` release counts as released
+  (`unreleased_invocations/1`).
   """
   @spec unreleased?(struct()) :: boolean()
   def unreleased?(%AgentRun{} = run) do
@@ -239,6 +259,17 @@ defmodule SdrAgent.Agents.ResultGate do
   The run's completed generation-2 ClaudeCLI invocations with no `:released`
   release, in call order: undecided ones, and withheld ones whose run has
   not been stopped yet (review MF5). The callers ask only about running runs.
+
+  **D-237 b2d (mechanism note r3 section A, "Consumers").** In prototype
+  runtime each of them is then checked, in call order, by
+  `SdrAgent.Prototype.ReleasedScope.run/3` as the run tenant's kernel
+  actor, with a function that reads nothing: it leaves the list only when
+  the scope verifies its `released_unverified` release (the fully
+  historically verified original, then current use). A refusal
+  (`:not_found`, `:not_released`, `:basis_invalid`, `:binding_mismatch`)
+  keeps it; any other error is the list's `{:error, error}`, unchanged.
+  Nothing is written and no output is read. Ordinary runtime is unchanged;
+  the production build has the filter only.
   """
   @spec unreleased_invocations(struct()) :: {:ok, [struct()]} | {:error, term()}
   def unreleased_invocations(%AgentRun{id: run_id, tenant_id: tenant_id}) do
@@ -251,8 +282,44 @@ defmodule SdrAgent.Agents.ResultGate do
     )
     |> Ash.Query.sort(sequence_in_run: :asc)
     |> Ash.read()
+    |> verified_unreleased(tenant_id)
   rescue
     error -> {:error, error}
+  end
+
+  if @prototype_compiled do
+    # D-237 b2d: the closed refusals of ReleasedScope.run/3; each keeps the
+    # invocation unreleased. Any other error is technical and ends the list.
+    @scope_refusals [:not_found, :not_released, :basis_invalid, :binding_mismatch]
+
+    defp verified_unreleased({:ok, invocations}, tenant_id) do
+      if SdrAgent.Prototype.runtime() == :prototype,
+        do: unverified(invocations, Actor.system(:kernel, tenant_id), []),
+        else: {:ok, invocations}
+    end
+
+    defp verified_unreleased(error, _tenant_id), do: error
+
+    # In call order; the verifier's function reads nothing.
+    defp unverified([], _actor, kept), do: {:ok, Enum.reverse(kept)}
+
+    defp unverified([invocation | rest], actor, kept) do
+      invocation
+      |> SdrAgent.Prototype.ReleasedScope.run(actor, fn _scope -> :verified end)
+      |> case do
+        {:ok, :verified} ->
+          unverified(rest, actor, kept)
+
+        {:error, reason} when reason in @scope_refusals ->
+          unverified(rest, actor, [invocation | kept])
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+  else
+    # The production build has no prototype runtime: the filter only.
+    defp verified_unreleased(result, _tenant_id), do: result
   end
 
   ## Finalize (step 3)
@@ -269,11 +336,38 @@ defmodule SdrAgent.Agents.ResultGate do
   never a release). Returns
   `{:released, release, output}`, `{:withheld, release, run}` or
   `{:error, reason}` (nothing written).
+
+  **D-237 (interfaces r6 IF-4).** At its head, in prototype runtime, it
+  dispatches with the same four arguments to the prototype gate's own
+  decision (`SdrAgent.Prototype.Release`, referenced only here) and never
+  falls back to the ordinary branches below; `:interrupted` and `:timeout`
+  never release there either.
+  The dispatch is compiled only with the prototype authority
+  (`:prototype_authority_compiled`); the production build has the ordinary
+  branches only.
   """
-  @spec finalize(struct(), map(), {:ok | :timeout, map()}, keyword()) ::
+  @spec finalize(struct(), map(), {:ok | :timeout | :interrupted, map()}, keyword()) ::
           {:released, struct(), term()} | {:withheld, struct(), struct()} | {:error, term()}
-  def finalize(invocation, gate, {kind, receipt}, opts \\ [])
-      when kind in [:ok, :timeout, :interrupted] do
+  def finalize(invocation, gate, outcome, opts \\ [])
+
+  def finalize(invocation, gate, {kind, _receipt} = outcome, opts)
+      when kind in [:ok, :timeout, :interrupted],
+      do: dispatch_finalize(invocation, gate, outcome, opts)
+
+  if @prototype_compiled do
+    defp dispatch_finalize(invocation, gate, outcome, opts) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Release.finalize(invocation, gate, outcome, opts)
+        _ordinary -> ordinary_finalize(invocation, gate, outcome, opts)
+      end
+    end
+  else
+    # The production build has no prototype runtime: the ordinary gate only.
+    defp dispatch_finalize(invocation, gate, outcome, opts),
+      do: ordinary_finalize(invocation, gate, outcome, opts)
+  end
+
+  defp ordinary_finalize(invocation, gate, {kind, receipt}, opts) do
     plan = plan(kind, receipt)
     actor = Actor.system(:agent_runtime, invocation.tenant_id)
     guard = Keyword.get(opts, :guard, fn _run -> :ok end)
@@ -373,18 +467,20 @@ defmodule SdrAgent.Agents.ResultGate do
     not superseded?
   end
 
+  @doc false
   # The exact selected cause, locked FOR UPDATE before the head (live or
   # resolved): the receipt's for a mismatch or a reconcile-opened reason;
   # for a gate-opened reason (timeout), the deduplicated existing gate cause.
-  defp select_cause(%{release?: true}, _receipt, _invocation, _run), do: {:ok, nil}
+  # Also the prototype gate's selection for its non-mismatch outcomes.
+  def select_cause(%{release?: true}, _receipt, _invocation, _run), do: {:ok, nil}
 
-  defp select_cause(%{reason: :witness_mismatch}, receipt, invocation, run),
+  def select_cause(%{reason: :witness_mismatch}, receipt, invocation, run),
     do: mismatch_cause(receipt, invocation, run)
 
-  defp select_cause(%{reason: :witness_timeout} = plan, _receipt, invocation, run),
+  def select_cause(%{reason: :witness_timeout} = plan, _receipt, invocation, run),
     do: existing_gate_cause(plan.reason, invocation, run)
 
-  defp select_cause(plan, receipt, invocation, run) do
+  def select_cause(plan, receipt, invocation, run) do
     case usable(receipt.cause_id, invocation, run, :warning) do
       {:ok, cause} -> {:ok, cause}
       :none -> existing_gate_cause(plan.reason, invocation, run)
@@ -491,6 +587,13 @@ defmodule SdrAgent.Agents.ResultGate do
       gate_cause_id: cause.id,
       gate_classification: plan.classification
     }
+
+    # D-237: a prototype refusal records its closed code.
+    attrs =
+      case Map.get(plan, :prototype_refusal) do
+        nil -> attrs
+        code -> Map.put(attrs, :prototype_refusal, code)
+      end
 
     with {:ok, release} <- Agents.decide_result_release(attrs, actor: actor, prelocked: prelocked),
          {:ok, run} <- stop(run, release, cause, plan, actor, prelocked) do

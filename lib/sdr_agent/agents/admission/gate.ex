@@ -52,6 +52,16 @@ defmodule SdrAgent.Agents.Admission.Gate do
   Ordinary admission never reads a per-call witness override or the test
   override switch: there is no caller, job or runtime flag that admits an
   ordinary call.
+
+  **D-237 partition (interfaces r6 IF-4; amendment item 4).** Both entry
+  points dispatch on `SdrAgent.Prototype.runtime/0` before any scope or
+  eligibility check: in prototype runtime only the prototype path
+  (`SdrAgent.Prototype.Admission`) exists, and its refusal
+  `:prototype_not_authorized` (with its check) never falls back to the
+  ordinary checks above.
+  The dispatch is compiled only with the prototype authority
+  (`:prototype_authority_compiled`); the production build has the ordinary
+  checks only.
   """
 
   require Ash.Query
@@ -69,10 +79,14 @@ defmodule SdrAgent.Agents.Admission.Gate do
     :witness_store_untrusted,
     :calibration_not_authorized,
     :calibration_evidence_pending,
-    :calibration_grant_mismatch
+    :calibration_grant_mismatch,
+    :prototype_not_authorized
   ]
   @tuple_keys ~w(cli_version method model_id profile_id projection_version provider)
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  # D-237: the prototype runtime and its gate exist only in builds with the
+  # prototype authority (config/dev.exs and config/test.exs).
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @doc """
   The admission refusal reasons (packet section 2, Admission row; with
@@ -118,14 +132,25 @@ defmodule SdrAgent.Agents.Admission.Gate do
 
   @doc """
   The gate before reservation, under the reservation's locks and after the
-  admission instant, for a call of the reviewed real `profile_id` in the
-  locked `run`: the runtime identity checked is the profile's reviewed one
-  (CLI version, resolved model; row B2). `observation` is
+  admission instant, for the `call` (`%{profile_id:, purpose:}`: the
+  reviewed real profile and the call's purpose, passed explicitly; D-237
+  P1) in the locked `run`. In prototype runtime it is
+  `SdrAgent.Prototype.Admission.reservation/4` only (D-237 IF-4: no
+  ordinary fallback). Otherwise the runtime identity checked is the
+  profile's reviewed one (CLI version, resolved model; row B2). `observation` is
   `observe_store/0`'s result and `authority` the calibration marker's scope
   (or nil). Returns `{:ok, calibration_tuple}` (the recorded tuple of an
   authorized calibration call, else nil) or `{:error, reason, check}`.
   """
-  def admit_reservation(run, profile_id, observation, authority) do
+  def admit_reservation(
+        run,
+        %{profile_id: _profile_id, purpose: _purpose} = call,
+        observation,
+        authority
+      ),
+      do: dispatch_reservation(run, call, observation, authority)
+
+  defp ordinary_reservation(run, profile_id, observation, authority) do
     {:ok, profile} = ModelProfiles.fetch_real(profile_id)
 
     identity = %{
@@ -148,12 +173,41 @@ defmodule SdrAgent.Agents.Admission.Gate do
 
   @doc """
   The gate at launch, under the launch's locks and head, for the owned
-  reserved `invocation` of the locked `run`: the same checks against the
+  reserved `invocation` of the locked `run`. In prototype runtime it is
+  `SdrAgent.Prototype.Admission.launch/3` only. Otherwise the same checks against the
   invocation's recorded identity, with the calibration authority
   re-derived from its one original reservation event. Returns `:ok` or
   `{:error, reason, check}`.
   """
-  def admit_launch(run, invocation, observation) do
+  def admit_launch(run, invocation, observation),
+    do: dispatch_launch(run, invocation, observation)
+
+  ## The runtime partition (D-237 IF-4)
+
+  if @prototype_compiled do
+    defp dispatch_reservation(run, call, observation, authority) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Admission.reservation(run, call, observation, authority)
+        _ordinary -> ordinary_reservation(run, call.profile_id, observation, authority)
+      end
+    end
+
+    defp dispatch_launch(run, invocation, observation) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype -> SdrAgent.Prototype.Admission.launch(run, invocation, observation)
+        _ordinary -> ordinary_launch(run, invocation, observation)
+      end
+    end
+  else
+    # The production build has no prototype runtime: the ordinary gate only.
+    defp dispatch_reservation(run, call, observation, authority),
+      do: ordinary_reservation(run, call.profile_id, observation, authority)
+
+    defp dispatch_launch(run, invocation, observation),
+      do: ordinary_launch(run, invocation, observation)
+  end
+
+  defp ordinary_launch(run, invocation, observation) do
     identity =
       Map.take(invocation, [
         :provider,
@@ -423,6 +477,21 @@ defmodule SdrAgent.Agents.Admission.Gate do
     do: if(Map.has_key?(payload, "arguments"), do: :error, else: {:ok, %{}})
 
   defp arguments(_event), do: :error
+
+  @doc """
+  The D-237 `prototype_authority` recorded by the same one original
+  reservation event (interfaces r6 IF-4): `{:ok, map}`, or `:error` when the
+  event is missing or duplicated, or records no map.
+  """
+  def recorded_prototype_authority(invocation) do
+    with {:ok, event} <- original_reservation(invocation),
+         {:ok, arguments} <- arguments(event),
+         %{} = authority <- arguments["prototype_authority"] do
+      {:ok, authority}
+    else
+      _missing_duplicate_or_malformed -> :error
+    end
+  end
 
   @doc """
   The G-R0 binding recorded by the same one original reservation event
