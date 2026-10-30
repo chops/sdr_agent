@@ -134,6 +134,9 @@ defmodule SdrAgent.Prototype.Session do
     # callers enter through `enter/1` with `enqueue?: true`.
     @spec start_insert_only_oban() :: :ok
     def start_insert_only_oban do
+      # A cold terminal has loaded configuration only: Oban.Registry belongs
+      # to the :oban application, which no other entry step starts.
+      {:ok, _started} = Application.ensure_all_started(:oban)
       config = insert_only_config(Application.fetch_env!(:sdr_agent, Oban))
 
       case Supervisor.start_link([{Oban, config}], strategy: :one_for_one) do
