@@ -40,8 +40,17 @@ Seed's write remains a stub: a later refusal leaves the phase-2 binding
 a seed or model grant. No product tree, model call or outreach is started
 by setup, and no stop-on-return or caller-death timing promise is added.
 
-The `op` task's `run/1` remains `not_implemented`; other prototype-task launch
-wiring remains planned and dashed. Solid import/setup edges denote installed
+`sdr.prototype.op` and `sdr.prototype.serve` also wire the terminal route
+(D-268 M7). Only `op assign` executes; its other commands stay
+`not_implemented`. For `assign`, Session starts the `:oban` application
+(a cold `app.config` terminal has no `Oban.Registry`), then a task-local
+insert-only Oban instance with no queues, plugins, peer or stager; the job
+is only inserted and runs only in serve. The configured engine is
+`Oban.Engines.Basic`. `ClosedErrorEngine` delegates its callbacks to Basic,
+but it is not wired as the engine under D-256 reduced containment, so its
+edge is dashed and conditional. Serve's preflight requires the ClaudeCLI
+provider and a free port 4120 before `app.start`. Other prototype-task
+launch wiring remains planned and dashed. Solid import/setup edges denote installed
 source, not real provisioning, successful import or imported rows. The measured A1
 harness route is separate: it starts OpenTelemetry **before** launch in a fresh
 no-start VM. The setup task's OpenTelemetry-after-prelude ordering still

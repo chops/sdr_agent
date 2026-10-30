@@ -17,6 +17,11 @@ flowchart TD
   Task -.->|VM shutdown is terminal residual for orphan helper| Helper
   Terminal[Wired: sdr.prototype.import run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
   SetupTerminal[Wired: sdr.prototype.setup run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  OpTerminal[Wired: sdr.prototype.op run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  ServeTerminal[Wired: sdr.prototype.serve run/1] -->|Mix app.config requirement; SafeLog.attach; TaskBoundary.launch/3| Launch
+  Session -->|op assign only: enqueue? true; ensure_all_started :oban| InsertOnly[Task-local insert-only Oban: no queues, plugins, peer or stager]
+  InsertOnly -->|configured engine| Basic[Oban.Engines.Basic]
+  ClosedEngine[ClosedErrorEngine] -.->|conditional, not wired under D-256: delegates callbacks| Basic
   Planned[Other prototype tasks: launch wiring planned] -.->|planned: attach then launch/3| Launch
   Harness[Measured A1 harness: fresh no-start VM] -->|SafeLog.attach, then TaskBoundary.launch/3| Launch[launch/3: admission, attach, entry guard]
   Launch -->|outermost only; any non-:ok is entry abort, no rollback| Eligible{E: pinned, Mix-launched, non-ExUnit, product-free VM}
