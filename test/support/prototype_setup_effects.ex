@@ -49,7 +49,7 @@ defmodule SdrAgent.PrototypeSetupEffects do
   @system_identifier 7_400_000_000_000_000_001
   # The pinned prototype data directory string (S4 IF-7 r2 §2; S1 I4 r2
   # §3): setup accepts a marker only for this path. Nothing reads it.
-  @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
+  @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237-5542/pgdata"
   @ids %{
     tenant: "0190f0f0-0000-7000-8000-000000000001",
     anchor: "0190f0f0-0000-7000-8000-000000000002",
@@ -169,8 +169,8 @@ defmodule SdrAgent.PrototypeSetupEffects do
       environment: %{mix_env: :dev, flag?: true, switch?: true, instance?: true, session?: true},
       repo_config: [
         database: "sdr_agent_prototype",
-        port: 5541,
-        socket_dir: "/private/tmp/d237-pg"
+        port: 5542,
+        socket_dir: "/private/tmp/d237-pg-5542"
       ],
       cluster_marker: {:ok, %{system_identifier: @system_identifier, data_dir: @data_dir}},
       maintenance_identity:

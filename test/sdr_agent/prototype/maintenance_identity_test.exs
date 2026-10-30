@@ -21,7 +21,7 @@ defmodule SdrAgent.Prototype.MaintenanceIdentityTest do
   alias SdrAgent.Prototype.Authority.TestSeam
   alias SdrAgent.PrototypeMaintenanceFake, as: Fake
 
-  @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
+  @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237-5542/pgdata"
   @id 7_400_000_000_000_000_001
   @facts %{database: "postgres", system_identifier: @id, data_directory: @data_dir}
 
@@ -29,8 +29,8 @@ defmodule SdrAgent.Prototype.MaintenanceIdentityTest do
     test "the target is the prototype socket, the maintenance database and the superuser" do
       assert Authority.maintenance_target() == [
                database: "postgres",
-               port: 5541,
-               socket_dir: "/private/tmp/d237-pg",
+               port: 5542,
+               socket_dir: "/private/tmp/d237-pg-5542",
                username: "postgres"
              ]
     end

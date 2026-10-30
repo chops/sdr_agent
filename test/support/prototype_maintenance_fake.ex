@@ -28,7 +28,7 @@ defmodule SdrAgent.PrototypeMaintenanceFake do
   @row [
     "postgres",
     7_400_000_000_000_000_001,
-    "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
+    "/Users/charles/.local/state/sdr-agent/prototype/d237-5542/pgdata"
   ]
 
   @doc "Starts the fake pool for `script`; see the moduledoc."

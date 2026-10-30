@@ -27,10 +27,10 @@ defmodule SdrAgent.Prototype.ClusterTest do
     :socket_dir_not_owned,
     :cluster_check_failed
   ]
-  @root "/Users/charles/.local/state/sdr-agent/prototype/d237"
+  @root "/Users/charles/.local/state/sdr-agent/prototype/d237-5542"
   @pg_bin "/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin"
   @good ~s({"system_identifier":"7400000000000000001","data_dir":"#{@root}/pgdata",) <>
-          ~s("socket_dir":"/private/tmp/d237-pg","port":5541,"binary":"#{@pg_bin}"}\n)
+          ~s("socket_dir":"/private/tmp/d237-pg-5542","port":5542,"binary":"#{@pg_bin}"}\n)
 
   test "the reason family is exactly the reviewed 11, in step order" do
     assert Cluster.reasons() == @reasons, "the reason family is not the reviewed list"
@@ -39,8 +39,8 @@ defmodule SdrAgent.Prototype.ClusterTest do
   test "the pinned facts equal bin/prototype-pg's constants" do
     assert Cluster.pinned() == %{
              root: @root,
-             socket_dir: "/private/tmp/d237-pg",
-             port: 5541,
+             socket_dir: "/private/tmp/d237-pg-5542",
+             port: 5542,
              pg_bin: @pg_bin
            },
            "the pinned facts differ from the script"
@@ -52,8 +52,8 @@ defmodule SdrAgent.Prototype.ClusterTest do
               %{
                 system_identifier: "7400000000000000001",
                 data_dir: @root <> "/pgdata",
-                socket_dir: "/private/tmp/d237-pg",
-                port: "5541",
+                socket_dir: "/private/tmp/d237-pg-5542",
+                port: "5542",
                 binary: @pg_bin
               }},
            "the exact template was not parsed to its field texts"
@@ -66,8 +66,8 @@ defmodule SdrAgent.Prototype.ClusterTest do
       @good <> "\n",
       @good <> @good,
       String.replace(@good, "\n", "\r\n"),
-      String.replace(@good, ~s("port":5541), ~s("port": 5541)),
-      String.replace(@good, ~s("port":5541), ~s("port":"5541")),
+      String.replace(@good, ~s("port":5542), ~s("port": 5542)),
+      String.replace(@good, ~s("port":5542), ~s("port":"5542")),
       String.replace(@good, "7400000000000000001", ""),
       String.replace(@good, "7400000000000000001", "123456789012345678901"),
       String.replace(@good, "7400000000000000001", "74000000000000000O1"),
@@ -129,7 +129,7 @@ defmodule SdrAgent.Prototype.ClusterTest do
   end
 
   test "paths_ok?: exact keys, absolute canonical paths, integer port" do
-    good = %{root: @root, socket_dir: "/private/tmp/d237-pg", port: 5541, pg_bin: @pg_bin}
+    good = %{root: @root, socket_dir: "/private/tmp/d237-pg-5542", port: 5542, pg_bin: @pg_bin}
     assert Cluster.paths_ok?(good) == true, "the pinned paths shape was refused"
 
     for {bad, index} <-
@@ -140,7 +140,7 @@ defmodule SdrAgent.Prototype.ClusterTest do
             %{good | root: @root <> "/"},
             %{good | root: "/Users/charles/../charles/d237"},
             %{good | root: "/Users/charles//d237"},
-            %{good | port: "5541"},
+            %{good | port: "5542"},
             %{good | port: 0},
             %{good | port: 65_536},
             %{good | pg_bin: :bin},

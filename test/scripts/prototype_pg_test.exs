@@ -25,7 +25,7 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
   refusing status and stop with nothing signalled; the logging GUCs written
   before the first start; a source check (no kill, rm, process listing or
   environment reads); and the doc/constant consistency check of ruling 3
-  (5520 is the ordinary service, 5541 the prototype socket).
+  (5520 is the ordinary service, 5542 the prototype socket).
   """
   use ExUnit.Case, async: true
 
@@ -34,14 +34,14 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
   @runtime_exs Path.expand("../../config/runtime.exs", __DIR__)
 
   @pinned_bin "/nix/store/zndqgdxn4p28iyax8raza3pfn7lkjw64-postgresql-18.6/bin"
-  @pinned_root "/Users/charles/.local/state/sdr-agent/prototype/d237"
-  @pinned_socket "/private/tmp/d237-pg"
+  @pinned_root "/Users/charles/.local/state/sdr-agent/prototype/d237-5542"
+  @pinned_socket "/private/tmp/d237-pg-5542"
   @constants [:PG_BIN, :ROOT, :SOCKET_DIR, :LSOF, :STAT]
 
   # Amendment item 7 "Server logs (D-118/5b)", set before the first start.
   @gucs [
     "listen_addresses = ''",
-    "port = 5541",
+    "port = 5542",
     "log_min_messages = fatal",
     "log_min_error_statement = panic",
     "log_statement = none",
@@ -165,7 +165,7 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
 
   defp expected_marker(ctx, sysid \\ @sysid) do
     ~s({"system_identifier":"#{sysid}","data_dir":"#{ctx.data}","socket_dir":"#{ctx.socket}",) <>
-      ~s("port":5541,"binary":"#{ctx.bin}"}\n)
+      ~s("port":5542,"binary":"#{ctx.bin}"}\n)
   end
 
   defp put_state!(ctx, name, value), do: File.write!(Path.join(ctx.state, name), value)
@@ -184,7 +184,7 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
   end
 
   defp socket_pair(ctx),
-    do: [Path.join(ctx.socket, ".s.PGSQL.5541"), Path.join(ctx.socket, ".s.PGSQL.5541.lock")]
+    do: [Path.join(ctx.socket, ".s.PGSQL.5542"), Path.join(ctx.socket, ".s.PGSQL.5542.lock")]
 
   # The derived copy: exactly the pinned constant lines replaced, nothing else.
   defp derive_script!(ctx) do
@@ -253,8 +253,8 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
               echo 'pg_ctl: no server running'; exit 3;;
       start) [ -f "$S/running" ] && exit 1
              : > "$S/running"; printf 'fake server started\\n' >> "$log"
-             : > '#{sock}/.s.PGSQL.5541'; : > '#{sock}/.s.PGSQL.5541.lock'; exit 0;;
-      stop) /bin/rm -f "$S/running" '#{sock}/.s.PGSQL.5541' '#{sock}/.s.PGSQL.5541.lock'; exit 0;;
+             : > '#{sock}/.s.PGSQL.5542'; : > '#{sock}/.s.PGSQL.5542.lock'; exit 0;;
+      stop) /bin/rm -f "$S/running" '#{sock}/.s.PGSQL.5542' '#{sock}/.s.PGSQL.5542.lock'; exit 0;;
       *) exit 1;;
     esac
     """)
@@ -305,7 +305,7 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
     assert text =~ ~r/^readonly PG_BIN='#{Regex.escape(@pinned_bin)}'$/m
     assert text =~ ~r/^readonly ROOT='#{Regex.escape(@pinned_root)}'$/m
     assert text =~ ~r/^readonly SOCKET_DIR='#{Regex.escape(@pinned_socket)}'$/m
-    assert text =~ ~r/^readonly PORT='5541'$/m
+    assert text =~ ~r/^readonly PORT='5542'$/m
   end
 
   test "the derived copy differs from the script in exactly the pinned constant lines", ctx do
@@ -576,13 +576,13 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
     assert_ok(run(ctx, ["start"]), "start")
   end
 
-  test "a TCP listener on 5541 refuses start", ctx do
+  test "a TCP listener on 5542 refuses start", ctx do
     seeded!(ctx)
 
     put_state!(
       ctx,
       "lsof_out",
-      "COMMAND PID USER FD TYPE\npostgres 1 x 7u IPv4 TCP *:5541 (LISTEN)\n"
+      "COMMAND PID USER FD TYPE\npostgres 1 x 7u IPv4 TCP *:5542 (LISTEN)\n"
     )
 
     before = snapshot(ctx)
@@ -611,7 +611,7 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
     {"death by a signal", [lsof_signal: ""]},
     {"success with an empty listing (exit 0)", [lsof_rc: "0"]},
     {"a listing on a failed status (exit 1)",
-     [lsof_rc: "1", lsof_out: "postgres 1 x 7u IPv4 TCP *:5541 (LISTEN)\n"]}
+     [lsof_rc: "1", lsof_out: "postgres 1 x 7u IPv4 TCP *:5542 (LISTEN)\n"]}
   ]
 
   for {label, state} <- @probe_failures do
@@ -680,15 +680,15 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
 
   # ------------------------------------------------------------------ ruling 3: project facts
 
-  test "ruling 3: the doc and the pinned constants agree (5520 ordinary, 5541 prototype socket)" do
+  test "ruling 3: the doc and the pinned constants agree (5520 ordinary, 5542 prototype socket)" do
     assert File.regular?(@doc_path), "docs/product/d237/prototype-runtime.md does not exist"
     doc = File.read!(@doc_path)
 
     assert doc =~ "5520" and doc =~ ~r/5520[^\n]*ordinary/i,
            "the doc does not state 5520 as the ordinary service"
 
-    assert doc =~ ~r/5541[^\n]*(socket|prototype)/i,
-           "the doc does not state 5541 as the prototype socket endpoint"
+    assert doc =~ ~r/5542[^\n]*(socket|prototype)/i,
+           "the doc does not state 5542 as the prototype socket endpoint"
 
     assert doc =~ @pinned_socket and doc =~ @pinned_root
     assert doc =~ "listen_addresses = ''"
@@ -696,12 +696,12 @@ defmodule SdrAgent.Scripts.PrototypePgTest do
     assert script_present?(), "bin/prototype-pg does not exist"
     script = File.read!(@script)
 
-    assert script =~ "readonly PORT='5541'" and
+    assert script =~ "readonly PORT='5542'" and
              script =~ "readonly SOCKET_DIR='#{@pinned_socket}'"
 
     runtime = File.read!(@runtime_exs)
 
-    assert runtime =~ @pinned_socket and runtime =~ "5541",
+    assert runtime =~ @pinned_socket and runtime =~ "5542",
            "config/runtime.exs has no prototype block with the socket directory and port (S1)"
   end
 end

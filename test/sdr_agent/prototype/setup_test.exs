@@ -12,8 +12,8 @@ defmodule SdrAgent.Prototype.SetupTest do
   @authority SdrAgent.Prototype.Authority
 
   @exact_repo [
-    socket_dir: "/private/tmp/d237-pg",
-    port: 5541,
+    socket_dir: "/private/tmp/d237-pg-5542",
+    port: 5542,
     database: "sdr_agent_prototype"
   ]
 
@@ -37,7 +37,7 @@ defmodule SdrAgent.Prototype.SetupTest do
             Keyword.put(@exact_repo, :database, "sdr_agent_dev"),
             Keyword.put(@exact_repo, :socket_dir, "/tmp/d237-pg"),
             Keyword.delete(@exact_repo, :socket_dir),
-            Keyword.put(@exact_repo, :socket, "/private/tmp/d237-pg/.s.PGSQL.5520"),
+            Keyword.put(@exact_repo, :socket, "/private/tmp/d237-pg-5542/.s.PGSQL.5520"),
             Keyword.put(@exact_repo, :url, "ecto://postgres@localhost:5520/sdr_agent_dev")
           ] do
         assert call(@authority, :check_repo_target, [wrong]) == {:error, :repo_target_mismatch},
@@ -254,10 +254,10 @@ defmodule SdrAgent.Prototype.SetupTest do
       for wrong <- [
             [{:port, 5520} | @exact_repo],
             [{:database, "sdr_agent_dev"} | @exact_repo],
-            [{:socket_dir, "/private/tmp/d237-pg-other"} | @exact_repo],
-            Keyword.put(@exact_repo, :endpoints, [{"localhost", 5541}]),
+            [{:socket_dir, "/private/tmp/d237-pg-5542-other"} | @exact_repo],
+            Keyword.put(@exact_repo, :endpoints, [{"localhost", 5542}]),
             Keyword.put(@exact_repo, :hostname, "db.example.test"),
-            Keyword.put(@exact_repo, :socket_dir, "/private/tmp/d237-pg/"),
+            Keyword.put(@exact_repo, :socket_dir, "/private/tmp/d237-pg-5542/"),
             Map.new(@exact_repo)
           ] do
         result = call(@authority, :check_repo_target, [wrong])

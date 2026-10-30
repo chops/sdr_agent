@@ -92,8 +92,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @maintenance_target [
       database: "postgres",
-      port: 5541,
-      socket_dir: "/private/tmp/d237-pg",
+      port: 5542,
+      socket_dir: "/private/tmp/d237-pg-5542",
       username: "postgres"
     ]
     @maintenance_conn_opts [
@@ -986,7 +986,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def operator?(_actor), do: false
 
     # IF-2 phase 0: the one Repo target, sorted by key.
-    @repo_target [database: @database, port: 5541, socket_dir: "/private/tmp/d237-pg"]
+    @repo_target [database: @database, port: 5542, socket_dir: "/private/tmp/d237-pg-5542"]
     # Every Repo option that selects a PostgreSQL target (Postgrex/Ecto).
     @target_selectors [:database, :endpoints, :hostname, :port, :socket, :socket_dir, :url]
 

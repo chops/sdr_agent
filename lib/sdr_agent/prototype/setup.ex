@@ -90,7 +90,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       :control_mismatch,
       :socket_dir_not_owned
     ]
-    @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237/pgdata"
+    @data_dir "/Users/charles/.local/state/sdr-agent/prototype/d237-5542/pgdata"
     @resolve_errors [
       :not_prototype_runtime,
       :binding_mismatch,

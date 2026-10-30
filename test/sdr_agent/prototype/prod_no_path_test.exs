@@ -85,8 +85,8 @@ defmodule SdrAgent.Prototype.ProdNoPathTest do
       )
 
     repo = get_in(config, [:sdr_agent, SdrAgent.Repo]) || []
-    assert repo[:socket_dir] == "/private/tmp/d237-pg"
-    assert repo[:port] == 5541
+    assert repo[:socket_dir] == "/private/tmp/d237-pg-5542"
+    assert repo[:port] == 5542
     assert repo[:database] == "sdr_agent_prototype"
 
     assert get_in(config, [:sdr_agent, SdrAgent.Prototype, :switch]) ==

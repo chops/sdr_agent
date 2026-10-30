@@ -587,7 +587,7 @@ defmodule SdrAgent.Prototype.SetupFlowTest do
   defp scenario(:env_extra_key), do: {%{}, env(%{debug?: true}), {:unexpected, 0}}
 
   defp scenario(:repo_mismatch) do
-    config = [database: "sdr_agent_dev", port: 5541, socket_dir: "/private/tmp/d237-pg"]
+    config = [database: "sdr_agent_dev", port: 5542, socket_dir: "/private/tmp/d237-pg-5542"]
     {%{}, %{repo_config: config}, refused(0, :repo_target_mismatch)}
   end
 
