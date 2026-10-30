@@ -50,6 +50,8 @@ flowchart TD
   SeedScopeRun -->|scoped provenance Payload; settings twice; ICP, sequence, step, campaign creates with ordered binds| SeedActivate[Scope-checked activate: ICP, then sequence, then campaign]
   SeedActivate -->|commit| SeedDone
   SeedLock -.->|any refusal or late failure: whole seed rolls back| Partial
+  SeedLock -->|settings history facts; seed revision create: prototype-only Agents APIs, N3| AgentsSeedApi[Agents: metadata-only history facts, seed_prototype action]
+  SeedScopeRun -->|settings twice via Agents API| AgentsSeedApi
   Body -->|op seed body: OTel, parse, Session enqueue? false| OpSeedGuard[ContainmentGuard.guard op]
   OpSeedGuard -->|only :ok| OpSeedWork[SeedDir.read P,G,C,V pins; one seed_result or seed_refused line]
   OpSeedWork -->|top level| SeedRun

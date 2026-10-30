@@ -37,7 +37,9 @@ Bootstrap commits phase 2 using the validated configured instance UUID.
 Phase 3 verifies boot, resolves the operator and invokes Seed at top level.
 Seed (D-268 M4) prechecks pins and content, then runs one
 `Audit.transaction`: it locks the binding, rechecks it live and reads the
-seed history. Exact complete history is a replay with no writes. Empty
+seed history. Settings revisions are read and created only through
+two prototype-only `SdrAgent.Agents` APIs (N3): metadata-only history facts
+and the existing seed action; production builds refuse both. Exact complete history is a replay with no writes. Empty
 history opens a prototype-only SeedScope, stores the provenance Payload,
 both settings revisions and the four Sales members, then activates the
 ICP, sequence and campaign through the scope check. Any refusal or late
