@@ -218,3 +218,49 @@ writer evidence; extracted transaction/scoped-settings helpers only, with
 no predicate or action change. Moduledocs reviewed; no new persistence or
 public domain policy widening in the writer. Independent milestone and
 production compile are the next handoff gates, not yet completion claims.
+
+* N3 domain-boundary repair plan (2026-10-30T05:57Z)
+Composite gate bfbd4f83 found a new reached assertion at
+RunSettingsSnapshotTest:448: Seed directly names SettingsRevision outside
+Agents. No allowlist change. Original M4 scoped PASS did not cover this test;
+Claude review missed it and withdrew overall integration readiness.
+Entity Model trigger: yes
+Reason: two narrow Agents APIs add derived history facts and restore the
+existing settings boundary; no persisted entity/action policy changes.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| SettingsSeedHistory | New derived, nonpersisted | Domain-owned fixed seed-history facts | digest lowercase64hex; empty?/matches? booleans; sorted ids; fixed resource string | Two fixed settings kinds, actor tenant only; no FK changes | empty iff no rows; matches iff exactly2 kind-unique root revisions with exact provenance notes; empty implies matches false; no content/free note output | Caller transaction + prototype runtime + fresh exact operator BEFORE privileged read | None after independent PASS |
+| SettingsRevision | Existing invocation path | Domain owns seed action call | Same kind/content/note; context exactly single sdr_seed_run_id canonical UUID | Same anchor/tenant/Payload/event links | Same seed_prototype action, content rules and revision1 lifecycle; no generic context passthrough | Existing action policy plus fresh operator/transaction checks | None |
+| SeedOperation | Existing coordinator | Consume facts/actions through domain | Seed.run input/output unchanged | Same binding/Scope/Sales/Payload links | Empty create requires events[] AND empty history; replay/differs/inactive behavior unchanged; returned API error immediately owner rollback with no further query | Same actor and transaction ownership | None |
+existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
+Applies to Sales, SeedScope, Payload, binding and all ordinary settings APIs.
+Configured ai_pair=true,codex_review=true. ENTITY PASS + PLAN/file ACK Claude
+m_1793339735000000000_c3219243; review
+8a8d42ec539ecad455d848e6839a7ccb81bd4030ca98a21f940dc90adb622d70.
+Exact r2 contract artifact fcc673fa3e42e3ad9cd3b9d223acfe80247e8efe26fac3bbbc0dd1543029c8b5.
+Affected files: agents.ex (two APIs), prototype/seed.ex (route calls), this
+plan and seed_writer_atomicity_test.exs (four dynamic API tests). No whole
+coordinator move into Agents: that would invert Agents-below-Sales layering.
+No new module/resource/policy/schema/dependency. No ADR required: restore
+existing boundary without a new material alternative or persisted contract.
+1. Reproduce existing boundary assertion RED + four API export RED tests.
+2. Explicit Phase4b GO before source; implement only domain calls, exact
+   history equivalence and closed context/errors; preserve all writer logic.
+3. Run focused cross-file pin coverage, statics and isolated production
+   artifact/refusal proof; push; independent source/results review. Claude
+   owns repaired Session twin on composite, diagrams and full composite gate.
+Both APIs require caller transaction first (seed_failed), prototype runtime
+(not_prototype_runtime), fresh exact actor (forbidden); bad digest/context or
+returned create Invalid is seed_invalid; other returned failures seed_failed.
+Raises propagate without inspection. Returned error -> immediate Seed rollback.
+Prod APIs reference no authority and return not_prototype_runtime. History
+outputs only empty?/matches?/sorted ids/fixed subject_resource, never notes or
+content; exact former matching_revisions? predicates move into Agents.
+No target/model/private-content execution; same06:30Z source/c3 window.
+
+N3 RED c3-20261030T055639Z-90230:29/34 pass;5 intended assertion failures:
+unchanged boundary test lists Seed, four dynamic API function-export assertions.
+No compilation/setup error; inner new API assertions not reached at RED.
+Input manifest461677845d50cfa9f8196d4e821bf6ec62ee040fe11ff87387cac42e6d000012;
+complete evidence manifest verified, owned DB pair dropped, leases released.
+Phase4b GO pending. No API source implementation yet.
