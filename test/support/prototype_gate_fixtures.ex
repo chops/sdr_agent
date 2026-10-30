@@ -14,7 +14,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
       `enter!/1` then enters prototype runtime with the bound snapshot;
     * `prototype!/1` is `bound!/1`, `enter!/1`, then the one funded grant
       through `SdrAgent.Agents.provision_prototype_grant/2`, as the operator,
-      with a counts-only worksheet whose evidence files it writes (0600)
+      with the owner100 worksheet whose exact receipt it writes (0600)
       under S1's owned scratch root (`PrototypeFixtures.scratch_dir!/1`);
     * `pre_runtime!/1` is `bound!/1` plus a completed ClaudeCLI invocation
       reserved through the ordinary domain path before prototype runtime is
@@ -41,9 +41,8 @@ defmodule SdrAgent.PrototypeGateFixtures do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AgentsFixtures
+  alias SdrAgent.OwnerAllowanceFixtures
   alias SdrAgent.PrototypeFixtures
-
-  @routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
 
   @doc "The absent store's reconcile receipt (`Witness.reconcile/2` with no root, under a gate)."
   def absent_receipt, do: %{status: :skipped, link_id: nil, cause_id: nil, codes: []}
@@ -124,35 +123,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
     Ash.load!(grant, :allocations, authorize?: false)
   end
 
-  defp worksheet(root) do
-    routes =
-      for route <- @routes do
-        %{
-          "route" => route,
-          "basis" =>
-            if(route == "prototype_binding", do: "agent_receipt", else: "owner_attestation"),
-          "consumed" => 0,
-          "evidence" => evidence!(root, "#{route}.receipt")
-        }
-      end
-
-    %{
-      "schema" => "d237-budget-worksheet/1",
-      "shared_total" => 60,
-      "window_starts_at" => "2026-10-28T02:38:32.000000Z",
-      "as_of" => "2026-10-29T12:00:00Z",
-      "routes" => routes,
-      "previous_bindings" => %{"consumed" => 0, "evidence" => evidence!(root, "previous.receipt")}
-    }
-  end
-
-  defp evidence!(root, name) do
-    body = "synthetic counts-only receipt #{name}\n"
-    path = Path.join(root, name)
-    File.write!(path, body)
-    File.chmod!(path, 0o600)
-    %{"path" => name, "sha256" => sha(body)}
-  end
+  defp worksheet(root), do: OwnerAllowanceFixtures.worksheet(root)
 
   @doc "Lowercase hex sha256 of `bytes`."
   def sha(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)

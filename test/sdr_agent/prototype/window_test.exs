@@ -1,7 +1,7 @@
 defmodule SdrAgent.Prototype.WindowTest do
   @moduledoc """
   RED-b2, the business-use window (amendment item 9; funding entry
-  `d237-funding/1`: `starts_at` 2026-10-28T02:38:32.000000Z INCLUSIVE,
+  `d237-funding/1`: `starts_at` 2026-10-30T15:05:40.000000Z INCLUSIVE,
   `expires_at` 2026-11-07T07:00:00.000000Z EXCLUSIVE), D-237 slice S2, at
   reservation, launch and the `released_unverified` decision, with S1's real
   provisioning and the hermetic test clock (`SdrAgent.Clock.freeze/1`).
@@ -20,8 +20,8 @@ defmodule SdrAgent.Prototype.WindowTest do
   alias SdrAgent.Clock
   alias SdrAgent.PrototypeGateFixtures, as: G
 
-  @before ~U[2026-10-28 02:38:31.999999Z]
-  @start ~U[2026-10-28 02:38:32.000000Z]
+  @before ~U[2026-10-30 15:05:39.999999Z]
+  @start ~U[2026-10-30 15:05:40.000000Z]
   @last ~U[2026-11-07 06:59:59.999999Z]
   @end_ ~U[2026-11-07 07:00:00.000000Z]
 

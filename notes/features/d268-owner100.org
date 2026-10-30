@@ -1,0 +1,70 @@
+#+title: D268 owner100 implementation plan r3 - Codex author
+#+date: 2026-10-30T15:17:00Z
+* Summary and approval
+Implement the owner's explicit new100 additive app-call allowance, replacing historical-count prerequisite for THIS allowance only; subscriptionCLI, capture-only, no outreach.
+Owner approved architectural direction in current turn; receipt9aba0a0c31bb77b547e0cdb9d0809fdd7aee00567509d53c691f66421d840a12.
+Charter ADR0001 permits peer acceptance of detailed design inside owner-approved architecture.
+* Entity Model
+Entity Model trigger: yes
+Reason: funding invariant and provisioning/admission contract changes.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+| Prototype model-call grant/funding entry | Existing concept, new owner-authorized allowance basis | Fund exactly100 additional attempts on retained binding | KEEP funding_id/name d237-funding/1; amended compiled entry total_attempts100 and b1 allocation100; starts_at2026-10-30T15:05:40Z; new owner decision reference; changed funding_entry_sha256 + compiled owner-receipt SHA pin | retained5542 binding and policy entry unchanged; event receipt/worksheet digest + invocation basis.funding.sha256 distinguish this allowance | no_prior_grant requires NO prior grant/event; refuse existing/conflicting grant, never delete/replace; restart/replay cannot re-mint or reset; exact repeats may return grant_exists without side effects | existing authenticated scoped prototype operator, explicit owner grant; production remains closed | No blocker; launcher MUST verify grants0/invocations0 before initial provision, not infer from old import counts |
+| Invocation/admission ledger | Existing, new allowance funding basis only | Bound real app-call attempts | existing state/id; new funding basis; no fictional historical count fields | existing per-grant/run/assignment ownership preserved | atomic existing prelaunch reservation/admission; no launch beyond100 under concurrency/restart; failed/uncertain potential real calls remain spent; no refund/reset/relaunch by replay; preserve current reservation safeguards | existing facade/admission/operator policies, subscription ClaudeCLI only; no direct provider bypass/calibration loophole | Verify exact debit boundary and100/101 tests after entity PASS |
+| Provisioning allowance worksheet/action | Existing contract, new closed schema | Establish owner-authorized budget without historical prerequisite | d237-owner-allowance/1 exact keys schema,total100,receipt{path,sha256}; read exact receipt via BoundedJson.read_private and require compiled pin9aba0a0c31bb77b547e0cdb9d0809fdd7aee00567509d53c691f66421d840a12 | existing budget_worksheet_sha256 event/action argument retained; binding policy entry/hash unchanged | new schema only for THIS prototype allowance; old60/50 worksheet refused, never converted with zeros; altered total/receipt refuses; failures make no grant; repeat gives grant_exists, never topup | unchanged runtime/guard/operator/production restrictions | No generic configurable budget UI, no new broad action |
+| Grant expiry | Existing attribute, unchanged limit | Bound existing prototype runtime authorization | keep expires_at2026-11-07T07:00Z exclusive; no per_utc_day cap added | same existing grant |100 total across remaining lifetime, not100 per day or per restart | existing owner/runtime checks unchanged | Delivery deadline20:00Z is a milestone, NOT new grant expiry; no widening of existing expiry |
+| Draft/run results | Existing dependency, unchanged | Save actual CLI output through existing domain actions | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | existing run/draft ownership unchanged | capture-only; no sends or fabricated completion | unchanged existing actions and policies | First integrated execution may expose known/unknown bugs |
+
+Claude ENTITY PASS m_1793373109000000000_4fbe67e8; exact review artifact sha f4db18f6e3a3df1d8291ddae49d112aee2df11851ded00b705bae9430ad13986.
+* Affected modules / owned files
+- lib/sdr_agent/prototype/authority_core.ex: funding entry100,start15:05:40Z, new decisionD269; replace closed worksheet parser with d237-owner-allowance/1 and compiled receipt pin; same read_private security.
+- lib/sdr_agent/prototype/provisioning.ex: purpose/docs for owner100; preserve identity, lookup/locks, wrapper replay and raw grant_exists safeguards.
+- lib/mix/tasks/sdr.prototype.provision.ex: docs only if needed.
+- test/sdr_agent/prototype/owner_allowance_test.exs: new focused domain/pure-parser contract tests.
+- Existing entries/provision/provision_c2/provisioned_admission tests and other directly affected prototype funding fixtures: update changed contract literals, not weaken negative checks.
+- test/support/prototype_gate_fixtures.ex + prototype_outreach_fixtures.ex: new receipt worksheet builder/new funding window; preserve synthetic data and per-test isolation. Journey worksheet remains Claude-owned; I provide helper for it.
+- docs/adr/0023-owner-authorized-prototype-allowance.md: accepted narrow grant decision (reserve0023).
+- docs/sdlc/decisions.md: one append-only D269 owner-authorization row (reserveD269).
+- notes/features/d268-owner100.org: exact entity/plan/evidence.
+No binding schema/policy pin change, migration, dependency, settings, payload policy, UI, underlying admission ledger/refund or direct provider change.
+* Minimal steps
+1. Record owner decision/plan/ADR, peer approval; new worktree codex/d268-owner100 off7345e929; no overlap with Claude research.
+2. RED new isolated tests for new schema/entry exact100/newstart accepted (assertion failure under old implementation); mark security/old-schema controls separately, not RED credit.
+3. Canonical focused c3 with test-only new tests; preserve fail reasons + manifest; Claude independent Phase4b GO.
+4. GREEN minimal funding/parser source plus directly affected fixture expectations; preserve checks for malformed/oversized/duplicate keys, private receipt source, immutable original grant identity and production absence.
+5. Focused parser+domain/admission checks including boundary100/101 and failure/unknown charged; gate once after coherent change, record old failures, no broad repairs. Peer source/results review; commit/push slices.
+6. Claude merges reviewed allowance plus research link; verify/provision once on retained5542 from reviewed exact launcher; one assignment/serve -> real draft; count spent and stop after success.
+* Required tests
+- Exact pinned receipt in private0600 file under0700 root -> remaining100; no historic counts fields accepted/needed.
+- Wrong digest/content, different receipt, total99/101, float100, unknown/duplicate keys, malformed/missing/unsafe path, old schema -> closed refusal with no writes.
+- Grant total/allocation100 and starts15:05:40Z, unchanged expiry2026-11-07T07:00Z, compiled policy-entry digest unchanged.
+- Existing wrapper replay returns SAME grant without event/topup/reset; raw repeat returns grant_exists; altered/conflicting state refuses.
+-100th reservation admitted;101st refused atomically; completed/failed/unknown/reserved all remain counted; no real model in tests. Concurrency existing locking controls stay.
+- Before-start/exclusive-expiry refusals retained; ordinary runtime/admin/forged actor + production refusal stay.
+* ADR evaluation
+Required YES: explicit owner budget rule supersedes old shared60/50 historical worksheet for this allowance. NewADR0023 records alternatives (wait for counts vs owner-authorized additional allowance), exact approval, limits/expiry, historical unknowns and once-only issuance.
+Architecture evaluation: same runtime integration/domain boundaries, no new resource/process; authority rule only, no diagram change expected (research slice separately evaluates).
+* Questions
+No further owner permission or historical facts needed. Peer review plan/RED/implementation under approved scope.
+* Verification environment
+Use accepted standing lane-runner r8 canonical c3, owned disposable DB pair5520; never touch real5542 from test commands. New worktree private .devenv roots; copy only tool/dependency/build caches from inactive Codex worktree if needed, no secrets/runtime.env/DB state.
+
+* Peer plan conditions accepted
+Claude PLAN PASS m_1793373875000000000_8af0cfb2, review052300dd2a68c9195f2ba335aada15021216a407b662047ab59fb355b46e2eea.
+C1/C5: enter_window!/1 signature unchanged, default inside2026-10-30T17:00:00Z; Journey worksheet Claude-owned.
+C2: Basis historical verification reads only recorded facts, not current funding; keep old reviewed start as historical shape and add only new reviewed start for new builds, with regression tests. Add lib/sdr_agent/prototype/basis.ex to exact source scope.
+C3: launcher requires actual retained-DB grants0/invocations0 before one provision.
+C4: controls receive no RED credit.
+* Initial RED evidence
+Canonical c3-20261030T152331Z-73357:0/4 passed,4 assertion failures,0 skipped/excluded; no setup/compile crash. Old entry50, new worksheet refused (pure+domain), attempt51 refused at old50. Manifest e2029cdcd44cccbc23dae3a73d6c53ac21f1d176fd12b88a800499d4c98ef4be independently verified. Disposable pair dropped, leases released. No real model/retained DB access.
+* TDD status
+Phase4a test-only plus approved plan/decision records. New-start Basis assertion added.
+Canonical r2 c3-20261030T152848Z-26997:0/5 passed,5 intended assertion failures,0 skipped/excluded; fifth failure is new-start basis_invalid. Complete manifest875de7d0e0a9672cc804e9f937560ea183ecac8fc119f597e36d1d81a81f8cf1 verified. Disposable pair dropped, leases released. Format rc0. No production source change and no real model/retained DB access.
+TDD Verification: VERIFIED manually from canonical output (assertions only, no setup/compile error). Claude RED GO m_1793374501000000000_1d2f8564 permits Phase4b. No overall gate PASS claimed.
+* GREEN implementation and verification
+Implemented new closed receipt worksheet, exact100 funding/start and reviewed two-start Basis shape. Binding policy entry, admission debit mechanics, private reader, provenance locks, replay rules, expiry and production refusal are unchanged.
+New OwnerAllowanceControlsTest preserves malformed/duplicate/oversized/schema/privacy/path controls; superseded historical route arithmetic is removed rather than faked with zero counts. OwnerAllowanceTest covers100/101, failed/uncertain attempts charged, same-grant wrapper replay with no reset and old-basis historical verification.
+Canonical c3-20261030T154012Z-44145:13/13,0 skipped/excluded; manifest68bcb179e8b4099782feb1d9410ae4fd5c9cfc79b453eb2e851b7451491006af verified.
+Canonical c3-20261030T154159Z-62336:128/128,0 skipped/excluded; manifest4c8ea6eac397bd6add0e41196715edcd4c276464008d137d66471c5c5d7c4b5f verified. Both disposable DB pairs dropped, leases released. No real-model or retained5542 access.
+Format rc0; dev compile --warnings-as-errors rc0 (492 files). Full clean-head gate and peer GREEN source/result review pending; no overall PASS claimed.
+Replay clarification: public provisioning wrapper replays the SAME unchanged grant, raw :provision_prototype action refuses grant_exists. Both preserve capacity; existing wrapper semantics are deliberately retained.
+Architecture unchanged - no diagram update needed: same domains, resources, integration, supervision, and runtime flow; only the existing allowance invariant and reviewed historical basis shape change. ADR0023 accepted; no migrations or dependencies.

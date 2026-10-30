@@ -29,13 +29,13 @@ defmodule SdrAgent.Prototype.FacadeTest do
   }
 
   @funding_entry %{
-    total_attempts: 50,
-    starts_at: ~U[2026-10-28 02:38:32.000000Z],
+    total_attempts: 100,
+    starts_at: ~U[2026-10-30 15:05:40.000000Z],
     expires_at: ~U[2026-11-07 07:00:00.000000Z],
     profile_ids: [:claude_cli_opus],
     funded_scope: [{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}],
-    allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}],
-    decision_refs: ["D-238", "D-239", "D-243"]
+    allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 100}],
+    decision_refs: ["D-238", "D-239", "D-243", "D-269"]
   }
 
   describe "ordinary runtime" do

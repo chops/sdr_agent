@@ -54,7 +54,7 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
   alias SdrAgent.Prototype.Release
   alias SdrAgent.PrototypeGateFixtures, as: G
 
-  @golden "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
+  @golden "d8e675ce642857511ed201fab998484d9cfd40e040f891f141a469d3294d825b"
   @last ~U[2026-11-07 06:59:59.999999Z]
   @end_ ~U[2026-11-07 07:00:00.000000Z]
 
@@ -162,7 +162,7 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
         "system_identifier" => Integer.to_string(s.system_identifier)
       },
       "window" => %{
-        "starts_at" => "2026-10-28T02:38:32.000000Z",
+        "starts_at" => "2026-10-30T15:05:40.000000Z",
         "expires_at" => "2026-11-07T07:00:00.000000Z",
         "decided_at" => Calendar.strftime(release.decided_at, "%Y-%m-%dT%H:%M:%S.%fZ")
       },
@@ -267,7 +267,7 @@ defmodule SdrAgent.Prototype.ProvisionedReleaseTest do
              }
 
       assert {basis["window"]["starts_at"], basis["window"]["expires_at"]} ==
-               {"2026-10-28T02:38:32.000000Z", "2026-11-07T07:00:00.000000Z"}
+               {"2026-10-30T15:05:40.000000Z", "2026-11-07T07:00:00.000000Z"}
 
       assert basis["window"]["decided_at"] ==
                Calendar.strftime(release.decided_at, "%Y-%m-%dT%H:%M:%S.%fZ")

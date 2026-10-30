@@ -44,53 +44,21 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
   alias SdrAgent.Agents.ModelCallGrant
   alias SdrAgent.Prototype
 
-  @routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
-  @path_grammar ~r/\A[A-Za-z0-9._\/-]{1,200}\z/
   # The funding entry's golden sdr-canonical-json/1 digest and its compiled
   # decision refs (amendment r6 item 4; Codex 4281bb5c R2).
-  @golden_funding_sha256 "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
-  @decision_refs ["D-238", "D-239", "D-243"]
+  @golden_funding_sha256 "d8e675ce642857511ed201fab998484d9cfd40e040f891f141a469d3294d825b"
+  @decision_refs ["D-238", "D-239", "D-243", "D-269"]
 
   defp sha(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
 
-  # A deterministic file-name token of `as_of`: every character outside the
-  # IF-2 path grammar becomes "-". The worksheet keeps the original value.
+  # A deterministic receipt-path token gives distinct worksheet bytes for
+  # the existing replay/conflict tests. D-269 has no historical as_of field.
   defp token(as_of), do: Regex.replace(~r/[^A-Za-z0-9.-]/, as_of, "-")
 
-  defp evidence!(root, name) do
-    assert Regex.match?(@path_grammar, name),
-           "fixture: evidence path #{inspect(name)} is outside the IF-2 grammar"
-
-    body = "counts-only receipt #{name}\n"
-    path = Path.join(root, name)
-    File.write!(path, body)
-    File.chmod!(path, 0o600)
-    %{"path" => name, "sha256" => sha(body)}
-  end
-
   defp worksheet_bytes(root, as_of \\ "2026-10-29T12:00:00Z") do
-    routes =
-      for route <- @routes do
-        %{
-          "route" => route,
-          "basis" =>
-            if(route == "prototype_binding", do: "agent_receipt", else: "owner_attestation"),
-          "consumed" => 0,
-          "evidence" => evidence!(root, "#{route}-#{token(as_of)}.receipt")
-        }
-      end
-
-    Jason.encode!(%{
-      "schema" => "d237-budget-worksheet/1",
-      "shared_total" => 60,
-      "window_starts_at" => "2026-10-28T02:38:32.000000Z",
-      "as_of" => as_of,
-      "routes" => routes,
-      "previous_bindings" => %{
-        "consumed" => 0,
-        "evidence" => evidence!(root, "previous-#{token(as_of)}.receipt")
-      }
-    })
+    root
+    |> SdrAgent.OwnerAllowanceFixtures.worksheet("owner100-#{token(as_of)}.receipt")
+    |> Jason.encode!()
   end
 
   defp provision(actor, bytes, root) do
@@ -235,7 +203,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
             binding_id: ctx.fx.snapshot.id,
             budget_worksheet_sha256: sha(valid),
             allocations: [
-              %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}
+              %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 100}
             ],
             funding_entry_sha256: @golden_funding_sha256,
             decision_refs: @decision_refs
@@ -265,7 +233,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
       assert after_counts.grants == before.grants + 1
       assert after_counts.provisioned == before.provisioned + 1
       assert after_counts.allocations == before.allocations + 1
-      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}]
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 100, nil, nil, nil}]
     end
 
     test "a second valid direct action refuses :grant_exists (never renews), writing nothing",
@@ -558,7 +526,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
     test "is Forbidden with or without the public grant marker, writing nothing", ctx do
       grant = first!(ctx.fx, ctx.root, worksheet_bytes(ctx.root))
 
-      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}],
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 100, nil, nil, nil}],
              "prerequisite: the genuine provision created exactly the one :b1 allocation"
 
       before = counts()
@@ -572,8 +540,8 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
 
       attempts = [
         extra_b2: Map.merge(planned, %{key: :b2, applies_to: [:b1], attempts: 51}),
-        exact_terms_b2: Map.merge(planned, %{key: :b2, applies_to: [:b1], attempts: 50}),
-        exact_copy_b1: Map.merge(planned, %{key: :b1, applies_to: [:b1], attempts: 50})
+        exact_terms_b2: Map.merge(planned, %{key: :b2, applies_to: [:b1], attempts: 100}),
+        exact_copy_b1: Map.merge(planned, %{key: :b1, applies_to: [:b1], attempts: 100})
       ]
 
       for {name, attrs} <- attempts,
@@ -589,7 +557,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
 
       assert counts() == before, "a raw allocation create wrote"
       assert all_events() == events_before, "a raw allocation create appended an event"
-      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}]
+      assert allocations_of(grant.id) == [{"b1", ["b1"], "claude_cli_opus", 100, nil, nil, nil}]
     end
   end
 
@@ -604,7 +572,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
     @change SdrAgent.Agents.Changes.ProvisionPrototype
     @scope_module SdrAgent.Prototype.ProvisionScope
     @scope_key :sdr_prototype_provision_scope
-    @b1 {"b1", ["b1"], "claude_cli_opus", 50, nil, nil, nil}
+    @b1 {"b1", ["b1"], "claude_cli_opus", 100, nil, nil, nil}
 
     defp scope_context(scope), do: Map.put(GrantContext.context(), @scope_key, scope)
 
@@ -616,7 +584,7 @@ defmodule SdrAgent.Prototype.ProvisionC2Test do
           key: :b1,
           applies_to: [:b1],
           profile_id: :claude_cli_opus,
-          attempts: 50
+          attempts: 100
         },
         overrides
       )

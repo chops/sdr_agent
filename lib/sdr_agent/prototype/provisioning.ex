@@ -48,7 +48,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Prototype.Binding
 
     @funding_id "d237-funding/1"
-    @purpose "D-237 prototype funding d237-funding/1 (D-238, D-239, D-243)"
+    @purpose "D-237 prototype funding d237-funding/1 (D-238, D-239, D-243, D-269 additional100)"
     @event_type "model.grant.provisioned"
     @argument_keys Enum.sort(
                      ~w(funding_id funding_entry_sha256 decision_refs budget_worksheet_sha256 delegation_id binding_id)

@@ -52,8 +52,8 @@ defmodule SdrAgent.Prototype.ProvisionedAdmissionTest do
   @keys ~w(allocation_id binding_id dataset_class entry_sha256 funding_id grant_id
            grant_revision instance_id operator_user_id policy_id profile_id purpose
            tenant_id witness_mode)
-  @golden "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
-  @decision_refs ["D-238", "D-239", "D-243"]
+  @golden "d8e675ce642857511ed201fab998484d9cfd40e040f891f141a469d3294d825b"
+  @decision_refs ["D-238", "D-239", "D-243", "D-269"]
   # The exact arguments of S1's model.grant.provisioned event (S1 d0b764b).
   @provisioned_keys ~w(binding_id budget_worksheet_sha256 decision_refs delegation_id
                        funding_entry_sha256 funding_id)
@@ -262,7 +262,7 @@ defmodule SdrAgent.Prototype.ProvisionedAdmissionTest do
       assert [allocation] = ctx.fx.grant.allocations
 
       assert {allocation.key, allocation.applies_to, allocation.profile_id, allocation.attempts} ==
-               {:b1, [:b1], :claude_cli_opus, 50}
+               {:b1, [:b1], :claude_cli_opus, 100}
     end
 
     test "after an admin's real rename it admits no call: operator_mismatch, audited", ctx do
@@ -308,7 +308,7 @@ defmodule SdrAgent.Prototype.ProvisionedAdmissionTest do
               starts_at: funding.starts_at,
               expires_at: funding.expires_at,
               allocations: [
-                %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}
+                %{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 100}
               ]
             },
             actor: fx.admin
