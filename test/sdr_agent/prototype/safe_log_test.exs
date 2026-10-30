@@ -191,6 +191,57 @@ defmodule SdrAgent.Prototype.SafeLogTest do
 
       refute bad =~ @marker, "say/2 printed a malformed ref"
     end
+
+    # D-268 M6b (Codex rulings a3f14552, f1bffa89): the additive refusal
+    # shape is the provision reasons without :none plus six input atoms.
+    test "say/2 prints provision_refused for each closed refusal reason" do
+      reasons =
+        [
+          :worksheet_invalid,
+          :budget_unbounded,
+          :budget_below_ceiling,
+          :grant_exists,
+          :binding_mismatch,
+          :not_prototype_runtime,
+          :forbidden,
+          :provision_failed,
+          :invalid_arguments,
+          :session_unset,
+          :invalid_agent,
+          :invalid_correlation,
+          :delegation_not_found,
+          :boot_refused
+        ]
+
+      for reason <- reasons do
+        out = capture_io(fn -> assert SafeLog.say(:provision_refused, reason: reason) == :ok end)
+        assert out == "prototype: provision_refused reason=#{reason}\n", "#{reason}: #{out}"
+      end
+    end
+
+    test "provision_refused rejects :none, nil, an unknown reason, a grant id and extra keys" do
+      cases = [
+        none: [reason: :none],
+        nil_reason: [reason: nil],
+        unknown: [reason: :no_such_reason],
+        grant_id: [grant_id: Ecto.UUID.generate(), reason: :forbidden],
+        extra: [reason: :forbidden, note: @marker]
+      ]
+
+      for {name, refs} <- cases do
+        out = capture_io(fn -> SafeLog.say(:provision_refused, refs) end)
+        assert out == @withheld <> "\n", "#{name}: #{out}"
+      end
+    end
+
+    test "provisioned keeps its UUID requirement: a nil grant id is withheld" do
+      out =
+        capture_io(fn ->
+          SafeLog.say(:provisioned, grant_id: nil, result: :refused, reason: :forbidden)
+        end)
+
+      assert out == @withheld <> "\n"
+    end
   end
 
   describe "attachment" do

@@ -62,6 +62,13 @@ defmodule SdrAgent.Prototype.ProvisionTest do
     ])
   end
 
+  defp provision_result(ctx, actor \\ nil) do
+    call(Agents, :provision_prototype_grant_result, [
+      %{worksheet: ctx.bytes, worksheet_sha256: ctx.digest},
+      [actor: actor || ctx.fx.actor, evidence_root: ctx.root]
+    ])
+  end
+
   defp check(root, map) do
     bytes = Jason.encode!(map)
     call(@authority, :check_worksheet, [bytes, sha(bytes), root])
@@ -270,6 +277,44 @@ defmodule SdrAgent.Prototype.ProvisionTest do
 
       %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM model_call_grants", [])
       assert n == 1
+    end
+
+    # D-268 M6b (Codex rulings a3f14552, f1bffa89): the companion reports
+    # the actual replay/mint branch; no clock or before-read inference.
+    test "the result companion reports :created, then :replay of the same grant with no write or evidence reread",
+         ctx do
+      first = provision_result(ctx)
+      assert match?({:ok, %{result: :created}}, first), "first: #{inspect(first)}"
+      {:ok, %{grant: grant}} = first
+
+      # A replay reads no evidence: the receipts are gone and it still replays.
+      for name <- File.ls!(ctx.root), do: File.rm!(Path.join(ctx.root, name))
+
+      second = provision_result(ctx)
+      assert match?({:ok, %{result: :replay}}, second), "replay: #{inspect(second)}"
+      {:ok, %{grant: replayed}} = second
+      assert replayed.id == grant.id
+
+      %{rows: [[n]]} = Repo.query!("SELECT count(*) FROM model_call_grants", [])
+      assert n == 1
+      assert length(events_of_type(ctx.fx.tenant, "model.grant.provisioned")) == 1
+    end
+
+    test "after the companion created the grant, the old API still returns {:ok, grant}", ctx do
+      assert match?({:ok, %{result: :created}}, provision_result(ctx))
+      result = provision(ctx)
+      assert match?({:ok, %SdrAgent.Agents.ModelCallGrant{}}, result), inspect(result)
+    end
+
+    test "the companion's refusals equal the old API's", ctx do
+      bad_digest = %{ctx | digest: sha("other bytes")}
+      assert provision(bad_digest) == {:error, :worksheet_invalid}
+      assert provision_result(bad_digest) == {:error, :worksheet_invalid}
+
+      assert match?({:error, %Ash.Error.Forbidden{}}, provision_result(ctx, ctx.admin))
+
+      nested = Repo.transaction(fn -> provision_result(ctx) end)
+      assert nested == {:ok, {:error, :binding_mismatch}}, inspect(nested)
     end
 
     test "a non-operator cannot provision", ctx do
