@@ -309,7 +309,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
       },
       "funding" => %{
         "id" => "d237-funding/1",
-        "sha256" => "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a",
+        "sha256" => "d8e675ce642857511ed201fab998484d9cfd40e040f891f141a469d3294d825b",
         "grant_id" => fx.grant.id,
         "grant_revision" => fx.grant.revision,
         "allocation_id" => inv.allocation_id,
@@ -325,7 +325,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
         "system_identifier" => Integer.to_string(s.system_identifier)
       },
       "window" => %{
-        "starts_at" => "2026-10-28T02:38:32.000000Z",
+        "starts_at" => "2026-10-30T15:05:40.000000Z",
         "expires_at" => "2026-11-07T07:00:00.000000Z",
         "decided_at" => Calendar.strftime(decided_at, "%Y-%m-%dT%H:%M:%S.%fZ")
       },
