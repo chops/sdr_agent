@@ -69,6 +69,10 @@ defmodule SdrAgent.Agents do
       agents use), `run_settings_summary/2` (the run page's metadata-only
       view of a snapshot) and `settings_complete/2` (the assignment pre-check);
       limits and booking links at use are `SdrAgent.Agents.RunSettings`.
+    * prototype seed (D-268) — `prototype_seed_settings_history/2` exposes
+      fixed metadata-only history facts and `seed_prototype_settings_revision/3`
+      invokes the existing seed action, only for a fresh live operator in
+      the seed owner's transaction. Both are refusal-only in production.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -1730,6 +1734,115 @@ defmodule SdrAgent.Agents do
       {:refuse, operator} ->
         Guard.run(meta, operator, fn -> {:error, Ash.Error.Forbidden.exception([])} end)
     end
+  end
+
+  @doc """
+  D-268: fixed profile/guide seed-history facts for the live prototype
+  operator inside its caller-owned transaction. Returns only `empty?`,
+  `matches?`, sorted revision `ids` and the fixed `subject_resource` name;
+  never content or free-text notes. `matches?` requires exactly one root
+  revision of each kind with this provenance digest's closed note.
+
+  Refusals are closed: `:seed_failed` without a transaction or on a returned
+  read error, `:not_prototype_runtime` outside prototype runtime (always in
+  production), `:forbidden` for a non-live operator, `:seed_invalid` for a
+  malformed digest. The owner must roll back immediately on any error.
+  """
+  @spec prototype_seed_settings_history(term(), SdrAgent.Actor.t()) ::
+          {:ok, map()} | {:error, atom()}
+  def prototype_seed_settings_history(digest, actor), do: seed_settings_history(digest, actor)
+
+  @doc """
+  D-268: invokes the existing settings `:seed_prototype` action as the
+  live operator in its caller-owned transaction. `context` must contain
+  exactly `sdr_seed_run_id` with a canonical UUID; no scope or kernel
+  context is accepted. Existing action policies/content rules stay intact.
+
+  Same caller refusals as `prototype_seed_settings_history/2`; malformed
+  context or returned Invalid is `:seed_invalid`, other returned action
+  failure is `:seed_failed`. Production always refuses with
+  `:not_prototype_runtime`. Raises propagate without inspection. An action
+  can itself roll the owner transaction back; the seed owner closes that
+  result and never queries after failure.
+  """
+  @spec seed_prototype_settings_revision(map(), SdrAgent.Actor.t(), term()) ::
+          {:ok, struct()} | {:error, atom()}
+  def seed_prototype_settings_revision(attrs, actor, context),
+    do: seed_settings_revision(attrs, actor, context)
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp seed_settings_history(digest, actor) do
+      with :ok <- seed_settings_caller(actor),
+           :ok <- seed_settings_digest(digest) do
+        SettingsRevision
+        |> Ash.Query.for_read(:read, %{}, Kernel.opts(actor.tenant_id))
+        |> Ash.Query.filter(
+          tenant_id == ^actor.tenant_id and kind in [:offering_profile, :writing_guide]
+        )
+        |> Ash.Query.select([:id, :kind, :number, :note])
+        |> Ash.read()
+        |> case do
+          {:ok, revisions} -> {:ok, seed_settings_facts(revisions, digest)}
+          {:error, _error} -> {:error, :seed_failed}
+        end
+      end
+    end
+
+    defp seed_settings_facts(revisions, digest) do
+      matches? =
+        length(revisions) == 2 and
+          Enum.sort(Enum.map(revisions, & &1.kind)) == [:offering_profile, :writing_guide] and
+          Enum.all?(
+            revisions,
+            &(&1.number == 1 and &1.note == "d237 seed provenance sha256:" <> digest)
+          )
+
+      %{
+        empty?: revisions == [],
+        matches?: matches?,
+        ids: Enum.sort(Enum.map(revisions, & &1.id)),
+        subject_resource: inspect(SettingsRevision)
+      }
+    end
+
+    defp seed_settings_revision(attrs, actor, context) do
+      with :ok <- seed_settings_caller(actor),
+           :ok <- seed_settings_context(context) do
+        SettingsRevision
+        |> Ash.Changeset.for_create(:seed_prototype, attrs, actor: actor, context: context)
+        |> Ash.create()
+        |> case do
+          {:ok, revision} -> {:ok, revision}
+          {:error, %Ash.Error.Invalid{}} -> {:error, :seed_invalid}
+          {:error, _error} -> {:error, :seed_failed}
+        end
+      end
+    end
+
+    defp seed_settings_caller(actor) do
+      cond do
+        not Repo.in_transaction?() -> {:error, :seed_failed}
+        SdrAgent.Prototype.runtime() != :prototype -> {:error, :not_prototype_runtime}
+        not SdrAgent.Prototype.Authority.operator?(actor) -> {:error, :forbidden}
+        true -> :ok
+      end
+    end
+
+    defp seed_settings_digest(digest) do
+      if is_binary(digest) and Regex.match?(~r/\A[0-9a-f]{64}\z/, digest),
+        do: :ok,
+        else: {:error, :seed_invalid}
+    end
+
+    defp seed_settings_context(%{sdr_seed_run_id: id} = context)
+         when map_size(context) == 1 and is_binary(id) do
+      if Ecto.UUID.cast(id) == {:ok, id}, do: :ok, else: {:error, :seed_invalid}
+    end
+
+    defp seed_settings_context(_context), do: {:error, :seed_invalid}
+  else
+    defp seed_settings_history(_digest, _actor), do: {:error, :not_prototype_runtime}
+    defp seed_settings_revision(_attrs, _actor, _context), do: {:error, :not_prototype_runtime}
   end
 
   # A human operator is re-read, so the save and its event carry the current

@@ -218,3 +218,90 @@ writer evidence; extracted transaction/scoped-settings helpers only, with
 no predicate or action change. Moduledocs reviewed; no new persistence or
 public domain policy widening in the writer. Independent milestone and
 production compile are the next handoff gates, not yet completion claims.
+
+* N3 domain-boundary repair plan (2026-10-30T05:57Z)
+Composite gate bfbd4f83 found a new reached assertion at
+RunSettingsSnapshotTest:448: Seed directly names SettingsRevision outside
+Agents. No allowlist change. Original M4 scoped PASS did not cover this test;
+Claude review missed it and withdrew overall integration readiness.
+Entity Model trigger: yes
+Reason: two narrow Agents APIs add derived history facts and restore the
+existing settings boundary; no persisted entity/action policy changes.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| SettingsSeedHistory | New derived, nonpersisted | Domain-owned fixed seed-history facts | digest lowercase64hex; empty?/matches? booleans; sorted ids; fixed resource string | Two fixed settings kinds, actor tenant only; no FK changes | empty iff no rows; matches iff exactly2 kind-unique root revisions with exact provenance notes; empty implies matches false; no content/free note output | Caller transaction + prototype runtime + fresh exact operator BEFORE privileged read | None after independent PASS |
+| SettingsRevision | Existing invocation path | Domain owns seed action call | Same kind/content/note; context exactly single sdr_seed_run_id canonical UUID | Same anchor/tenant/Payload/event links | Same seed_prototype action, content rules and revision1 lifecycle; no generic context passthrough | Existing action policy plus fresh operator/transaction checks | None |
+| SeedOperation | Existing coordinator | Consume facts/actions through domain | Seed.run input/output unchanged | Same binding/Scope/Sales/Payload links | Empty create requires events[] AND empty history; replay/differs/inactive behavior unchanged; returned API error immediately owner rollback with no further query | Same actor and transaction ownership | None |
+existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
+Applies to Sales, SeedScope, Payload, binding and all ordinary settings APIs.
+Configured ai_pair=true,codex_review=true. ENTITY PASS + PLAN/file ACK Claude
+m_1793339735000000000_c3219243; review
+8a8d42ec539ecad455d848e6839a7ccb81bd4030ca98a21f940dc90adb622d70.
+Exact r2 contract artifact fcc673fa3e42e3ad9cd3b9d223acfe80247e8efe26fac3bbbc0dd1543029c8b5.
+Affected files: agents.ex (two APIs), prototype/seed.ex (route calls), this
+plan and seed_writer_atomicity_test.exs (four dynamic API tests). No whole
+coordinator move into Agents: that would invert Agents-below-Sales layering.
+No new module/resource/policy/schema/dependency. No ADR required: restore
+existing boundary without a new material alternative or persisted contract.
+1. Reproduce existing boundary assertion RED + four API export RED tests.
+2. Explicit Phase4b GO before source; implement only domain calls, exact
+   history equivalence and closed context/errors; preserve all writer logic.
+3. Run focused cross-file pin coverage, statics and isolated production
+   artifact/refusal proof; push; independent source/results review. Claude
+   owns repaired Session twin on composite, diagrams and full composite gate.
+Both APIs require caller transaction first (seed_failed), prototype runtime
+(not_prototype_runtime), fresh exact actor (forbidden); bad digest/context or
+returned create Invalid is seed_invalid; other returned failures seed_failed.
+Raises propagate without inspection. Returned error -> immediate Seed rollback.
+Prod APIs reference no authority and return not_prototype_runtime. History
+outputs only empty?/matches?/sorted ids/fixed subject_resource, never notes or
+content; exact former matching_revisions? predicates move into Agents.
+No target/model/private-content execution; same06:30Z source/c3 window.
+
+N3 RED c3-20261030T055639Z-90230:29/34 pass;5 intended assertion failures:
+unchanged boundary test lists Seed, four dynamic API function-export assertions.
+No compilation/setup error; inner new API assertions not reached at RED.
+Input manifest461677845d50cfa9f8196d4e821bf6ec62ee040fe11ff87387cac42e6d000012;
+complete evidence manifest verified, owned DB pair dropped, leases released.
+Phase4b GO pending. No API source implementation yet.
+
+* N3 implementation/results (2026-10-30T06:04Z)
+Explicit Phase4b GO81f975c3, review16c3aa4d5bc8066047cda7ca2202b0437d01ce0617a8443df4a629aa47a44616.
+Added two narrow Agents functions under compile-gated implementation, with
+reference-free production refusal branches. Existing matching_revisions?
+predicates moved unchanged into domain-owned metadata facts; Seed has no
+SettingsRevision reference or current_settings import. Domain write context
+accepts only one canonical run UUID, same actor and existing action policies.
+API errors immediately roll back the Seed owner; no recovery query added.
+No new module/resource/policy/persistence/dependency or Sales layering edge.
+
+First GREEN c3-20261030T060029Z-27022:33/34; boundary448 passed unchanged.
+The remaining failure was a newly authored expected resource string prefixed
+Elixir.; r2 explicitly requires inspect(SettingsRevision), whose actual result
+is SdrAgent.Agents.SettingsRevision without that prefix (same authoritative
+event string as before). Corrected that one new assertion to the explicit
+contract, without changing source or relaxing a guard. All other assertions kept.
+Added A1 bad-digest and A2 nonempty-mismatching-digest controls per GO advisory;
+both reached in GREEN. Canonical UUID context fixture made deterministic.
+
+Cross-file GREEN c3-20261030T060110Z-33666:374/374,0 skipped/excluded,
+18 explicit files including snapshot boundary, ordinary settings privacy/
+revisions/races/UI, all seed scope/action/fault/rollback/replay, provisioning
+and entry refusals. Input manifest
+708b96d798d1f8db895ef5264ca02e7b052a1b5ce5fabf9de43c03436518ae92.
+Isolated Journey c3-20261030T060322Z-53907:0/2, both at this branch's old
+op assign not_implemented. Kept FAIL; Seed already succeeded before that point.
+Do NOT call it the same cause as composite bfbd4f83 Journey failures: that
+composite reaches a failed/crash run after assign. Composite integration owns
+that direct worker-path investigation. No source/test change to Journey here.
+All owned run database pairs dropped and leases released; manifests verified
+before the final packet. No actual target seed/import/model action performed.
+
+Final N3 statics: format, test/dev WAE and repository Credo rc0. Test Seed beam
+has no SettingsRevision atom and no Agents.current_settings/1 import, proven
+by actual atom/import chunks; config/locks unchanged. Public docs reviewed.
+Architecture: restores existing domain call path, no new runtime boundary;
+Claude-owned diagram edge becomes Seed -> Agents metadata/read and seed/write
+APIs -> SettingsRevision (prototype-only implementation). Existing ordinary
+settings paths unchanged. Composite twin/full gate and real retry remain Claude
+owned. Clean production artifact proof and independent source review next.

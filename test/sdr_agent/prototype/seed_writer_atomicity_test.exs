@@ -8,6 +8,7 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.DossierFixtures, as: F
+  alias SdrAgent.Agents
   alias SdrAgent.PrototypeFixtures
   alias SdrAgent.Sales
 
@@ -97,6 +98,103 @@ defmodule SdrAgent.Prototype.SeedWriterAtomicityTest do
     :ok = PrototypeFixtures.enter_runtime(ctx.fixture.snapshot)
     before = counts()
     assert call(@seed, :run, [F.seed_read(), ctx.actor]) == {:error, :seed_failed}
+    assert counts() == before
+  end
+
+  test "the domain history API returns only exact empty or matching metadata", ctx do
+    seed = F.seed_read()
+
+    assert {:ok, {:ok, empty}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, [seed.sha256.provenance, ctx.actor])
+             end)
+
+    assert empty == %{
+             empty?: true,
+             matches?: false,
+             ids: [],
+             subject_resource: "SdrAgent.Agents.SettingsRevision"
+           }
+
+    assert {:ok, %{result: :created}} = call(@seed, :run, [seed, ctx.actor])
+
+    assert {:ok, {:ok, facts}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, [seed.sha256.provenance, ctx.actor])
+             end)
+
+    assert Map.keys(facts) |> Enum.sort() == [:empty?, :ids, :matches?, :subject_resource]
+    assert facts.matches? and not facts.empty?
+    assert length(facts.ids) == 2 and facts.ids == Enum.sort(facts.ids)
+    assert facts.subject_resource == empty.subject_resource
+
+    assert {:ok, {:ok, mismatch}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, [
+                 String.duplicate("a", 64),
+                 ctx.actor
+               ])
+             end)
+
+    assert mismatch == %{facts | empty?: false, matches?: false}
+
+    assert {:ok, {:error, :seed_invalid}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, ["bad", ctx.actor])
+             end)
+  end
+
+  test "the domain APIs refuse missing transactions before any action", ctx do
+    assert call(Agents, :prototype_seed_settings_history, [
+             F.seed_read().sha256.provenance,
+             ctx.actor
+           ]) == {:error, :seed_failed}
+
+    assert call(Agents, :seed_prototype_settings_revision, [
+             %{},
+             ctx.actor,
+             %{sdr_seed_run_id: Ecto.UUID.generate()}
+           ]) == {:error, :seed_failed}
+  end
+
+  test "domain history refuses ordinary runtime and stale or foreign actors", ctx do
+    digest = F.seed_read().sha256.provenance
+
+    for actor <- [
+          %{ctx.actor | id: Ecto.UUID.generate()},
+          %{ctx.actor | tenant_id: Ecto.UUID.generate()}
+        ] do
+      assert {:ok, {:error, :forbidden}} =
+               SdrAgent.Audit.transaction(fn ->
+                 call(Agents, :prototype_seed_settings_history, [digest, actor])
+               end)
+    end
+
+    :ok = PrototypeFixtures.leave_runtime()
+
+    assert {:ok, {:error, :not_prototype_runtime}} =
+             SdrAgent.Audit.transaction(fn ->
+               call(Agents, :prototype_seed_settings_history, [digest, ctx.actor])
+             end)
+  end
+
+  test "the domain write accepts no context except one canonical run UUID", ctx do
+    uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    before = counts()
+
+    for context <- [
+          %{},
+          %{sdr_seed_run_id: "bad"},
+          %{sdr_seed_run_id: uuid, kernel: true},
+          %{"sdr_seed_run_id" => uuid},
+          %{sdr_seed_run_id: String.upcase(uuid)}
+        ] do
+      assert {:ok, {:error, :seed_invalid}} =
+               SdrAgent.Audit.transaction(fn ->
+                 call(Agents, :seed_prototype_settings_revision, [%{}, ctx.actor, context])
+               end)
+    end
+
     assert counts() == before
   end
 end
