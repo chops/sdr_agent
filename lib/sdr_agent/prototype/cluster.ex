@@ -1,7 +1,4 @@
-# Pure GREEN (S4 IF-7): the reason family, the pinned facts, the three pure
-# parsers, the paths-map shape and the malformed-map refusal of check/1.
-# check/1 on a valid map and marker/0 stay deny-only: no filesystem,
-# command or reader behaviour exists yet. Compiled only in builds with the
+# Read-only IF-7 identity proof. Compiled only in builds with the
 # prototype authority; the production build has no cluster code.
 if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
   defmodule SdrAgent.Prototype.Cluster do
@@ -77,11 +74,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     passed these checks" — never absence, adoption of another directory, or
     permission to repair.
 
-    Stage: pure GREEN. `reasons/0`, `pinned/0`, `parse_marker/1`,
-    `parse_control/1`, `parse_uid/1`, `paths_ok?/1` and step 0 of `check/1`
-    are implemented. `check/1` on a valid paths map and `marker/0` still
-    return `{:error, :not_implemented}`: steps 1-12 do not exist yet.
+    Both child commands capture their output in memory. The parser bounds
+    are not child-output allocation limits or wall-clock/kill guarantees.
     """
+
+    alias SdrAgent.ChildEnv
 
     @type marker :: %{system_identifier: pos_integer(), data_dir: String.t()}
     @type failure ::
@@ -150,15 +147,150 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def reasons, do: @reasons
 
     @doc "Runs the proof on the pinned facts."
-    @spec marker() :: {:ok, marker()} | {:error, failure() | :not_implemented}
-    def marker, do: red({:error, :not_implemented})
+    @spec marker() :: {:ok, marker()} | {:error, failure()}
+    def marker, do: check(pinned())
 
     @doc "Runs the proof on an explicit, trusted paths map (tests, scratch roots)."
-    @spec check(term()) :: {:ok, marker()} | {:error, failure() | :not_implemented}
+    @spec check(term()) :: {:ok, marker()} | {:error, failure()}
     def check(paths) do
-      if paths_ok?(paths),
-        do: red({:error, :not_implemented}),
-        else: {:error, :cluster_check_failed}
+      if paths_ok?(paths), do: proof(paths), else: {:error, :cluster_check_failed}
+    catch
+      _kind, _reason -> {:error, :cluster_check_failed}
+    end
+
+    defp proof(paths) do
+      data = paths.root <> "/pgdata"
+
+      with {:ok, uid} <- uid(),
+           :ok <- ancestors(paths.root, uid),
+           :ok <- marker_owned(paths.root <> "/CLUSTER", uid),
+           {:ok, fields} <- read_marker(paths.root <> "/CLUSTER"),
+           :ok <- marker_fields(fields, paths, data),
+           :ok <- data_owned(data, uid),
+           :ok <- equal(fields.binary, paths.pg_bin, :binary_mismatch),
+           {:ok, digits} <- control(paths.pg_bin, data),
+           :ok <- equal(digits, fields.system_identifier, :control_mismatch),
+           true <- owned?(paths.socket_dir, uid, :directory, 0o700),
+           {:ok, identifier} <- identifier(fields.system_identifier) do
+        {:ok, %{system_identifier: identifier, data_dir: data}}
+      else
+        false -> {:error, :socket_dir_not_owned}
+        {:error, _reason} = error -> error
+      end
+    end
+
+    defp uid do
+      case System.cmd("/usr/bin/id", ["-u"], env: ChildEnv.cmd([]), stderr_to_stdout: true) do
+        {output, 0} -> parse_uid(output)
+        _other -> {:error, :uid_unknown}
+      end
+    catch
+      _kind, _reason -> {:error, :uid_unknown}
+    end
+
+    defp ancestors(root, uid) do
+      base = "/Users/charles"
+
+      if String.starts_with?(root, base <> "/") do
+        components = root |> Path.relative_to(base) |> Path.split()
+        paths = [base | Enum.scan(components, base, &Path.join(&2, &1))]
+
+        if Enum.all?(paths, &safe_ancestor?(&1, uid)),
+          do: :ok,
+          else: {:error, :marker_not_owned}
+      else
+        {:error, :marker_not_owned}
+      end
+    end
+
+    defp safe_ancestor?(path, uid) do
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :directory, uid: ^uid, mode: mode}} ->
+          Bitwise.band(mode, 0o022) == 0
+
+        _other ->
+          false
+      end
+    end
+
+    defp marker_owned(path, uid) do
+      case File.lstat(path) do
+        {:error, :enoent} ->
+          {:error, :marker_missing}
+
+        {:ok, %File.Stat{type: :regular, uid: ^uid, mode: mode}} ->
+          if Bitwise.band(mode, 0o7777) == 0o600,
+            do: :ok,
+            else: {:error, :marker_not_owned}
+
+        _other ->
+          {:error, :marker_not_owned}
+      end
+    end
+
+    defp read_marker(path) do
+      case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
+        {:ok, file} ->
+          try do
+            case :file.read(file, @marker_max + 1) do
+              {:ok, bytes} -> parse_marker(bytes)
+              _other -> {:error, :marker_invalid}
+            end
+          after
+            :file.close(file)
+          end
+
+        _other ->
+          {:error, :marker_invalid}
+      end
+    end
+
+    defp marker_fields(fields, paths, data) do
+      if fields.data_dir == data and fields.socket_dir == paths.socket_dir and
+           fields.port == Integer.to_string(paths.port),
+         do: :ok,
+         else: {:error, :marker_mismatch}
+    end
+
+    defp data_owned(data, uid) do
+      if owned?(data, uid, :directory, 0o700) and
+           owned?(data <> "/global", uid, :directory, 0o700) and
+           owned?(data <> "/global/pg_control", uid, :regular, 0o600),
+         do: :ok,
+         else: {:error, :data_dir_not_owned}
+    end
+
+    defp owned?(path, uid, type, expected_mode) do
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: ^type, uid: ^uid, mode: mode}} ->
+          Bitwise.band(mode, 0o7777) == expected_mode
+
+        _other ->
+          false
+      end
+    end
+
+    defp control(binary, data) do
+      case System.cmd(binary <> "/pg_controldata", ["-D", data],
+             env: ChildEnv.cmd([], [{"LC_ALL", "C"}]),
+             stderr_to_stdout: true
+           ) do
+        {output, 0} -> parse_control(output)
+        _other -> {:error, :control_unreadable}
+      end
+    catch
+      _kind, _reason -> {:error, :control_unreadable}
+    end
+
+    defp equal(value, value, _reason), do: :ok
+    defp equal(_left, _right, reason), do: {:error, reason}
+
+    defp identifier(digits) do
+      value = String.to_integer(digits)
+
+      if value in 1..18_446_744_073_709_551_615,
+        do: {:ok, value},
+        else: {:error, :marker_invalid}
     end
 
     @doc """
@@ -245,9 +377,5 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp canonical_path?(_path), do: false
-
-    # RED stub result for the still deny-only steps 1-12, typed dynamic() so
-    # callers compile against it.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   end
 end
