@@ -105,6 +105,21 @@ defmodule SdrAgent.MacAgentTest do
   end
 
   describe "durable launch-once journal" do
+    test "reuses a nonce only while requested; launching or an absent journal means fresh", ctx do
+      root = ctx.settings["journal_dir"]
+      assert :ok = invoke(Journal, :prepare, [root])
+      assert {:ok, nonce} = invoke(Journal, :next_nonce, [root])
+      assert nonce =~ ~r/\A[0-9a-f]{32}\z/
+      assert invoke(Journal, :next_nonce, [root]) == {:ok, nonce}
+      assert :ok = invoke(Journal, :launch_once, [root, @call_id, nonce])
+      assert {:ok, next} = invoke(Journal, :next_nonce, [root])
+      refute next == nonce
+      other = Path.join(ctx.root, "absent-journal")
+      assert :ok = invoke(Journal, :prepare, [other])
+      assert {:ok, fresh} = invoke(Journal, :next_nonce, [other])
+      refute fresh in [nonce, next]
+    end
+
     test "exactly one local process wins the exclusive launching marker", ctx do
       root = ctx.settings["journal_dir"]
       assert :ok = invoke(Journal, :prepare, [root])
@@ -201,7 +216,7 @@ defmodule SdrAgent.MacAgentTest do
             Map.put(call(), "call_id", "../../unsafe"),
             Map.put(call(), "request_digest", "bad"),
             Map.put(call(), "schema", []),
-            Map.put(call(), "prompt", String.duplicate("x", 1_048_577))
+            Map.put(call(), "prompt", String.duplicate("x", 262_145))
           ] do
         assert {:error, :invalid_call} = invoke(Launch, :argv, [input])
       end
@@ -314,20 +329,82 @@ defmodule SdrAgent.MacAgentTest do
         assert %{"pins" => pins} = Jason.decode!(body)
         refute Map.has_key?(pins, "executable")
         refute body =~ ctx.executable
-        Req.Test.json(conn, %{"status" => "ready"})
+        Req.Test.json(conn, %{"intake" => "open"})
       end)
 
       assert :ok = invoke(Client, :heartbeat, [client])
     end
+
+    test "paused intake blocks new work but keeps an in-flight heartbeat healthy", ctx do
+      client = client(ctx)
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, %{"intake" => "paused"}) end)
+      assert {:error, :worker_paused} = invoke(Client, :heartbeat, [client])
+      assert :ok = invoke(Client, :heartbeat, [client, :inflight])
+    end
   end
 
   describe "one outbound worker iteration" do
+    test "an uncertain claim is retrieved only with the same requested nonce", ctx do
+      assert {:ok, config} = invoke(Config, :new, [ctx.settings])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        case conn.request_path do
+          "/worker/heartbeat" ->
+            Req.Test.json(conn, %{"intake" => "open"})
+
+          "/worker/claim" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(self(), {:claim_nonce, Jason.decode!(body)["claim_nonce"]})
+            Plug.Conn.send_resp(conn, 503, "uncertain claim")
+        end
+      end)
+
+      assert {:error, :remote_refused} =
+               invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+
+      assert_received {:claim_nonce, first}
+
+      assert {:error, :remote_refused} =
+               invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+
+      assert_received {:claim_nonce, ^first}
+    end
+
+    test "long child calls heartbeat periodically and stop on worker revocation", ctx do
+      File.write!(
+        ctx.executable,
+        "#!/bin/sh\n/bin/cat >/dev/null\n/bin/sleep 0.1\nprintf 'synthetic transcript'\n"
+      )
+
+      PinnedCLI.inject_identity!(ctx.executable, store: Path.join(ctx.root, "fixture-store"))
+      assert {:ok, config} = invoke(Config, :new, [ctx.settings])
+
+      beat = fn ->
+        send(self(), :child_heartbeat)
+        :ok
+      end
+
+      assert {:ok, "synthetic transcript"} =
+               invoke(Launch, :run, [config, call(), [heartbeat: beat, heartbeat_interval: 10]])
+
+      assert_received :child_heartbeat
+
+      assert {:error, :unauthorized} =
+               invoke(Launch, :run, [
+                 config,
+                 call(),
+                 [heartbeat: fn -> {:error, :unauthorized} end, heartbeat_interval: 10]
+               ])
+
+      assert Path.wildcard(Path.join(config.journal_dir, "prompt-*")) == []
+    end
+
     test "an empty queue never launches a CLI", ctx do
       assert {:ok, config} = invoke(Config, :new, [ctx.settings])
 
       Req.Test.stub(__MODULE__, fn conn ->
         case conn.request_path do
-          "/worker/heartbeat" -> Req.Test.json(conn, %{"status" => "ready"})
+          "/worker/heartbeat" -> Req.Test.json(conn, %{"intake" => "open"})
           "/worker/claim" -> Req.Test.json(conn, %{"call" => nil})
           _ -> flunk("an idle worker must not complete a call")
         end
@@ -353,7 +430,7 @@ defmodule SdrAgent.MacAgentTest do
       Req.Test.stub(__MODULE__, fn conn ->
         case conn.request_path do
           "/worker/heartbeat" ->
-            Req.Test.json(conn, %{"status" => "ready"})
+            Req.Test.json(conn, %{"intake" => "open"})
 
           "/worker/claim" ->
             Req.Test.json(conn, %{"call" => call()})
@@ -388,6 +465,80 @@ defmodule SdrAgent.MacAgentTest do
       refute log =~ init
     end
 
+    test "late, conflicting and unauthorized completions never relaunch the call", ctx do
+      File.write!(
+        ctx.executable,
+        "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' 'synthetic transcript'\n"
+      )
+
+      PinnedCLI.inject_identity!(ctx.executable, store: Path.join(ctx.root, "fixture-store"))
+
+      for {status, expected} <- [
+            {"late", :late_result},
+            {"conflict", :result_conflict},
+            {403, :unauthorized}
+          ] do
+        settings = Map.put(ctx.settings, "journal_dir", Path.join(ctx.root, "journal-#{status}"))
+        assert {:ok, config} = invoke(Config, :new, [settings])
+
+        Req.Test.stub(__MODULE__, fn conn ->
+          case conn.request_path do
+            "/worker/heartbeat" ->
+              Req.Test.json(conn, %{"intake" => "open"})
+
+            "/worker/claim" ->
+              Req.Test.json(conn, %{"call" => call()})
+
+            "/worker/complete" ->
+              send(self(), :completion_seen)
+
+              if status == 403,
+                do: Plug.Conn.send_resp(conn, 403, "revoked"),
+                else: Req.Test.json(conn, %{"status" => status})
+          end
+        end)
+
+        assert {:error, ^expected} =
+                 invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+
+        assert_received :completion_seen
+
+        assert {:error, :already_launched} =
+                 invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+
+        refute_received :completion_seen
+      end
+    end
+
+    test "a spent nonce response never launches and the next poll uses a new nonce", ctx do
+      assert {:ok, config} = invoke(Config, :new, [ctx.settings])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        case conn.request_path do
+          "/worker/heartbeat" ->
+            Req.Test.json(conn, %{"intake" => "open"})
+
+          "/worker/claim" ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(self(), {:nonce_seen, Jason.decode!(body)["claim_nonce"]})
+
+            Req.Test.json(conn, %{
+              "call" => nil,
+              "prior" => %{"call_id" => @call_id, "state" => "completed"}
+            })
+
+          _ ->
+            flunk("spent nonce must not launch or complete")
+        end
+      end)
+
+      assert {:ok, :idle} = invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+      assert_received {:nonce_seen, first}
+      assert {:ok, :idle} = invoke(Agent, :run_once, [config, [plug: {Req.Test, __MODULE__}]])
+      assert_received {:nonce_seen, second}
+      refute first == second
+    end
+
     test "worker revocation prevents claim and child launch", ctx do
       assert {:ok, config} = invoke(Config, :new, [ctx.settings])
 
@@ -406,7 +557,7 @@ defmodule SdrAgent.MacAgentTest do
     assert Code.ensure_loaded?(task), "S-B7 standalone task is not implemented yet"
 
     assert_raise Mix.Error, "invalid mac agent options", fn ->
-      apply(task, :run, [["--token", @token]])
+      task.run(["--token", @token])
     end
   end
 
@@ -425,7 +576,9 @@ defmodule SdrAgent.MacAgentTest do
     """
 
     {output, status} =
-      System.cmd(System.find_executable("elixir"), ["-pa" | paths] ++ ["-e", code],
+      System.cmd(
+        System.find_executable("elixir"),
+        Enum.flat_map(paths, &["-pa", &1]) ++ ["-e", code],
         env: ChildEnv.cmd([]),
         stderr_to_stdout: true
       )
