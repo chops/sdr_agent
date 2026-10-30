@@ -23,7 +23,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     capture is unchanged.
   - Non-HTML carriers: receipt event, approval event and the signed export
     payload carry the block; the captured message bytes never do.
-  - The window `[2026-10-28T02:38:32Z, 2026-11-07T07:00:00Z)`: the
+  - The window `[2026-10-30T15:05:40Z, 2026-11-07T07:00:00Z)`: the
     inclusive start and the EXCLUSIVE end for delegated approval (at the
     raw `Approval :approve`) and capture; after the end the human path is
     unchanged: `:revoke` stays human-only and a human revokes and approves.

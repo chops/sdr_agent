@@ -66,10 +66,10 @@ defmodule SdrAgent.PrototypeOutreachFixtures do
     "%Ash.Filter{"
   ]
 
-  @window_start ~U[2026-10-28 02:38:32.000000Z]
+  @window_start ~U[2026-10-30 15:05:40.000000Z]
   @window_end ~U[2026-11-07 07:00:00.000000Z]
   # 11:00 in the demo campaign's America/Denver, outside its quiet hours.
-  @inside ~U[2026-10-29 17:00:00.000000Z]
+  @inside ~U[2026-10-30 17:00:00.000000Z]
 
   @doc "The inclusive start of the `d237-funding/1` window."
   def window_start, do: @window_start

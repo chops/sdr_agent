@@ -5,11 +5,11 @@ defmodule SdrAgent.Prototype.EntriesTest do
   pending item 4, Codex 2c9450b7 rulings 3c and 3d):
 
   - `SdrAgent.Prototype.Authority.funding_entry_sha256/0` is the golden
-    vector `d5630873…`, and the same entry with `total_attempts: 49` hashes
-    to the inequality control `d1a4c0eb…`;
+    vector `d8e675ce…`, and the same entry with `total_attempts: 99` hashes
+    to the inequality control `2aef0ace…`;
   - `policy_entry_sha256/0` is the canonical digest of the exact
     `d237-prototype/1` entry;
-  - a control pins the vectors to the literal entry of interfaces r6
+  - a control pins the vectors to the literal owner-approved D-269 entry
     independently of the Authority.
 
   The raw entries are read without prototype runtime: they are compiled
@@ -21,17 +21,17 @@ defmodule SdrAgent.Prototype.EntriesTest do
   alias SdrAgent.Audit.Canonical
 
   @authority SdrAgent.Prototype.Authority
-  @golden "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
-  @control_49 "d1a4c0ebbabf0d9d88869a342f1129b583cd44f35e9c2e993ea967cf81853675"
+  @golden "d8e675ce642857511ed201fab998484d9cfd40e040f891f141a469d3294d825b"
+  @control_99 "2aef0ace8640977bea45d5b6a09d38c7c201fd409ff6e6567731f04776cdedfc"
 
   @funding_entry %{
-    total_attempts: 50,
-    starts_at: ~U[2026-10-28 02:38:32.000000Z],
+    total_attempts: 100,
+    starts_at: ~U[2026-10-30 15:05:40.000000Z],
     expires_at: ~U[2026-11-07 07:00:00.000000Z],
     profile_ids: [:claude_cli_opus],
     funded_scope: [{:assignment, [:qualification, :evidence_extraction, :outreach_proposal]}],
-    allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}],
-    decision_refs: ["D-238", "D-239", "D-243"]
+    allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 100}],
+    decision_refs: ["D-238", "D-239", "D-243", "D-269"]
   }
 
   @policy_entry %{
@@ -50,9 +50,9 @@ defmodule SdrAgent.Prototype.EntriesTest do
 
   defp digest_hex(term), do: Base.encode16(Canonical.sha256(term), case: :lower)
 
-  test "control: the literal interfaces r6 funding entry hashes to the golden vector" do
+  test "control: the literal D-269 funding entry hashes to the golden vector" do
     assert digest_hex(@funding_entry) == @golden
-    assert digest_hex(%{@funding_entry | total_attempts: 49}) == @control_49
+    assert digest_hex(%{@funding_entry | total_attempts: 99}) == @control_99
   end
 
   test "funding_entry_sha256/0 is the golden vector and funding_entry/0 the exact entry" do
@@ -60,11 +60,11 @@ defmodule SdrAgent.Prototype.EntriesTest do
     assert call(@authority, :funding_entry, []) == @funding_entry
   end
 
-  test "the inequality control: total_attempts 49 changes the digest" do
+  test "the inequality control: total_attempts 99 changes the digest" do
     entry = call(@authority, :funding_entry, [])
     assert is_map(entry), "funding_entry/0 returned #{inspect(entry)}"
-    changed = digest_hex(%{entry | total_attempts: 49})
-    assert changed == @control_49
+    changed = digest_hex(%{entry | total_attempts: 99})
+    assert changed == @control_99
     refute changed == @golden
   end
 

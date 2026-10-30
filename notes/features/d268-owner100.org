@@ -59,4 +59,12 @@ Canonical c3-20261030T152331Z-73357:0/4 passed,4 assertion failures,0 skipped/ex
 * TDD status
 Phase4a test-only plus approved plan/decision records. New-start Basis assertion added.
 Canonical r2 c3-20261030T152848Z-26997:0/5 passed,5 intended assertion failures,0 skipped/excluded; fifth failure is new-start basis_invalid. Complete manifest875de7d0e0a9672cc804e9f937560ea183ecac8fc119f597e36d1d81a81f8cf1 verified. Disposable pair dropped, leases released. Format rc0. No production source change and no real model/retained DB access.
-TDD Verification: VERIFIED manually from canonical output (assertions only, no setup/compile error); Phase4b awaits correlated Claude RED GO. No overall gate PASS claimed.
+TDD Verification: VERIFIED manually from canonical output (assertions only, no setup/compile error). Claude RED GO m_1793374501000000000_1d2f8564 permits Phase4b. No overall gate PASS claimed.
+* GREEN implementation and verification
+Implemented new closed receipt worksheet, exact100 funding/start and reviewed two-start Basis shape. Binding policy entry, admission debit mechanics, private reader, provenance locks, replay rules, expiry and production refusal are unchanged.
+New OwnerAllowanceControlsTest preserves malformed/duplicate/oversized/schema/privacy/path controls; superseded historical route arithmetic is removed rather than faked with zero counts. OwnerAllowanceTest covers100/101, failed/uncertain attempts charged, same-grant wrapper replay with no reset and old-basis historical verification.
+Canonical c3-20261030T154012Z-44145:13/13,0 skipped/excluded; manifest68bcb179e8b4099782feb1d9410ae4fd5c9cfc79b453eb2e851b7451491006af verified.
+Canonical c3-20261030T154159Z-62336:128/128,0 skipped/excluded; manifest4c8ea6eac397bd6add0e41196715edcd4c276464008d137d66471c5c5d7c4b5f verified. Both disposable DB pairs dropped, leases released. No real-model or retained5542 access.
+Format rc0; dev compile --warnings-as-errors rc0 (492 files). Full clean-head gate and peer GREEN source/result review pending; no overall PASS claimed.
+Replay clarification: public provisioning wrapper replays the SAME unchanged grant, raw :provision_prototype action refuses grant_exists. Both preserve capacity; existing wrapper semantics are deliberately retained.
+Architecture unchanged - no diagram update needed: same domains, resources, integration, supervision, and runtime flow; only the existing allowance invariant and reviewed historical basis shape change. ADR0023 accepted; no migrations or dependencies.

@@ -420,6 +420,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp section?(_not_a_map, _section, _leaves), do: false
 
+    # Both owner-reviewed starts remain valid historical shape constants.
+    # New decisions still rebuild from their exact current funding facts;
+    # historical verification never substitutes those current facts.
+    defp fixed?({"window", "starts_at"}, value),
+      do:
+        value in [
+          "2026-10-28T02:38:32.000000Z",
+          "2026-10-30T15:05:40.000000Z"
+        ]
+
     defp fixed?(path, value) do
       case Map.fetch(@fixed, path) do
         {:ok, fixed} -> value == fixed

@@ -1,59 +1,21 @@
 defmodule SdrAgent.Prototype.ProvisionTest do
   @moduledoc """
-  IF-2 provisioning (interfaces r6; F7): the counts-only budget worksheet
-  with byte-resolved evidence, and the one `:provision_prototype` grant with
-  the exact `d237-funding/1` terms, the anchor as creator and updater, a
-  replay, a refused second grant, and no term change, release or ordinary
-  creation in prototype runtime.
+  D-269 owner-receipt provisioning through the existing domain API.
+  The grant keeps d237-funding/1, the anchor as creator/updater, one-issue
+  provenance and unchanged-term replay without new capacity.
+  Parser/privacy controls now live in OwnerAllowanceControlsTest: historical
+  six-route counting is superseded, never rewritten as zero consumption.
   """
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Agents
+  alias SdrAgent.OwnerAllowanceFixtures
 
   @authority SdrAgent.Prototype.Authority
-  @routes ~w(prototype_binding owner_dev owner_calibration hosted other_owner)
 
-  # An exclusive, unpredictable, owned 0700 root (Codex 39a6fd61 R1).
   defp scratch_dir!, do: PrototypeFixtures.scratch_dir!()
-
-  defp evidence!(root, name, body \\ "counts-only receipt\n") do
-    path = Path.join(root, name)
-    File.write!(path, body)
-    File.chmod!(path, 0o600)
-    %{"path" => name, "sha256" => sha(body)}
-  end
-
+  defp worksheet(root), do: OwnerAllowanceFixtures.worksheet(root)
   defp sha(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
-
-  defp basis("prototype_binding"), do: "agent_receipt"
-  defp basis(_owner_route), do: "owner_attestation"
-
-  defp worksheet(root, overrides \\ %{}) do
-    routes =
-      for route <- @routes do
-        %{
-          "route" => route,
-          "basis" => basis(route),
-          "consumed" => 0,
-          "evidence" => evidence!(root, "#{route}.receipt")
-        }
-      end
-
-    Map.merge(
-      %{
-        "schema" => "d237-budget-worksheet/1",
-        "shared_total" => 60,
-        "window_starts_at" => "2026-10-28T02:38:32.000000Z",
-        "as_of" => "2026-10-29T12:00:00Z",
-        "routes" => routes,
-        "previous_bindings" => %{
-          "consumed" => 0,
-          "evidence" => evidence!(root, "previous.receipt")
-        }
-      },
-      overrides
-    )
-  end
 
   defp provision(ctx, actor \\ nil) do
     call(Agents, :provision_prototype_grant, [
@@ -69,172 +31,12 @@ defmodule SdrAgent.Prototype.ProvisionTest do
     ])
   end
 
-  defp check(root, map) do
-    bytes = Jason.encode!(map)
-    call(@authority, :check_worksheet, [bytes, sha(bytes), root])
-  end
+  test "the owner allowance resolves its exact receipt without asserting historical consumption" do
+    root = scratch_dir!()
+    bytes = root |> worksheet() |> Jason.encode!()
 
-  describe "the budget worksheet" do
-    test "a complete worksheet with resolvable evidence passes" do
-      root = scratch_dir!()
-      result = check(root, worksheet(root))
-      assert match?({:ok, %{remaining: 60}}, result), "worksheet: #{inspect(result)}"
-    end
-
-    test "a missing, duplicated or owner-route agent receipt is budget_unbounded" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      [first | rest] = base["routes"]
-
-      cases = [
-        missing: %{base | "routes" => rest},
-        duplicated: %{base | "routes" => [first, first | tl(rest)]},
-        owner_agent_receipt: %{
-          base
-          | "routes" =>
-              Enum.map(base["routes"], fn
-                %{"route" => "owner_dev"} = r -> %{r | "basis" => "agent_receipt"}
-                r -> r
-              end)
-        },
-        hosted_agent_receipt: %{
-          base
-          | "routes" =>
-              Enum.map(base["routes"], fn
-                %{"route" => "hosted"} = r -> %{r | "basis" => "agent_receipt"}
-                r -> r
-              end)
-        }
-      ]
-
-      for {name, map} <- cases do
-        result = check(root, map)
-
-        assert result == {:error, :budget_unbounded},
-               "#{name}: expected {:error, :budget_unbounded}, got #{inspect(result)}"
-      end
-    end
-
-    # Coverage of the f0a824e caller boundaries (Codex 47825d4a): recorded
-    # as coverage, not as RED.
-    test "coverage: one evidence path shared by two otherwise valid references is budget_unbounded" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      [first, second | rest] = base["routes"]
-      assert first["evidence"]["path"] == "prototype_binding.receipt", "fixture construction"
-      assert match?({:ok, %{remaining: 60}}, check(root, base)), "fixture: the valid worksheet"
-
-      two_routes = %{
-        base
-        | "routes" => [first, %{second | "evidence" => first["evidence"]} | rest]
-      }
-
-      route_and_previous = %{
-        base
-        | "previous_bindings" => %{base["previous_bindings"] | "evidence" => first["evidence"]}
-      }
-
-      for {name, map} <- [two_routes: two_routes, route_and_previous: route_and_previous] do
-        result = check(root, map)
-        assert result == {:error, :budget_unbounded}, "#{name}: #{inspect(result)}"
-      end
-    end
-
-    test "coverage: distinct evidence paths with identical bytes are allowed" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      refs = [base["previous_bindings"]["evidence"] | Enum.map(base["routes"], & &1["evidence"])]
-
-      assert length(Enum.uniq_by(refs, & &1["path"])) == 6, "fixture: six distinct paths"
-      assert length(Enum.uniq_by(refs, & &1["sha256"])) == 1, "fixture: one shared digest"
-      assert match?({:ok, %{remaining: 60}}, check(root, base))
-    end
-
-    test "coverage: an evidence file of exactly 16384 bytes resolves; 16385 bytes is budget_unbounded" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      [first | rest] = base["routes"]
-
-      sized =
-        for {name, size} <- [at_bound: 16_384, over_bound: 16_385], into: %{} do
-          evidence = evidence!(root, "#{name}.receipt", String.duplicate("a", size))
-          stat = File.stat!(Path.join(root, evidence["path"]))
-          assert stat.size == size, "fixture: #{name} size #{stat.size}"
-          assert Bitwise.band(stat.mode, 0o777) == 0o600, "fixture: #{name} mode"
-          {name, evidence}
-        end
-
-      at_bound =
-        check(root, %{base | "routes" => [%{first | "evidence" => sized.at_bound} | rest]})
-
-      assert match?({:ok, %{remaining: 60}}, at_bound), "16384 bytes: #{inspect(at_bound)}"
-
-      over = check(root, %{base | "routes" => [%{first | "evidence" => sized.over_bound} | rest]})
-      assert over == {:error, :budget_unbounded}, "16385 bytes: #{inspect(over)}"
-    end
-
-    test "evidence that does not resolve to the recorded bytes is budget_unbounded" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      [first | rest] = base["routes"]
-      wide = evidence!(root, "wide.receipt")
-      File.chmod!(Path.join(root, "wide.receipt"), 0o644)
-      File.ln_s!(Path.join(root, "owner_dev.receipt"), Path.join(root, "link.receipt"))
-
-      bad_evidence = [
-        invented: %{"path" => "invented.receipt", "sha256" => sha("x")},
-        hash_mismatch: %{first["evidence"] | "sha256" => sha("other bytes")},
-        traversal: %{"path" => "../outside.receipt", "sha256" => sha("x")},
-        wide_mode: wide,
-        symlink: %{"path" => "link.receipt", "sha256" => first["evidence"]["sha256"]}
-      ]
-
-      for {name, evidence} <- bad_evidence do
-        map = %{base | "routes" => [%{first | "evidence" => evidence} | rest]}
-        result = check(root, map)
-
-        assert result == {:error, :budget_unbounded},
-               "#{name} evidence: expected {:error, :budget_unbounded}, got #{inspect(result)}"
-      end
-    end
-
-    test "less than the 50-attempt ceiling remaining is budget_below_ceiling" do
-      root = scratch_dir!()
-      base = worksheet(root)
-
-      routes =
-        Enum.map(base["routes"], fn
-          %{"route" => "owner_dev"} = r -> %{r | "consumed" => 5}
-          r -> r
-        end)
-
-      map = %{
-        base
-        | "routes" => routes,
-          "previous_bindings" => %{base["previous_bindings"] | "consumed" => 6}
-      }
-
-      assert check(root, map) == {:error, :budget_below_ceiling}
-
-      exact = %{map | "previous_bindings" => %{base["previous_bindings"] | "consumed" => 5}}
-      assert match?({:ok, %{remaining: 50}}, check(root, exact))
-    end
-
-    test "a wrong digest, an unknown key or a bad window is worksheet_invalid" do
-      root = scratch_dir!()
-      base = worksheet(root)
-      bytes = Jason.encode!(base)
-
-      assert call(@authority, :check_worksheet, [bytes, sha("other"), root]) ==
-               {:error, :worksheet_invalid}
-
-      assert check(root, Map.put(base, "extra", 1)) == {:error, :worksheet_invalid}
-
-      assert check(root, %{base | "as_of" => "2026-10-27T00:00:00Z"}) ==
-               {:error, :worksheet_invalid}
-
-      assert check(root, %{base | "shared_total" => 61}) == {:error, :worksheet_invalid}
-    end
+    assert {:ok, %{remaining: 100}} =
+             call(@authority, :check_worksheet, [bytes, sha(bytes), root])
   end
 
   describe "provisioning" do
@@ -254,8 +56,8 @@ defmodule SdrAgent.Prototype.ProvisionTest do
       assert match?({:ok, _}, result), "provision: #{inspect(result)}"
       {:ok, grant} = result
 
-      assert grant.total_attempts == 50
-      assert grant.starts_at == ~U[2026-10-28 02:38:32.000000Z]
+      assert grant.total_attempts == 100
+      assert grant.starts_at == ~U[2026-10-30 15:05:40.000000Z]
       assert grant.expires_at == ~U[2026-11-07 07:00:00.000000Z]
       assert grant.profile_ids == [:claude_cli_opus]
       assert grant.created_by_id == ctx.fx.anchor.id

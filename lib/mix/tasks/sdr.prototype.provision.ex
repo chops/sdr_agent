@@ -8,7 +8,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     --budget-worksheet PATH --budget-worksheet-sha256 HEX`: the D-237
     provision task (interfaces r6 IF-2 "Provisioning"; D-268 M6b; Codex
     rulings a3f14552 and delta review f1bffa89). It provisions, or replays,
-    the one grant as the session's resolved prototype operator.
+    the one grant as the session's resolved prototype operator. D-269 /
+    ADR-0023 replaces its historical-count prerequisite with the closed
+    `d237-owner-allowance/1` worksheet and the exact owner receipt for 100
+    additional attempts. Replays never add capacity or reset charges.
 
     `parse/1` validates the arguments with no I/O: each of the three keys
     exactly once, `--agent` `claude_code` or `codex_cli`, a nonempty

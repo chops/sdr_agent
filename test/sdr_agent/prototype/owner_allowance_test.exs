@@ -152,6 +152,64 @@ defmodule SdrAgent.Prototype.OwnerAllowanceTest do
     assert :ok = SdrAgent.Prototype.Basis.verify_new(%{basis: basis, basis_sha256: digest}, facts)
   end
 
+  test "the original old funding basis remains historical truth, not a new allowance" do
+    fx = G.prototype!()
+    run = G.run!(fx)
+    invocation = G.completed!(fx, run)
+    at = SdrAgent.Clock.utc_now()
+
+    old_funding = %{
+      Authority.funding_entry()
+      | total_attempts: 50,
+        starts_at: ~U[2026-10-28 02:38:32.000000Z],
+        allocations: [%{key: :b1, applies_to: [:b1], profile_id: :claude_cli_opus, attempts: 50}],
+        decision_refs: ["D-238", "D-239", "D-243"]
+    }
+
+    old_facts = %{
+      snapshot: fx.snapshot,
+      entry: Authority.policy_entry(),
+      funding: old_funding,
+      invocation: invocation,
+      run: run,
+      grant: fx.grant,
+      decided_at: at
+    }
+
+    assert {:ok, old_basis, old_sha} = SdrAgent.Prototype.Basis.build(old_facts)
+
+    assert old_basis["funding"]["sha256"] ==
+             "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a"
+
+    refute old_basis["funding"]["sha256"] == Authority.funding_entry_sha256()
+    original = %{basis: old_basis, basis_sha256: old_sha}
+
+    # Pure historical verification is deliberately given only recorded facts,
+    # not a current grant/entry. No old database row or event is rewritten.
+    historical = %{
+      release: %{
+        disposition: :released_unverified,
+        tenant_id: invocation.tenant_id,
+        model_invocation_id: invocation.id,
+        decided_at: at
+      },
+      invocation: invocation,
+      run: run,
+      recorded: G.expected_authority(fx, invocation)
+    }
+
+    assert :ok = SdrAgent.Prototype.Basis.verify_historical(original, historical)
+    new_facts = %{old_facts | funding: Authority.funding_entry()}
+    assert {:error, :basis_invalid} = SdrAgent.Prototype.Basis.verify_new(original, new_facts)
+
+    unapproved = %{
+      new_facts
+      | funding: %{new_facts.funding | starts_at: ~U[2026-10-30 15:05:41.000000Z]}
+    }
+
+    assert {:error, :basis_invalid} = SdrAgent.Prototype.Basis.build(unapproved)
+  end
+
   defp charged(fx) do
     ModelInvocation
     |> Ash.Query.filter(grant_id == ^fx.grant.id)
