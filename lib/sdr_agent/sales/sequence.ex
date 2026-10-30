@@ -97,7 +97,8 @@ defmodule SdrAgent.Sales.Sequence do
       change {AppendEvent,
               event_type: "sales.sequence.created",
               category: :domain_change,
-              arguments: [:seed_provenance_sha256]}
+              arguments: [:seed_provenance_sha256],
+              context_links: [correlation_id: :sdr_seed_run_id]}
     end
 
     update :update do
@@ -146,6 +147,7 @@ defmodule SdrAgent.Sales.Sequence do
     policy action(:activate) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
       authorize_if Checks.SeedingAllowed
+      authorize_if SdrAgent.Prototype.Checks.SeedScope
     end
 
     policy action(:seed) do

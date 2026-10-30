@@ -127,7 +127,8 @@ defmodule SdrAgent.Sales.SequenceStep do
       change {AppendEvent,
               event_type: "sales.sequence_step.created",
               category: :domain_change,
-              arguments: [:seed_provenance_sha256]}
+              arguments: [:seed_provenance_sha256],
+              context_links: [correlation_id: :sdr_seed_run_id]}
     end
 
     update :update do

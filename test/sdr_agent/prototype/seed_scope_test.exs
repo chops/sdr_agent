@@ -365,4 +365,56 @@ defmodule SdrAgent.Prototype.SeedScopeTest do
              :stale_refused
            end) == {:ok, :stale_refused}
   end
+
+  defp validates_member(ctx, kind) do
+    run(ctx, fn ref ->
+      members = members!(ref, ctx)
+      changeset = Ash.Changeset.for_update(members[kind], :activate, %{}, actor: ctx.actor)
+      assert call(@scope, :valid?, [call(@scope, :fetch, [ref]), changeset, ctx.actor])
+      :validated
+    end)
+  end
+
+  test "a complete registered scope validates its ICP activation", ctx do
+    assert validates_member(ctx, :icp_definition) == {:ok, :validated}
+  end
+
+  test "a complete registered scope validates its sequence activation", ctx do
+    assert validates_member(ctx, :sequence) == {:ok, :validated}
+  end
+
+  test "a complete registered scope validates its campaign activation", ctx do
+    assert validates_member(ctx, :campaign) == {:ok, :validated}
+  end
+
+  test "complete scope refuses an unrelated row, forged actor and tampered or released copy",
+       ctx do
+    parent = self()
+
+    assert run(ctx, fn ref ->
+             members = members!(ref, ctx)
+             scope = call(@scope, :fetch, [ref])
+
+             same =
+               Ash.Changeset.for_update(members.icp_definition, :activate, %{}, actor: ctx.actor)
+
+             unrelated = Ash.Changeset.for_update(icp(ctx, nil), :activate, %{}, actor: ctx.actor)
+             forged = %{ctx.actor | tenant_id: Ecto.UUID.generate()}
+             assert call(@scope, :valid?, [scope, unrelated, ctx.actor]) == false
+             assert call(@scope, :valid?, [scope, same, forged]) == false
+             assert call(@scope, :valid?, [%{scope | ref: make_ref()}, same, ctx.actor]) == false
+
+             assert call(@scope, :valid?, [
+                      %{scope | digest: String.duplicate("0", 64)},
+                      same,
+                      ctx.actor
+                    ]) == false
+
+             send(parent, {:released_scope, scope, same})
+             :denied
+           end) == {:ok, :denied}
+
+    assert_received {:released_scope, scope, changeset}
+    assert call(@scope, :valid?, [scope, changeset, ctx.actor]) == false
+  end
 end

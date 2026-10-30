@@ -278,6 +278,105 @@ needs a further reviewed amendment and a green concurrency suite
 (independent connections, both commit orders, waits shown on advisory
 locks).
 
+#### D-237 amendment (2026-10-29): registered seed-run activation authority
+
+**Status: ACCEPTED.** The owner accepted this exact r2 text in D-268(1),
+recorded in commit `9ed3eb6494c5b21dfc7f972f4409c22eec2e22e8`. The reviewed
+draft's SHA256 is `5c81c61dc616ddf80ed6ceb71b896cdcc935805f42ff565b4444497eff9e7e17`;
+Claude's independent exact-text PASS is `4cc8f4e1987733224db60efbda84b4508e0c87f6d7db5d5b55fe652714b9aeb1`.
+Apart from this status paragraph the inserted text is unchanged. Acceptance
+is not a source, policy or runtime execution grant.
+
+##### Context and alternatives
+
+The local prototype operator must activate only the ICP, sequence and
+campaign created by its own first seed run. A tenant match, a free context
+map, a provenance digest alone, or a newly written profile paired with an
+old draft does not establish that relationship. Row-version `xmin` is not
+authority: subtransactions and 32-bit versus extended transaction identity
+make it unsuitable here.
+
+Two creation-evidence mechanisms were considered. W takes the audit chain
+head first and uses its sequence as a watermark. That adds lock-order
+inversions against existing revision and unique-key writers. C uses a
+fresh seed-run correlation id on the existing creation events and adds no
+early head lock. C is selected; existing audit appends keep their current
+locks and ordering. No new persisted seed-run entity is introduced.
+
+##### Decision
+
+We will authorize this narrow seed activation through a registered,
+transaction-bound `SeedScope`, following the existing trusted-process
+conventions of Prelocked and ProvisionScope without changing either.
+
+1. The scope is created only for the freshly resolved live prototype
+   operator, inside its existing transaction, with one active scope per
+   calling process. Tenant and delegation are derived from that actor.
+   It binds a fresh reference, the complete registered state, the
+   provenance digest, a fresh random UUID run id, the top-level
+   `pg_current_xact_id()` and transaction-local markers.
+2. Its ordered members are offering-profile revision 1, ICP, sequence,
+   sequence step and campaign. Each is re-read by tenant/id through the
+   existing kernel-context read path. Each must have exactly one matching
+   authoritative creation event: resource/type/subject/action, tenant,
+   delegation actor and this run's correlation id. Sales members must also
+   carry the exact seed provenance digest; the profile must carry the
+   validated provenance note. Stored step/campaign relationships must
+   match the other bound members. Old drafts or caller-supplied structs
+   cannot substitute for those reads.
+3. The existing AppendEvent `context_links` copies `sdr_seed_run_id` onto
+   `AuditEvent.correlation_id` only for the five seed action definitions.
+   SettingsRevision is invoked twice, so both profile and guide creation
+   events receive it. Seed still writes both revisions; the guide is not
+   a sixth activation member. No column, migration, other action or
+   operator read permission is added. A forged context key without a live
+   registered scope supplies no activation authority.
+4. The opening marker and a separate marker after each vouched member
+   must remain set in the same top-level transaction. A rollback that
+   undoes a vouched fact reverts its marker. The complete scope must equal
+   the entry registered under its reference in this same process.
+   Unregistered, incomplete, copied, tampered, cross-process, released or
+   transaction-invalid scopes refuse. Registration is removed when the
+   scope callback returns or exits in any way (return, raise, throw or
+   exit); transaction completion and marker rollback do not extend its
+   authority. The full transaction id alone
+   is not an application-savepoint lifetime proof.
+5. The new policy allowance applies only to `:activate` on IcpDefinition,
+   Sequence and Campaign when that changeset's stored id, tenant and
+   resource kind equal the corresponding member of the complete scope,
+   and the live actor still resolves exactly. Ordinary runtime and the
+   production build refuse this allowance. Existing admin/seeder policy
+   lines, lifecycle transitions, row locks, step requirements and related
+   active checks remain. There is no broad operator activation, update,
+   retire, pause or resume permission.
+6. Seed owns the single enclosing Audit transaction. The helper does not
+   roll earlier writes back on its own: any member-write, bind or
+   activation refusal must make Seed roll back the whole seed. Seed
+   activates ICP, then sequence, then campaign. An exact historical seed
+   replay performs no activation or write; complete-but-inactive history
+   refuses rather than reactivating. Partial, ambiguous or differing
+   history cannot supply a new scope.
+
+##### Consequences and trust limit
+
+Creation evidence uses the existing append-only audit event and
+transaction-local marker mechanisms, without a new early chain-head lock.
+This does not claim that all existing application lock orders are
+deadlock-free. No public domain API accepts a caller-built scope; only
+the internal Seed path supplies the run context and activation scope.
+
+Like the referenced registered scopes, this is a trusted in-process
+convention, not a capability secure against arbitrary privileged server
+code. A run id is a correlation nonce, not a secret authorization token.
+Refs, markers and captured state are not logged. No direct API, outreach,
+model-budget, suppression, approval-binding or idempotency rule changes.
+
+Before positive policy authority, focused checks must prove exact member
+and kind binding, old/foreign/forged/rolled-back/released scope refusals,
+ordinary/prod refusal and unchanged ordinary activation. Seed's own
+checks must prove full rollback and replay-without-activation. Neither
+this ADR nor an entity PASS substitutes for that implementation evidence.
+
 ## Justification
 
 UUIDv7 costs nothing (built into the pinned Ash) and gives ordered, local

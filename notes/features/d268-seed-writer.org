@@ -146,3 +146,34 @@ proven. No policy references scope. Test WAE/format/Credo rc0; full gate not run
 MANIFEST0f9700a278dbfbedcfe7546b24cbe6eba14baaae21ab8e397ea8a3481e1c2ddb;
 all evidence hashes verified; owned pair dropped, leases released.
 Awaiting explicit Phase4b GO; no implementation or positive policy authority.
+
+* Phase4b scope progress and next writer checkpoint (2026-10-30T05:03Z)
+Claude GO m_1793335588000000000_ab42b8d1 accepted14 reached wrong-value failures;
+window to06:30Z, sandbox only, allow/deny in same GREEN, no assertion weakening.
+Original14 tests now pass with callbacks/member assertions reached (run
+c3-20261030T044848Z-43366). Added4 direct validity tests while valid? stayed
+deny-only:3 reached false failures at045002Z-54798, then18/18 at045104Z-64714.
+Policy RED initially had3 Forbidden failures +2 harness errors: public guarded
+calls were inside Repo.transaction, not the required Audit.transaction. Corrected
+only the policy test helper's transaction owner; no assertions changed. Corrected
+run c3-20261030T045643Z-17397 reached4 Forbidden failures (3 kinds + no-side-effect
+allow). Added the3 narrow policy lines and gated check;26/26 at045732Z-25143.
+No scope test assertion was removed or weakened; post-RED additions are separate.
+Accepted ADR-0009 r2 text installed with status paragraph/decision9ed3eb64 reference;
+all other text preserved. Claude owns diagram publication, so edge text follows.
+Statics2 changed-file format, test/dev WAE, repo Credo rc0 (955 files). Earlier
+Credo complexity failure at created_here? retained; replaced chained comparisons
+with exact five-field map equality, preserving predicates. Config/locks unchanged.
+Focused writer RED still returns not_implemented:14 reached stub assertion failures,
+33 controls pass,0 skip/exclude, c3-20261030T050255Z-75515; no setup/compiler errors.
+All six listed canonical evidence manifests independently verified; owned pairs
+dropped, leases released. Scope26 GREEN, writer14 RED, not overall M4 delivery.
+No full gate, production compile, real seed/model/import call claimed at this point.
+
+* Composite diagram edge text (Claude-owned F6)
+Seed.run live caller -> pure content/pin precheck -> Audit.transaction -> live
+binding lock/history check -> SeedScope.run -> scoped provenance Payload ->
+settings twice -> Sales ICP/sequence/step/campaign creates+ordered binds ->
+exact registered-scope activation ICP then sequence then campaign -> ids/digests.
+Replay branches before scope/writes and never reactivates. Any failure rolls back
+the writer transaction. This is installed scope support, not proof of a real seed.
