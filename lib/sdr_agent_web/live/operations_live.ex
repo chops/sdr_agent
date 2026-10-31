@@ -17,6 +17,12 @@ defmodule SdrAgentWeb.OperationsLive do
   scope's user; an auditor's forged event is refused and audited, a
   reviewer's cancel is refused by the Operation policy. An auditor's view is
   recorded before it is served. Updates live (`SdrAgentWeb.LiveRefresh`).
+
+  A current hosted owner sees permitted run metadata and the explicit
+  Operations worker facade controls. Ungranted Failure/Operation/Webhook
+  panels say unavailable, not empty. The one-time enrollment token is
+  displayed as base64url text and cleared on dismissal, reload or refusal.
+  No control launches a model call or grants ordinary admin/reviewer powers.
   """
   use SdrAgentWeb, :live_view
 
@@ -32,6 +38,7 @@ defmodule SdrAgentWeb.OperationsLive do
 
   @run_limit 50
   @operation_limit 50
+  @worker_pin_keys ~w(profile_id model_id cli_version executable_sha256)
 
   @impl true
   def mount(_params, _session, socket) do
@@ -41,6 +48,11 @@ defmodule SdrAgentWeb.OperationsLive do
        page_title: "Runs & operations",
        loaded?: false,
        withheld: nil,
+       workers: [],
+       worker_token: nil,
+       owner_controls?: false,
+       panels_unavailable?: false,
+       worker_form: to_form(Map.new(@worker_pin_keys, &{&1, ""}), as: :worker),
        resolve_form: to_form(%{"resolution_note" => ""}, as: :resolve)
      )
      |> stream(:failures, [])
@@ -57,25 +69,27 @@ defmodule SdrAgentWeb.OperationsLive do
   end
 
   defp load(socket) do
+    socket = assign(socket, worker_token: nil, workers: [])
     scope = socket.assigns.current_scope
     opts = [actor: scope.user]
+    owner? = Scope.hosted_owner?(scope)
 
-    with {:ok, failures} <- Operations.list_attention(opts),
-         {:ok, operations} <- Operations.list_operations(opts),
+    with {:ok, panels} <- operation_panels(owner?, opts),
+         {:ok, workers} <- workers(owner?, opts),
          {:ok, runs} <- Agents.list_runs(opts),
-         {:ok, webhooks} <- Operations.list_failed_webhooks(opts),
          {:ok, leads} <- ConsoleData.index(scope, Sales.Lead),
          {:ok, contacts} <- ConsoleData.index(scope, Sales.Contact),
-         operations = Enum.take(operations, @operation_limit),
+         operations = Enum.take(panels.operations, @operation_limit),
          runs = Enum.take(runs, @run_limit),
          :ok <-
            AuditedView.record(
              scope,
              "Operations",
-             Enum.map(failures ++ operations ++ runs ++ webhooks, & &1.id),
+             Enum.map(panels.failures ++ operations ++ runs ++ panels.webhooks, & &1.id),
              "runs and operations view"
            ) do
-      failures = Enum.map(failures, &Map.put(&1, :path, ConsoleData.subject_path(scope, &1)))
+      failures =
+        Enum.map(panels.failures, &Map.put(&1, :path, ConsoleData.subject_path(scope, &1)))
 
       runs =
         Enum.map(runs, fn run ->
@@ -90,19 +104,82 @@ defmodule SdrAgentWeb.OperationsLive do
       |> assign(
         loaded?: true,
         withheld: nil,
+        workers: workers,
+        owner_controls?: owner?,
+        panels_unavailable?: owner?,
         counts: %{failures: length(failures), runs: length(runs)}
       )
       |> stream(:failures, failures, reset: true)
       |> stream(:operations, operations, reset: true)
       |> stream(:runs, runs, reset: true)
-      |> stream(:webhooks, webhooks, reset: true)
+      |> stream(:webhooks, panels.webhooks, reset: true)
     else
       {:error, reason} ->
         assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
     end
   end
 
+  defp operation_panels(true, _opts),
+    do: {:ok, %{failures: [], operations: [], webhooks: []}}
+
+  defp operation_panels(false, opts) do
+    with {:ok, failures} <- Operations.list_attention(opts),
+         {:ok, operations} <- Operations.list_operations(opts),
+         {:ok, webhooks} <- Operations.list_failed_webhooks(opts) do
+      {:ok, %{failures: failures, operations: operations, webhooks: webhooks}}
+    end
+  end
+
+  defp workers(true, opts), do: Operations.list_mac_workers(opts)
+  defp workers(false, _opts), do: {:ok, []}
+
   @impl true
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    def handle_event("enrol_worker", %{"worker" => pins}, socket) when is_map(pins) do
+      actor = socket.assigns.current_scope.user
+      attrs = %{profile_pins: Map.take(pins, @worker_pin_keys)}
+
+      case Operations.enrol_mac_worker(attrs, actor: actor) do
+        {:ok, worker} ->
+          socket = load(socket)
+
+          token =
+            if socket.assigns.loaded? and socket.assigns.owner_controls? do
+              Base.url_encode64(worker.__metadata__.token, padding: false)
+            end
+
+          {:noreply, assign(socket, worker_token: token)}
+
+        {:error, reason} ->
+          reply({:error, reason}, socket, nil)
+      end
+    end
+  else
+    # The domain is a constant refusal without prototype authority. Keep
+    # the forged-event path through it without an unreachable success arm.
+    def handle_event("enrol_worker", %{"worker" => pins}, socket) when is_map(pins) do
+      attrs = %{profile_pins: Map.take(pins, @worker_pin_keys)}
+
+      reply(
+        Operations.enrol_mac_worker(attrs, actor: socket.assigns.current_scope.user),
+        socket,
+        nil
+      )
+    end
+  end
+
+  def handle_event("dismiss_worker_token", _params, socket),
+    do: {:noreply, assign(socket, worker_token: nil)}
+
+  def handle_event("pause_worker", %{"id" => id}, socket),
+    do: update_worker(socket, id, &Operations.set_mac_worker_intake(&1, :paused, &2))
+
+  def handle_event("resume_worker", %{"id" => id}, socket),
+    do: update_worker(socket, id, &Operations.set_mac_worker_intake(&1, :open, &2))
+
+  def handle_event("disable_worker", %{"id" => id}, socket),
+    do: update_worker(socket, id, &Operations.disable_mac_worker/2)
+
   def handle_event("acknowledge", %{"id" => id}, socket) do
     actor = socket.assigns.current_scope.user
 
@@ -146,6 +223,21 @@ defmodule SdrAgentWeb.OperationsLive do
     end
   end
 
+  defp update_worker(socket, id, fun) do
+    opts = [actor: socket.assigns.current_scope.user]
+
+    result =
+      with {:ok, workers} <- Operations.list_mac_workers(opts),
+           %{} = worker <- Enum.find(workers, &(&1.id == id)) do
+        fun.(worker, opts)
+      else
+        nil -> {:error, :not_found}
+        error -> error
+      end
+
+    reply(result, socket, "Worker updated.")
+  end
+
   defp with_record(_socket, {:ok, record}, fun), do: fun.(record)
   defp with_record(_socket, error, _fun), do: error
 
@@ -153,10 +245,16 @@ defmodule SdrAgentWeb.OperationsLive do
     do: {:noreply, socket |> put_flash(:info, message) |> load()}
 
   defp reply({:error, reason}, socket, _message),
-    do: {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
+    do:
+      {:noreply,
+       socket
+       |> assign(worker_token: nil, workers: [])
+       |> put_flash(:error, AuditedView.error_message(reason))}
 
   @impl true
   def render(assigns) do
+    assigns = assign(assigns, worker_pin_keys: @worker_pin_keys)
+
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:operations}>
       <.page_header eyebrow="Durable work">
@@ -177,7 +275,72 @@ defmodule SdrAgentWeb.OperationsLive do
       <.loading :if={!@loaded? and is_nil(@withheld)} />
 
       <div :if={@loaded?} class="space-y-6">
-        <.card id="attention" title="Needs attention">
+        <.card :if={@owner_controls?} id="mac-worker-controls" title="Mac worker">
+          <:subtitle>
+            Enrollment and intake controls only. These actions do not start a model call.
+          </:subtitle>
+          <.form for={@worker_form} id="worker-enrol" phx-submit="enrol_worker" class="space-y-3">
+            <div class="grid gap-3 sm:grid-cols-2">
+              <.input
+                :for={key <- @worker_pin_keys}
+                field={@worker_form[key]}
+                label={humanize(key)}
+                type="text"
+                required
+                autocomplete="off"
+              />
+            </div>
+            <.ui_button type="submit" variant="primary">Enroll worker</.ui_button>
+          </.form>
+          <div :if={@worker_token} class="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+            <p class="text-sm text-amber-900">Copy this token now. It is displayed only once.</p>
+            <code id="worker-token" class="mt-2 block break-all text-sm">{@worker_token}</code>
+            <.ui_button id="dismiss-worker-token" phx-click="dismiss_worker_token" size="sm">
+              Dismiss token
+            </.ui_button>
+          </div>
+          <ul class="mt-4 divide-y divide-zinc-100">
+            <li :for={worker <- @workers} id={"worker-#{worker.id}"} class="space-y-2 py-3">
+              <div class="flex flex-wrap items-center gap-2 text-sm">
+                <span class="font-mono">{worker.id}</span>
+                <.badge status={worker.status} />
+                <span>Intake: {worker.intake}</span>
+              </div>
+              <div :if={worker.status == :active} class="flex gap-2">
+                <.ui_button
+                  :if={worker.intake == :open}
+                  id={"worker-pause-#{worker.id}"}
+                  phx-click="pause_worker"
+                  phx-value-id={worker.id}
+                  size="sm"
+                >Pause intake</.ui_button>
+                <.ui_button
+                  :if={worker.intake == :paused}
+                  id={"worker-resume-#{worker.id}"}
+                  phx-click="resume_worker"
+                  phx-value-id={worker.id}
+                  size="sm"
+                >Resume intake</.ui_button>
+                <.ui_button
+                  id={"worker-disable-#{worker.id}"}
+                  phx-click="disable_worker"
+                  phx-value-id={worker.id}
+                  size="sm"
+                  variant="danger"
+                >Disable worker</.ui_button>
+              </div>
+            </li>
+          </ul>
+        </.card>
+        <.empty
+          :if={@panels_unavailable?}
+          id="attention-unavailable"
+          icon="hero-lock-closed"
+          title="Unavailable"
+        >
+          Failure records are not granted to this hosted owner.
+        </.empty>
+        <.card :if={!@panels_unavailable?} id="attention" title="Needs attention">
           <:subtitle>
             Open and acknowledged failures, newest first. Resolving requires a note.
           </:subtitle>
@@ -290,7 +453,15 @@ defmodule SdrAgentWeb.OperationsLive do
             </ul>
           </.card>
 
-          <.card id="failed-webhooks-card" title="Failed webhooks">
+          <.empty
+            :if={@panels_unavailable?}
+            id="webhooks-unavailable"
+            icon="hero-lock-closed"
+            title="Unavailable"
+          >
+            Failed webhook records are not granted to this hosted owner.
+          </.empty>
+          <.card :if={!@panels_unavailable?} id="failed-webhooks-card" title="Failed webhooks">
             <:subtitle>
               Provider events that could not be applied. A retry re-runs the original job (at most 3).
             </:subtitle>
@@ -330,7 +501,15 @@ defmodule SdrAgentWeb.OperationsLive do
             </ul>
           </.card>
 
-          <.card id="operations-card" title="Operations">
+          <.empty
+            :if={@panels_unavailable?}
+            id="operations-unavailable"
+            icon="hero-lock-closed"
+            title="Unavailable"
+          >
+            Operation records are not granted to this hosted owner.
+          </.empty>
+          <.card :if={!@panels_unavailable?} id="operations-card" title="Operations">
             <:subtitle>The domain view of each Oban job.</:subtitle>
             <ul id="operations" phx-update="stream" class="-my-2 divide-y divide-zinc-100">
               <li

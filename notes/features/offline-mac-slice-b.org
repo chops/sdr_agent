@@ -828,6 +828,37 @@ Existing nine RED tests unchanged except shared setup adds a second run
 only for T1. No production behavior changed for this checkpoint. Conditional
 independent GO permits the previously approved minimal UI GREEN next.
 
+* S-B5 UI GREEN checkpoint (2026-10-31T18:12Z)
+Approved UI GREEN and T1 now implemented in offline-hosted-owner-green:
+fresh lower HumanAuthority presentation, separate owner assignment, explicit
+unavailable panels for ungranted Failure/Operation/Webhook/AuditEvent reads,
+existing Operations worker facade controls, one-time base64url token cleared
+on dismissal/reload/refusal, and explicit escaped RunLive diagnostics with
+fresh current-run membership before the audited reader. Browser no-store and
+no-referrer retain the secure-header defaults. No new grants or model calls.
+
+Focused run x2-20261031T180818Z-28418:12/12; broader UI regression
+x2-20261031T181358Z-54126:103/103 (repeat after production compile fix).
+Both have zero skipped/excluded tests,
+owned database pairs dropped and verified evidence manifests. The two earlier
+RunLive failures were test setup: the generic gate fixture points at an
+unpersisted lead. Only this suite now creates/starts its Operation and Run
+through domain APIs against its existing persisted synthetic lead. Assertions
+and production authorization were not weakened; T1 cross-run forgery passes.
+
+Compile WAE PASS in prod and test; production assets build, format, regular
+configured Credo, ash.codegen --check, workflow and diff checks PASS. Ordinary
+production keeps the facade's constant enrollment refusal without compiling
+an unreachable UI success arm. Strict Credo FAIL with repository-wide
+advisory findings; Dialyzer/Sobelow/deps.audit unavailable on this pre-D-271
+dependency base, not PASS. Independent UI source/result review remains.
+Architecture evaluated: existing LiveViews now reach reviewed owner worker
+and transcript interfaces. Maintained hosted-owner runtime Mermaid/wrapper
+updated; generic generator output was inspected in an isolated preview and
+not adopted because its grouping omits conditional runtime boundaries.
+N1 clarifies AuditAccess.target_ref is the remote call ID. Claim-time owner
+revalidation W2 remains Claude-owned. No end-to-end/deployment PASS claimed.
+
 * S-B5 enrollment and human boundary checkpoint (2026-10-31)
 
 Source-only synthetic implementation in codex/offline-hosted-owner-green,

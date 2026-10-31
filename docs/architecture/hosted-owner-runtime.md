@@ -50,8 +50,20 @@ private named-action/field scope, reads and records AuditAccess in one
 transaction, and returns only after commit. Caller transactions are refused.
 Direct named reads, copied contexts and roles alone expose no bytes; ordinary
 production has refusal stubs. Metadata lists never contain transcripts and
-no business output release is implied. Claim-time owner revocation and
-owner-safe LiveViews remain pending; this is not end-to-end completion.
+no business output release is implied. AuditAccess `target_ref` is the remote
+call ID supplied to the reader API, not selected from the result row's `id`.
+
+The existing console LiveViews now use the lower fresh human/owner interface
+for presentation. Assignment is separate from reviewer/admin powers. Owner
+Dashboard/Operations and Run signal panels label ungranted reads unavailable,
+never as empty queues or zero counts. Worker controls use the existing domain
+facade; the one-time enrollment token is base64url text, cleared by dismissal,
+refresh or refusal, never logged or stored. Run diagnostics list only the
+current run's metadata and require an explicit click, fresh membership in that
+run's permitted call list, and the audited reader before escaped transcript
+text is returned. Refresh and refusal clear transcript content. Browser
+responses use no-store/no-referrer with the existing secure-header defaults.
+Claim-time owner revocation remains pending; this is not end-to-end completion.
 
 Generated generic diagrams were inspected in a temporary preview. Their
 resource grouping/counts and omitted runtime conditions are not authoritative;

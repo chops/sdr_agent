@@ -11,7 +11,12 @@ defmodule SdrAgentWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {SdrAgentWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+
+    plug :put_secure_browser_headers, %{
+      "cache-control" => "no-store",
+      "referrer-policy" => "no-referrer"
+    }
+
     plug :load_from_session
   end
 

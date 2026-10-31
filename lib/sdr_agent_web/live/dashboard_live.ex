@@ -15,6 +15,7 @@ defmodule SdrAgentWeb.DashboardLive do
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
+  alias SdrAgentWeb.Scope
 
   @impl true
   def mount(_params, _session, socket) do
@@ -37,17 +38,19 @@ defmodule SdrAgentWeb.DashboardLive do
     with {:ok, leads} <- Sales.list_records(Sales.Lead, opts),
          {:ok, queue} <- Outreach.list_review_queue(opts),
          {:ok, deliveries} <- Outreach.list_records(Outreach.DeliveryOperation, opts),
-         {:ok, attention} <- Operations.list_attention(opts),
+         {:ok, attention} <- attention(scope, opts),
+         attention_rows = if(is_list(attention), do: attention, else: []),
          {:ok, contacts} <- ConsoleData.index(scope, Sales.Contact),
          {:ok, revisions} <- ConsoleData.current_revisions(scope, Enum.take(queue, 5)),
          :ok <-
            AuditedView.record(
              scope,
              "Dashboard",
-             Enum.map(attention, & &1.id) ++ Enum.map(queue, & &1.id),
+             Enum.map(attention_rows, & &1.id) ++ Enum.map(queue, & &1.id),
              "dashboard: attention failures and review queue"
            ) do
-      attention = Enum.map(attention, &Map.put(&1, :path, ConsoleData.subject_path(scope, &1)))
+      attention_rows =
+        Enum.map(attention_rows, &Map.put(&1, :path, ConsoleData.subject_path(scope, &1)))
 
       socket
       |> assign(
@@ -65,12 +68,18 @@ defmodule SdrAgentWeb.DashboardLive do
             deliveries,
             &(&1.state in [:pending, :attempting, :failed_retryable, :unknown])
           ),
-        attention_count: length(attention)
+        attention_count: if(is_list(attention), do: length(attention), else: :unavailable)
       )
-      |> stream(:attention, attention, reset: true)
+      |> stream(:attention, attention_rows, reset: true)
     else
       {:error, reason} -> withhold(socket, reason)
     end
+  end
+
+  defp attention(scope, opts) do
+    if Scope.hosted_owner?(scope),
+      do: {:ok, :unavailable},
+      else: Operations.list_attention(opts)
   end
 
   defp stages(leads) do
@@ -147,6 +156,7 @@ defmodule SdrAgentWeb.DashboardLive do
             navigate={~p"/review"}
           />
           <.stat
+            :if={@attention_count != :unavailable}
             id="stat-attention"
             label="Attention"
             value={@attention_count}
@@ -154,6 +164,14 @@ defmodule SdrAgentWeb.DashboardLive do
             tone={if(@attention_count > 0, do: "amber", else: "zinc")}
             hint="open failures"
             navigate={~p"/"}
+          />
+          <.stat
+            :if={@attention_count == :unavailable}
+            id="stat-attention-unavailable"
+            label="Attention"
+            value="Unavailable"
+            icon="hero-lock-closed"
+            hint="not granted to this owner"
           />
         </div>
 
@@ -205,7 +223,17 @@ defmodule SdrAgentWeb.DashboardLive do
             </.empty>
           </.card>
 
-          <.card id="attention" title="Needs attention" class="lg:col-span-3">
+          <div :if={@attention_count == :unavailable} class="lg:col-span-3">
+            <.empty id="attention-unavailable" icon="hero-lock-closed" title="Unavailable">
+              Failure records are not granted to this hosted owner. No count is available.
+            </.empty>
+          </div>
+          <.card
+            :if={@attention_count != :unavailable}
+            id="attention"
+            title="Needs attention"
+            class="lg:col-span-3"
+          >
             <:subtitle>Open and acknowledged failures, newest first.</:subtitle>
             <ul id="attention-list" phx-update="stream" class="-my-2 divide-y divide-zinc-100">
               <li

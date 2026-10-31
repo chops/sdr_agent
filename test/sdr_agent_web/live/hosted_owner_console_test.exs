@@ -13,7 +13,6 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.HostedOwnerFixtures, as: H
   alias SdrAgent.PrototypeFixtures
-  alias SdrAgent.PrototypeGateFixtures, as: G
   alias SdrAgent.RemoteCallFixtures, as: F
   alias SdrAgent.Repo
   alias SdrAgentWeb.Scope
@@ -35,7 +34,7 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
         fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
         SdrAgent.AdmissionFixtures.admit_tuples!()
         grant = AgentsFixtures.grant!(fx.tenant, %{}, admin)
-        run = G.run!(fx)
+        run = run_for_lead!(fx, lead.id)
         fx = Map.merge(fx, %{grant: grant, run: run})
         F.remote!()
         %{token: token} = F.enrol!(fx)
@@ -49,7 +48,7 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
         %{
           run: run,
           call_id: launch.call_id,
-          other_run: if(tags[:foreign_transcript], do: G.run!(fx))
+          other_run: if(tags[:foreign_transcript], do: run_for_lead!(fx, lead.id))
         }
       else
         %{}
@@ -72,6 +71,37 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
   end
 
   defp signed_conn(conn, token), do: init_test_session(conn, %{"user_token" => token})
+
+  # Gate fixtures intentionally use an unpersisted lead id. A real console
+  # view loads that relationship, so build its run against the persisted lead.
+  defp run_for_lead!(fx, lead_id) do
+    key = "owner-ui-#{Ecto.UUID.generate()}"
+
+    assert {:ok, operation} =
+             SdrAgent.Operations.create_operation(
+               %{
+                 kind: :research_lead,
+                 queue: :research,
+                 subject_resource: "SdrAgent.Sales.Lead",
+                 subject_id: lead_id,
+                 idempotency_key: key,
+                 correlation_id: Ecto.UUID.generate(),
+                 max_attempts: 1
+               },
+               actor: fx.agent
+             )
+
+    assert {:ok, operation} = SdrAgent.Operations.start_operation(operation, actor: fx.agent)
+
+    attrs =
+      fx.definition
+      |> AgentsFixtures.run_attrs()
+      |> Map.merge(%{lead_id: lead_id, operation_id: operation.id})
+
+    assert {:ok, run} = SdrAgent.Agents.create_run(attrs, actor: fx.agent)
+    assert {:ok, run} = SdrAgent.Agents.start_run(run, actor: fx.agent)
+    run
+  end
 
   defp accesses do
     Repo.query!(
@@ -121,6 +151,8 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
     assert {:ok, [worker]} = SdrAgent.Operations.list_mac_workers(actor: ctx.enrolled.user)
     token_text = view |> element("#worker-token") |> render()
     assert token_text =~ ~r/[A-Za-z0-9_-]{40,}/
+    view |> element("#dismiss-worker-token") |> render_click()
+    refute has_element?(view, "#worker-token")
     view |> element("#worker-pause-#{worker.id}") |> render_click()
     assert has_element?(view, "#worker-resume-#{worker.id}")
     view |> element("#worker-resume-#{worker.id}") |> render_click()
@@ -138,6 +170,25 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
     assert has_element?(view, "#assign-lead")
   end
 
+  test "a refused second enrollment clears the one-time token", ctx do
+    {:ok, view, _} = ctx.conn |> signed_conn(ctx.token) |> live("/operations")
+    view |> form("#worker-enrol", worker: F.pins()) |> render_submit()
+    assert has_element?(view, "#worker-token")
+    view |> form("#worker-enrol", worker: F.pins()) |> render_submit()
+    refute has_element?(view, "#worker-token")
+    assert has_element?(view, "#flash-error")
+    assert {:ok, [_]} = SdrAgent.Operations.list_mac_workers(actor: ctx.enrolled.user)
+  end
+
+  test "worker metadata refresh clears the one-time token", ctx do
+    {:ok, view, _} = ctx.conn |> signed_conn(ctx.token) |> live("/operations")
+    view |> form("#worker-enrol", worker: F.pins()) |> render_submit()
+    assert has_element?(view, "#worker-token")
+    send(view.pid, :live_refresh)
+    refute render(view) =~ "id=\"worker-token\""
+    assert has_element?(view, "#mac-worker-controls")
+  end
+
   test "bound auditor sees no worker controls and forged enrolment is refused", ctx do
     assert function_exported?(Scope, :hosted_owner?, 1), "missing owner presentation boundary"
     {:ok, view, _} = ctx.conn |> signed_conn(ctx.auditor_token) |> live("/operations")
@@ -151,6 +202,8 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
   test "run transcript stays explicit, escaped and clears on refresh without another disclosure",
        ctx do
     {:ok, view, html} = ctx.conn |> signed_conn(ctx.token) |> live("/runs/#{ctx.run.id}")
+    assert has_element?(view, "#run-header"), render(view)
+    assert has_element?(view, "#signals-unavailable", "Unavailable")
     assert has_element?(view, "#show-remote-transcript-#{ctx.call_id}")
     refute html =~ "PRIVATE_UI_TRANSCRIPT"
     assert accesses() == [[0]]
@@ -173,6 +226,7 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
     {:ok, view, html} =
       ctx.conn |> signed_conn(ctx.token) |> live("/runs/#{ctx.other_run.id}")
 
+    assert has_element?(view, "#run-header"), render(view)
     refute html =~ "PRIVATE_UI_TRANSCRIPT"
     refute has_element?(view, "#show-remote-transcript-#{ctx.call_id}")
     assert accesses() == [[0]]
