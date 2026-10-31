@@ -37,10 +37,13 @@ defmodule SdrAgent.Agents.RemoteCalls do
       lock is held). Refuses, writing nothing, unless the worker is active,
       its intake open and `pins` equal its enrolled pins exactly. A nonce
       already bound to a claimed call before its result deadline returns the
-      same launch; bound to any other call, `{:ok, :none, state}`; spent with
-      no call, `{:ok, :none}`. Otherwise, while the worker has no claimed
-      call, the earliest pending call of the worker's tenant, profile and
-      model before its claim deadline is re-checked under the locks,
+      same launch, after the head lock, fence and live-owner recheck and a
+      post-wait re-read of the call (W2; refused as `{:error,
+      :owner_unavailable}` with no write); bound to any other call,
+      `{:ok, :none, state}`; spent with no call, `{:ok, :none}`. Otherwise,
+      while the worker has no claimed call, the earliest pending call of the
+      worker's tenant, profile and model before its claim deadline is
+      re-checked under the locks,
       admitted by `SdrAgent.Agents.Admission.launch_check/6` and marked sent
       (reserved → sent, only here for a remote invocation), claimed (result
       deadline `claimed_at + 600 s`) and bound to the nonce:
@@ -282,17 +285,37 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
   defp replay(worker, call_id, scope) do
     with {:ok, call} <- call(call_id, worker.tenant_id, nil, scope),
-         do: replay_call(worker, call)
+         do: replay_call(worker, call, scope)
   end
 
-  defp replay_call(worker, call) do
-    if call.state == :claimed and
-         DateTime.compare(SdrAgent.Clock.utc_now(), call.result_deadline) == :lt do
+  # W2: a launch-producing replay takes the retained head after the worker
+  # lock (the existing worker -> head order), then rechecks the fence, the
+  # live owner and the call's state and deadline from a post-wait read
+  # before any launch input. No other lock; no state, nonce or charge write.
+  defp replay_call(worker, call, scope) do
+    if launchable?(call) do
+      with {:ok, _head} <- Kernel.lock_head(worker.tenant_id),
+           :ok <- SdrAgent.Prototype.check_fence(),
+           :ok <- live_owner(worker),
+           {:ok, current} <- call(call.id, worker.tenant_id, nil, scope),
+           do: replay_launch(worker, current)
+    else
+      {:ok, {:ok, :none, call.state}}
+    end
+  end
+
+  defp replay_launch(worker, call) do
+    if launchable?(call) do
       with {:ok, launch} <- launch(call, agent(worker)), do: {:ok, {:ok, launch}}
     else
       {:ok, {:ok, :none, call.state}}
     end
   end
+
+  defp launchable?(call),
+    do:
+      call.state == :claimed and
+        DateTime.compare(SdrAgent.Clock.utc_now(), call.result_deadline) == :lt
 
   defp fresh(worker, nonce, pins, store, scope) do
     with {:ok, busy?} <- claimed_call?(worker, scope),
