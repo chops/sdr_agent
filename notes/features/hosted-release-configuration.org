@@ -1,0 +1,75 @@
+#+TITLE: Hosted prototype build/configuration slice under ADR-0024
+#+DATE: 2026-10-31
+#+STATUS: entity/contract confirmation pending; no production edits
+
+* Summary and authority
+Make the accepted hosted_prototype build/release configuration explicit,
+while leaving ordinary prod refusal and the Mac subscription-only launcher
+unchanged. Base b8d2d03ed924cfb8620c55dd000ea434c5b2d695 includes reviewed
+W2 and S-B5 UI M1. Branch codex/hosted-release-config; separate worktree.
+Owner D-270 approved source implementation; D-271 separately approved exact
+dependencies, hosted-data policy and deployment. Neither proves readiness
+or live backup state, creates a new call/import slot, or permits outreach.
+
+Claude's ownership/key proposal08149621, consultation
+m_1793471049983211000_09cf3bb2, ACKed as
+m_codex_hosted_ownership_ack_20261031: Claude owns S-B4 transport,
+RemoteRuntime, worker controller/router scope and S-B6; Codex owns the
+hosted environment/runtime/release, then separate infra/runbook work.
+This source slice does not change a live service, database role or data.
+
+* Entity Model
+Entity Model trigger: yes
+Reason: compile/runtime configuration selects the already accepted hosted
+authority and remote-provider boundary; no new persisted domain fields.
+Existing accepted model: B r4/r4a, ADR-0024 and its recorded approval package
+in notes/features/offline-mac-slice-b.org. The following is the bounded
+configuration application of those existing Runtime/BootCheck rows, not a
+new provider, auth strategy, authority class or architecture alternative.
+Capabilities .workflow/recipe.json: ai_pair=true, codex_review=true.
+Reviewer Claude via correlated peer review; exact slice confirmation
+UNREVIEWED until reply. No self-review and no configuration implementation
+before PASS; affected-module selection follows that confirmation.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| Build/runtime mode | Existing accepted Runtime configuration | Select hosted_prototype without weakening ordinary prod | No persisted fields; Mix config_env hosted_prototype; compile-time prototype_authority_compiled true, human_authority_provider Operations.HostedOwners; dev_routes/test seams/seeding disabled | Existing Prototype facade and HumanAuthority provider; authority runtime stays :prototype, not a new facade runtime value | Ordinary prod remains authority-free/refusing. Hosted build has no Tidewave/live reload/dev routes/test-only bypasses. Unsupported or missing hosted selectors fail closed | Trusted build configuration only; request/environment input cannot replace the authority implementation | Confirm exact accepted key table08149621 applies without an additional owner architecture decision |
+| Hosted boot configuration | Existing accepted BootCheck/runtime boundary | Bind the hosted process to its activated canonical identity | No new persisted fields; require existing policy/instance switch and explicit database/secrets; no local 5542 defaults | Existing immutable Binding/current-authority relocation, owner/User and tenant unchanged | No ordinary/Fake fallback when hosted configuration is absent/invalid. Prototype identity/activation and containment checks remain required; no automatic setup/seed/migrate/activation at app startup | Existing boot checks and domain authority; configuration is not itself spending permission | Claude S-B4 must own any remote-provider-specific boot/containment changes; coordinate interfaces before editing shared boundaries |
+| Model runtime selection | Existing accepted RemoteRuntime configuration | Host workflows while the Mac executes one claimed subscription CLI call | Existing model_transport :remote and model_provider ClaudeCLI, frozen worker profile pins; no provider credentials or executable on host | Existing MacWorker/RemoteModelCall/Result/Receipt contracts unchanged | Remote only; no local ClaudeCLI server, shim, reaper or port, Fake/API fallback or SDR_CLAUDE_CLI_BIN. Presence/intake and enrolled pins are resolved by Claude's S-B4 interface. Existing allowance and reservation accounting unchanged | Existing worker token/owner grants, not role or caller-selected model configuration | Config must not silently overwrite an invalid runtime transport/provider override |
+| Browser/runtime endpoint configuration | Existing accepted hosted web boundary | Preserve secure owner/auditor console plus separate worker API | Existing endpoint/secrets/host/port configuration; no new route or auth fields | Existing console session/CSRF and Claude-owned bearer worker pipeline | Production TLS/proxy/origin settings, loopback listener and no-store/no-referrer remain; no sensitive content capture/exporter or automatic outreach | Existing per-event/domain checks unchanged; config grants no actor identity | Exact infra identifiers and trusted proxy facts are pinned in later reviewed runbook, not guessed here |
+
+Existing dependency: unchanged — relationship/policy/lifecycle impact
+checked, none found: persisted prospect/company/contact records, funding
+grant/allocation, all remote call state machines and enrollment/session
+records. Database/OS principals and restore/cutover actions are deferred to
+a separate infra entity delta and operational review; none are created here.
+
+* Verification intent after confirmation
+- Define the already owned configuration/release file changes and minimal
+  steps only after the entity/contract PASS above.
+- Tests-only RED: hosted build flags and provider/transport selection;
+  missing/partial/invalid switches; refused local/Fake/API overrides;
+  no local executable; no dev routes/seeding/test seams/content exporter;
+  required explicit database/secrets; ordinary dev/test/prod controls.
+- Config evaluation is hermetic, with synthetic values and no application,
+  Repo, endpoint, CLI or network start. Never print secret environment data.
+- Obtain scoped RED GO before GREEN. Compile hosted/prod/test with warnings
+  as errors; test release construction/entrypoints without booting spend
+  paths; preserve the exact lockfile and accepted dependency pins.
+- No use of the older synthetic deploy script to seed or migrate canonical
+  data. Inactive artifact staging and live cutover require their own reviewed
+  runbook, least-privilege role setup and verified backup facts.
+
+* Architecture decision evaluation
+No new ADR proposed: this implements the selected hosted_prototype and
+remote-only topology already accepted in ADR-0024, not a change to ordinary
+prod or a new technology. Any actual deviation reopens review before code.
+Evaluate maintained runtime/build diagrams after implementation; no new
+resource/domain is planned. Do not label source/build PASS as deployed or
+as a completed real remote call.
+
+* Ask
+Claude: scoped entity/key-contract PASS or precise required delta; then
+Codex names the minimal affected modules/steps and writes source-only RED.
+No new owner decision requested for the already accepted mode. Cloud backup
+console facts and live input/launcher prerequisites remain separate.
