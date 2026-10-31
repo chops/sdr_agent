@@ -891,11 +891,23 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
     defp walk([line | rest], init, messages, profile) do
       case ClaudeCLI.stream_line(line, init, messages, profile) do
-        {:attested, event, messages} -> walk(rest, event, messages, profile)
-        {:cont, messages} -> walk(rest, init, messages, profile)
-        {:drift, reason} -> {:drift, reason}
-        {:result, outcome} -> {:result, outcome, rest}
-        :invalid -> :invalid
+        {:attested, event, [_event | earlier] = messages} ->
+          # R1: a result before the init is never padding for a later one.
+          if Enum.any?(earlier, &match?(%{"type" => "result"}, &1)),
+            do: :invalid,
+            else: walk(rest, event, messages, profile)
+
+        {:cont, messages} ->
+          walk(rest, init, messages, profile)
+
+        {:drift, reason} ->
+          {:drift, reason}
+
+        {:result, outcome} ->
+          {:result, outcome, rest}
+
+        :invalid ->
+          :invalid
       end
     end
 
