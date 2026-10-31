@@ -28,9 +28,10 @@ defmodule SdrAgent.Prototype do
   chain-head lock, is `:ok` outside prototype runtime and in a build
   without the authority.
 
-  In a build with the authority (`:prototype_authority_compiled`, set only
-  by config/dev.exs and config/test.exs) the facade reads
-  `SdrAgent.Prototype.Authority`. Otherwise (the production build) it holds
+  In a build with the authority (`:prototype_authority_compiled`, set by
+  config/dev.exs, config/test.exs and ADR-0024's config/hosted_prototype.exs)
+  the facade reads `SdrAgent.Prototype.Authority`. Otherwise (ordinary
+  production) it holds
   refusal stubs only and references no authority module: `runtime/0` is
   `:ordinary`, `operator?/1` is `false`, and every other function but
   `label/0` returns `{:error, :not_prototype_runtime}`.

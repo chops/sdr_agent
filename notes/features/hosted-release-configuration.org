@@ -1,6 +1,6 @@
 #+TITLE: Hosted prototype build/configuration slice under ADR-0024
 #+DATE: 2026-10-31
-#+STATUS: source GREEN; independent source review and integration checks pending
+#+STATUS: source PASS; 86 focused regressions PASS; integration checks pending
 
 * Summary and authority
 Make the accepted hosted_prototype build/release configuration explicit,
@@ -206,3 +206,24 @@ and actual /worker route/remote-child checks remain pending; the earlier
 b8d2d03e gate is FAIL (18 inherited failures plus one stale User action pin,
 owned by S-B5 and separately assigned for test-only correction). Do not
 present this source/build receipt as deployed live LLM/companies/contacts.
+
+* Independent source PASS and documentation follow-up
+Claude m_claude_hosted_config_source_pass_802e7783_20261031 (19:10:06Z):
+scoped source PASS for 802e778365b78f112a32be5a89c793a84567b1c4. Review
+sha256 5da735563a97dde2e672dd6b9890ba676c6079c917269b7ac2e2da91be8391b7.
+Integration conditions retained: no local provider children and resolve
+to Remote after S-B4; disclose anchor_sinks [] (in-DB audit unchanged);
+PHX_SERVER in service unit. Never activate the intermediate branch.
+
+Test WAE compile completed PASS. Canonical regression
+x2-20261031T190846Z-90101: PASS 86/86, zero skipped/excluded, exact clean
+source head 802e7783, owned DB pair dropped, final_rc 0, MANIFEST.sha256
+verified. Six files cover hosted config plus existing provider runtime,
+ports, assets, prototype switch and ordinary-prod refusal controls.
+
+Claude explicitly granted comments-only follow-up in config/dev.exs,
+config/test.exs and lib/sdr_agent/prototype.ex. The diff names the accepted
+hosted authority build and preserves ordinary-prod refusal; no expression,
+config value, policy, test or behavior change. Other stale implementation
+stage prose is not broadened into this follow-up. Reviewed source commit
+remains 802e7783; this later commit adds documentation/evidence only.
