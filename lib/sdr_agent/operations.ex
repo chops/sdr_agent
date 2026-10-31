@@ -93,6 +93,52 @@ defmodule SdrAgent.Operations do
   def hosted_owner_live?(tenant_id, binding_id),
     do: SdrAgent.Operations.HostedOwners.binding_owner_live?(tenant_id, binding_id)
 
+  @doc """
+  S-B4: bounded metadata of the active MacWorker of the current live
+  prototype binding, for the remote provider's pre-reservation check. The
+  caller is the tenant's `:agent_runtime` actor; the tenant comes from the
+  actor, never an argument. `{:ok, %{present?: false}}` when there is no
+  prototype runtime, the binding is another tenant's, or no worker is
+  active; else `{:ok, %{present?: true, intake:, last_seen_at:, profile_id:,
+  model_id:, cli_version:}}` (string pins as enrolled). No token digest,
+  worker id, executable digest, nonce or call data. A plain point read with
+  no lock: the claim rechecks everything under its own locks. A read error
+  also reads as absent (fail closed).
+  """
+  def remote_worker_status(%SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id})
+      when is_binary(tenant_id) do
+    with {:ok, binding} <- SdrAgent.Prototype.binding(),
+         true <- binding.tenant_id == tenant_id,
+         {:ok, %SdrAgent.Operations.MacWorker{} = worker} <- active_worker(binding) do
+      pins = worker.profile_pins
+
+      {:ok,
+       %{
+         present?: true,
+         intake: worker.intake,
+         last_seen_at: worker.last_seen_at,
+         profile_id: pins["profile_id"],
+         model_id: pins["model_id"],
+         cli_version: pins["cli_version"]
+       }}
+    else
+      # Fail closed: no runtime, another tenant, no active worker or a read
+      # error all read as absent (the provider then refuses the call).
+      _absent -> {:ok, %{present?: false}}
+    end
+  end
+
+  def remote_worker_status(_actor), do: {:error, :forbidden}
+
+  defp active_worker(binding) do
+    SdrAgent.Operations.MacWorker
+    |> Ash.Query.for_read(:read, %{}, Kernel.opts(binding.tenant_id))
+    |> Ash.Query.filter(
+      tenant_id == ^binding.tenant_id and binding_id == ^binding.id and status == :active
+    )
+    |> Ash.read_one()
+  end
+
   @doc "Terminal owner disable, coupled to disabling the reviewer and revoking every token."
   def disable_hosted_owner(id, opts) do
     Guard.run(

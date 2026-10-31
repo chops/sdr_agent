@@ -60,13 +60,23 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       :runtime_status, :sample]` (`%{}`, `%{point: :c1 | :s1 | :eligibility
       | :s2 | :c2, attempt: 1..3}`) in the caller; other builds compile it
       out.
+    * Under the trusted `:remote` transport (S-B4, ADR-0024;
+      `SdrAgent.Agents.RemoteCalls.remote?/0`) ClaudeCLI runs on the
+      enrolled Mac worker: `children/0` is `[]` (no local ClaudeCLI tree)
+      and `resolve/1` selects `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote`
+      with no local server, port, reaper or shim check; that provider's
+      `prepare/2` checks the worker before any reservation. `status/0` is
+      unchanged: it samples the local coordinator, which is not started
+      under `:remote` (status is never authority).
     * `desired_profile/0` — the coordinator's confirmed desired profile
       (`{:ok, %{profile_id, source, confirmed_at}}`), `{:error, :unknown}`,
       or `:not_applicable` for an in-process provider.
   """
 
+  alias SdrAgent.Agents.RemoteCalls
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Remote
   alias SdrAgent.AI.ModelProvider.Coordinator
   alias SdrAgent.AI.ModelProvider.ProfileSupervisor
 
@@ -118,9 +128,10 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   a reconciled read releases it.
   """
   def children do
-    case provider() do
-      ClaudeCLI -> [{ProfileSupervisor, server: &server_options/1}]
-      _other -> []
+    case {RemoteCalls.remote?(), provider()} do
+      {true, _provider} -> []
+      {false, ClaudeCLI} -> [{ProfileSupervisor, server: &server_options/1}]
+      {false, _other} -> []
     end
   end
 
@@ -147,8 +158,13 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   def resolve(model) when is_list(model) do
     model = Keyword.put_new_lazy(model, :provider, &provider/0)
 
-    case model[:provider] do
-      ClaudeCLI ->
+    case {RemoteCalls.remote?(), model[:provider]} do
+      # S-B4: under the trusted :remote transport ClaudeCLI runs on the
+      # enrolled Mac worker; there is no local server to check.
+      {true, provider} when provider in [ClaudeCLI, Remote] ->
+        {:ok, Keyword.put(model, :provider, Remote)}
+
+      {false, ClaudeCLI} ->
         options =
           model
           |> Keyword.get(:provider_options, [])

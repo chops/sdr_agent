@@ -444,9 +444,17 @@ defmodule SdrAgent.AI.RemoteProviderTest do
 
     test "timeout: the run fails; a late result settles once with no release", ctx do
       ctx = world!(ctx)
-      put_env!(:remote_wait_ms, 300)
+      put_env!(:remote_wait_ms, 2_000)
+      task = call_async(ctx)
 
-      result = Task.await(call_async(ctx), 30_000)
+      # The worker claims during the wait and completes only after it. (A
+      # claim after the run failed is refused by the launch check,
+      # run_not_running_at_launch, so the late case is a late RESULT.)
+      _call = await_pending!(ctx)
+      nonce = F.nonce()
+      launch = F.claim!(ctx.token, nonce)
+
+      result = Task.await(task, 30_000)
       assert result == {:error, {:halt, :provider_error}}, "timeout: #{inspect(result, limit: 8)}"
 
       run = S.run_row(ctx.fx.run.id)
@@ -457,10 +465,20 @@ defmodule SdrAgent.AI.RemoteProviderTest do
 
       assert [invocation] = invocations(ctx)
       id = F.load(invocation["id"])
-      assert invocation["status"] in ["reserved", "sent"], "the caller settled the invocation"
+      assert invocation["status"] == "sent", "the caller settled the invocation"
       assert G.charged(ctx.fx) == 1
 
-      launch = drive!(ctx)
+      late =
+        F.complete(
+          ctx.token,
+          nonce,
+          launch.call_id,
+          launch.request_sha256,
+          S.valid_transcript(S.valid_output())
+        )
+
+      assert F.kind(late) == :accepted, "late completion: #{inspect(late)}"
+      S.settle!(ctx.fx)
       assert F.call_row(launch.call_id)["state"] == "completed"
       assert S.invocation_row(id)["status"] == "completed"
       assert S.release_count(id) == 0

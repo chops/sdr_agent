@@ -70,6 +70,19 @@ defmodule SdrAgent.AI.ModelProvider do
   was rendered from — which deterministic providers (the Fake) read instead
   of parsing the prompt.
 
+  Remote dispatch (S-B4, ADR-0024): under the trusted `:remote` transport
+  the provider is `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote`, whose reply
+  is `:remote_dispatched`. It is accepted only from that module and only
+  for the invocation this call reserved, when it has a RemoteModelCall
+  (anything else is a malformed reply). The facade then writes nothing: it
+  waits, with no transaction, lock or held connection, at most
+  `remote_wait_ms/0`, for the RemoteSettler's outcome. Completed →
+  `{:ok, %{remote: invocation}}` (no output: the caller reads it through the
+  result gate); failed → `{:error, :remote_call_failed}`; unknown →
+  `{:error, :provider_outcome_unknown}`; still reserved or sent at the bound
+  → `{:error, :remote_wait_timeout}`; inside a transaction →
+  `{:error, :in_transaction}`.
+
   Wire-witness correlation (ADR-0005 S12): before the provider runs, the
   facade adds `:witness` — the reserved invocation UUID and the W3C
   `traceparent` of the `gen_ai.*` span, captured in the calling process.
@@ -78,9 +91,12 @@ defmodule SdrAgent.AI.ModelProvider do
 
   alias SdrAgent.AgentEnv.OperationSnapshot
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.RemoteCalls
   alias SdrAgent.AI.JsonSchema
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI.Remote
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
+  alias SdrAgent.LiveEvents
   alias SdrAgent.Operations
   alias SdrAgent.Repo
   alias SdrAgent.Telemetry.GenAI
@@ -192,10 +208,112 @@ defmodule SdrAgent.AI.ModelProvider do
 
   defp invoke_validate_and_settle(provider, request, invocation, provider_options) do
     started = System.monotonic_time(:millisecond)
-    outcome = provider |> provider_call(request, provider_options) |> envelope()
 
-    with {:ok, invocation} <- current(invocation) do
-      settle(outcome, request, invocation, started)
+    case provider_call(provider, request, provider_options) do
+      :remote_dispatched when provider == Remote ->
+        remote_outcome(invocation)
+
+      reply ->
+        outcome = envelope(reply)
+
+        with {:ok, invocation} <- current(invocation) do
+          settle(outcome, request, invocation, started)
+        end
+    end
+  end
+
+  ## Remote dispatch (S-B4)
+
+  @max_remote_wait_ms 840_000
+  @remote_poll_ms 5_000
+
+  # `:remote_dispatched` is accepted only from ClaudeCLI.Remote and only for
+  # the invocation this call reserved, when it has a RemoteModelCall. Any
+  # other case is a malformed reply, settled as before. The caller never
+  # writes: the RemoteSettler is the only settler of a remote call.
+  defp remote_outcome(invocation) do
+    case RemoteCalls.remote_invocation?(invocation) do
+      {:ok, true} ->
+        remote_wait(invocation)
+
+      {:ok, false} ->
+        with {:ok, current} <- current(invocation),
+             do: settle(:malformed, nil, current, System.monotonic_time(:millisecond))
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  @doc """
+  S-B4: the bound of the facade's wait for a remote call's settlement, in
+  milliseconds (`config :sdr_agent, :remote_wait_ms`, default and upper
+  bound 840000, clamped to 0..840000).
+  """
+  @spec remote_wait_ms() :: non_neg_integer()
+  def remote_wait_ms do
+    case Application.get_env(:sdr_agent, :remote_wait_ms) do
+      ms when is_integer(ms) -> ms |> max(0) |> min(@max_remote_wait_ms)
+      _unset -> @max_remote_wait_ms
+    end
+  end
+
+  # Subscribes to the tenant's committed audit events BEFORE the first read,
+  # then re-reads the invocation on an event or every 5 s until it settles
+  # or the monotonic bound passes. Each read is a plain read with no
+  # transaction, lock or held connection; the subscription is always
+  # removed and its pending messages dropped.
+  defp remote_wait(invocation) do
+    if Repo.in_transaction?() do
+      {:error, :in_transaction}
+    else
+      :ok = LiveEvents.subscribe(invocation.tenant_id)
+
+      try do
+        poll_remote(invocation, System.monotonic_time(:millisecond) + remote_wait_ms())
+      after
+        Phoenix.PubSub.unsubscribe(SdrAgent.PubSub, LiveEvents.topic(invocation.tenant_id))
+        flush_events()
+      end
+    end
+  end
+
+  defp poll_remote(invocation, deadline) do
+    case Agents.get_model_invocation(invocation.id, actor: actor(invocation)) do
+      {:ok, %{status: :completed} = completed} ->
+        {:ok, %{remote: completed}}
+
+      {:ok, %{status: :failed}} ->
+        {:error, :remote_call_failed}
+
+      {:ok, %{status: :unknown}} ->
+        {:error, :provider_outcome_unknown}
+
+      {:ok, %{status: status}} when status in [:reserved, :sent] ->
+        remaining = deadline - System.monotonic_time(:millisecond)
+
+        if remaining <= 0 do
+          {:error, :remote_wait_timeout}
+        else
+          receive do
+            {:sdr_audit_event, _event} -> :ok
+          after
+            min(@remote_poll_ms, remaining) -> :ok
+          end
+
+          poll_remote(invocation, deadline)
+        end
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp flush_events do
+    receive do
+      {:sdr_audit_event, _event} -> flush_events()
+    after
+      0 -> :ok
     end
   end
 

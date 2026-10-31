@@ -85,6 +85,20 @@ defmodule SdrAgentWeb.Router do
     post "/capture_sim/:event_type", WebhookController, :receive
   end
 
+  # S-B4: the Mac worker API (S-B7 wire contract). Bearer-token workers
+  # only: no session, CSRF or flash; bodies read by SdrAgentWeb.WorkerIntake.
+  pipeline :worker do
+    plug :accepts, ["json"]
+  end
+
+  scope "/worker", SdrAgentWeb do
+    pipe_through :worker
+
+    post "/heartbeat", WorkerController, :heartbeat
+    post "/claim", WorkerController, :claim
+    post "/complete", WorkerController, :complete
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", SdrAgentWeb do
   #   pipe_through :api

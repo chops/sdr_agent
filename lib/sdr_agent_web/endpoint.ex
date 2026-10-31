@@ -87,6 +87,10 @@ defmodule SdrAgentWeb.Endpoint do
   # S9: webhook requests are read raw (bounded) before any parsing.
   plug SdrAgentWeb.WebhookIntake
 
+  # S-B4: Mac worker requests are read (bounded, JSON objects only) before
+  # the global parser, which then skips them.
+  plug SdrAgentWeb.WorkerIntake
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],

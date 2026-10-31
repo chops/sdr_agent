@@ -55,7 +55,11 @@ defmodule SdrAgent.Agents.RemoteCalls do
       after the head lock and fence) is refused writing nothing,
       `{:error, :owner_unavailable}` (W2); a candidate lost to a concurrent claim returns
       `{:ok, :none}` with no write; no candidate at all spends the nonce
-      with a null call.
+      with a null call. A fresh or replayed launch whose `{"call": launch}`
+      response would be over 1048576 bytes (`SdrAgent.Agents.RemoteLaunch`)
+      is `{:error, :launch_undeliverable}` and rolls back whole: the call,
+      invocation, nonce and audit are unchanged (S-B4; new reservations
+      cannot reach it).
     * `complete(token, nonce, call_id, request_digest, transcript)` — the
       size cap (2097152 bytes) first; then the worker (any status) `FOR
       SHARE`, the nonce of this worker (unknown or spent with no call:
@@ -122,6 +126,7 @@ defmodule SdrAgent.Agents.RemoteCalls do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.RemoteCallReceipt
   alias SdrAgent.Agents.RemoteCallResult
+  alias SdrAgent.Agents.RemoteLaunch
   alias SdrAgent.Agents.RemoteModelCall
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.MacWorker
@@ -206,7 +211,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
   @doc """
   The remote launch input caps of a stored request body: a string `prompt`
   of at most 262144 bytes and a map `schema` whose JSON encoding is at most
-  262144 bytes. `:ok` or `{:error, message}`.
+  262144 bytes, whose worst-case launch response
+  (`SdrAgent.Agents.RemoteLaunch.worst_case_bytes/2`) is at most 1048576
+  bytes (S-B4). `:ok` or `{:error, message}`.
   """
   @spec check_request(term()) :: :ok | {:error, String.t()}
   def check_request(request) when is_binary(request) do
@@ -219,6 +226,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
           byte_size(Jason.encode!(schema)) > @field_cap ->
             {:error, "schema is over #{@field_cap} bytes"}
+
+          RemoteLaunch.worst_case_bytes(prompt, schema) > RemoteLaunch.max_bytes() ->
+            {:error, "launch response would be over #{RemoteLaunch.max_bytes()} bytes"}
 
           true ->
             :ok
@@ -421,6 +431,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
   # The domain launch: the frozen input of the call, its unrendered prompt
   # and schema read back from the stored request (an audited kernel read).
+  # S-B4: a launch whose `{"call": launch}` response is over
+  # `RemoteLaunch.max_bytes/0` is `{:error, :launch_undeliverable}`, so the
+  # claim or replay transaction rolls back whole (state, nonce and audit).
   defp launch(call, agent) do
     with {:ok, body} <- Kernel.read_content(call.request_sha256, @launch_purpose, agent),
          {:ok, %{"prompt" => prompt, "schema" => schema}} <- Jason.decode(body) do
@@ -434,10 +447,15 @@ defmodule SdrAgent.Agents.RemoteCalls do
          schema: schema,
          result_deadline: call.result_deadline
        }}
+      |> deliverable()
     else
       {:error, error} -> {:error, error}
       _malformed -> {:error, :request_unreadable}
     end
+  end
+
+  defp deliverable({:ok, launch}) do
+    if RemoteLaunch.deliverable?(launch), do: {:ok, launch}, else: {:error, :launch_undeliverable}
   end
 
   ## Complete
