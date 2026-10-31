@@ -100,6 +100,8 @@ defmodule SdrAgent.AI.RemoteProviderTest do
     _owner = H.enrol!(ctx)
     %{token: token, worker: worker} = F.enrol!(ctx.fx, pins)
     H.enter!(ctx)
+    # S-B6: prepare admits only a worker with a fresh heartbeat.
+    assert {:ok, :open} = F.heartbeat(token, pins)
     grant = G.provision!(ctx.fx)
     run = G.run!(ctx.fx)
     fx = Map.merge(ctx.fx, %{grant: grant, run: run})
@@ -350,6 +352,89 @@ defmodule SdrAgent.AI.RemoteProviderTest do
       ctx = world!(ctx)
       prompt = String.duplicate("a", 262_144)
       assert match?({:ok, %{provider: :claude_cli}}, remote(:prepare, [request(ctx, prompt), []]))
+    end
+  end
+
+  ## S-B6 heartbeat freshness (plan r2 5769d9ac, Codex PASS d2cd2625)
+
+  describe "worker freshness" do
+    # A frozen server clock at `t0`: world!/1's heartbeat stamps exactly t0.
+    defp at_t0!(ctx) do
+      t0 = SdrAgent.Clock.utc_now()
+      :ok = SdrAgent.Clock.freeze(t0)
+      on_exit(fn -> SdrAgent.Clock.unfreeze() end)
+      {world!(ctx), t0}
+    end
+
+    defp now!(t0, microseconds),
+      do: :ok = SdrAgent.Clock.freeze(DateTime.add(t0, microseconds, :microsecond))
+
+    test "an enrolled open worker with no last_seen_at: provider_offline", ctx do
+      _owner = H.enrol!(ctx)
+      %{worker: worker} = F.enrol!(ctx.fx)
+      # Enrolment stamps last_seen_at; NULL is planted (the row guard
+      # permits last_seen_at updates).
+      sql = ~s[UPDATE "mac_workers" SET last_seen_at = NULL WHERE id = $1]
+      assert %{num_rows: 1} = SdrAgent.Repo.query!(sql, [F.dump(worker.id)])
+      H.enter!(ctx)
+      grant = G.provision!(ctx.fx)
+      run = G.run!(ctx.fx)
+      ctx = Map.put(ctx, :fx, Map.merge(ctx.fx, %{grant: grant, run: run}))
+
+      assert remote(:availability, [ctx.fx.agent]) == {:error, :provider_offline}
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_offline}
+      assert invocations(ctx) == []
+    end
+
+    test "a heartbeat exactly 60 s old is fresh: available and prepares", ctx do
+      {ctx, t0} = at_t0!(ctx)
+      now!(t0, 60_000_000)
+      assert remote(:availability, [ctx.fx.agent]) == :ok
+
+      assert match?(
+               {:ok, %{provider: :claude_cli}},
+               remote(:prepare, [request(ctx, F.prompt()), []])
+             )
+    end
+
+    test "a heartbeat 60 s + 1 us old: provider_offline before any reservation", ctx do
+      {ctx, t0} = at_t0!(ctx)
+      now!(t0, 60_000_001)
+      assert remote(:availability, [ctx.fx.agent]) == {:error, :provider_offline}
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_offline}
+      assert invocations(ctx) == []
+    end
+
+    test "a heartbeat 1 us in the future (clock regression): provider_offline", ctx do
+      {ctx, t0} = at_t0!(ctx)
+      now!(t0, -1)
+      assert remote(:availability, [ctx.fx.agent]) == {:error, :provider_offline}
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_offline}
+    end
+
+    test "availability precedes the pin check: stale incompatible pins read offline", ctx do
+      t0 = SdrAgent.Clock.utc_now()
+      :ok = SdrAgent.Clock.freeze(t0)
+      on_exit(fn -> SdrAgent.Clock.unfreeze() end)
+      ctx = world!(ctx, Map.put(F.pins(), "cli_version", "9.9.9-other"))
+      now!(t0, 60_000_001)
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_offline}
+    end
+
+    test "control: a paused fresh worker keeps provider_held", ctx do
+      {ctx, _t0} = at_t0!(ctx)
+      :ok = PrototypeFixtures.leave_runtime()
+      :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+      F.set_intake!(ctx.fx, ctx.worker, :paused)
+      H.enter!(ctx)
+      assert remote(:availability, [ctx.fx.agent]) == {:error, :provider_held}
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_held}
+    end
+
+    test "Runtime.refusal_message/1 names the offline refusal", _ctx do
+      message = safely(fn -> Runtime.refusal_message(:provider_offline) end)
+      assert is_binary(message), "no refusal message: #{inspect(message)}"
+      assert message =~ "heartbeat"
     end
   end
 
