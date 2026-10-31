@@ -47,6 +47,10 @@ defmodule SdrAgent.MixProject do
       {:picosat_elixir, "~> 0.2"},
       {:ash_authentication_phoenix, "== 2.17.4"},
       {:ash_authentication, "== 4.15.0"},
+      # EEF-CVE-2026-117656 (ADR-0008 amendment 2026-10-31): stable
+      # ash_authentication 4.x caps assent below 0.3; the fixed 0.3.2 is
+      # overridden. Password-only strategy; the OAuth/Apple path is unused.
+      {:assent, "== 0.3.2", override: true},
       {:sourceror, "~> 1.8", only: [:dev, :test]},
       {:credo, "== 1.7.19", only: [:dev, :test], runtime: false},
       {:jido,
@@ -71,7 +75,7 @@ defmodule SdrAgent.MixProject do
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.13"},
       {:postgrex, ">= 0.0.0"},
-      {:phoenix_html, "~> 4.1"},
+      {:phoenix_html, "~> 4.4"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},
       {:lazy_html, ">= 0.1.0", only: :test},
