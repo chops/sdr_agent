@@ -271,3 +271,32 @@ ad90b031d63f2b8156da4a936c070013df15859646f58821100e1f492b90fefc.
 Accepted non-blocking N1: describe the correlated approval as peer GO
 rather than owner approval. GO commit/push and clean-head full gate;
 the full-gate result remains pending.
+
+** Clean-head gate result and prerequisite diagnosis
+Source fix f872107b3da1f94757c220c6fd21dca00c6d90f0 is pushed and
+independently reviewed. Full gate x2-20261031T203230Z-11961 is FAIL:
+6048/6104 passing, 56 failures, 1 skipped, 42 excluded; both owned DBs
+dropped and MANIFEST.sha256 verified. Workflow, format, WAE compile,
+codegen, Credo and dependency audit passed; mix precommit failed in tests.
+Outer final_rc 0 is not a passing gate.
+
+Failure-name comparison against c3-20261031T200124Z-89280: the seam-pin
+failure is gone; 18 baseline failures remain; 38 additional failures are
+29 ContainmentGuardTest, 7 TaskBoundaryEntryTokenTest and 2 thin-VM tests.
+The first 36 report the no-OTEL-environment precondition; this Codex
+process inherits four OTEL_ variable names. The two thin-VM tests reject
+the _x2 database name because their source allowlists only _c[1-9] lanes.
+No assertion, guard or production setting was changed to bypass these.
+
+Focused diagnostic c8-20261031T210055Z-40690 ran the same clean source
+head on a leased, allowlisted c8 lane with those four inherited OTEL_
+variables removed only from the test subprocess. Result: FAIL 89/91,
+zero skipped/excluded, DBs dropped, MANIFEST.sha256 verified. All 36
+OTEL-precondition failures and the 53 pinned/hosted-config tests pass.
+The two thin-VM tests now pass the target precondition but still fail:
+child exit 0, stage :unrecognized_output (expected :ok). They remain
+unresolved; no success, source cause or waiver is inferred from exit 0.
+
+This documentation follow-up does not alter the tested source. Claude's
+integrated 1117e9ee gate is separately running on its own c3 lane; do not
+substitute this diagnostic for that full-gate result or a live check.
