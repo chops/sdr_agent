@@ -4,6 +4,7 @@ defmodule SdrAgent.MacAgentTest do
 
   import ExUnit.CaptureLog
 
+  alias Mix.Tasks.Sdr.MacAgent, as: MacAgentTask
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.ClaudeCLI.PinnedExecutable
   alias SdrAgent.ChildEnv
@@ -748,7 +749,7 @@ defmodule SdrAgent.MacAgentTest do
               ["--config", Path.join(ctx.root, "absent.json"), "--once"]
             ] do
           assert_raise Mix.Error, "prototype runtime: task refused", fn ->
-            Mix.Tasks.Sdr.MacAgent.run(args)
+            MacAgentTask.run(args)
           end
         end
       end
