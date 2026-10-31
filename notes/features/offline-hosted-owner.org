@@ -1,0 +1,133 @@
+#+TITLE: S-B5 r2 bounded entity/RED plan under accepted D-270
+#+DATE: 2026-10-31
+Base 6b20af408329fbd5090bb386064c74db4ac4560d.
+Branch codex/offline-hosted-owner, separate worktree offline-hosted-owner.
+Ownership handoff m_1793426234000000000_d745fcf2: Claude S-B2..4/6 and
+integration; Codex S-B5/S-B7. Source-only synthetic; no deployment/secrets/
+real-data transfer or real model calls. Accepted ADR-0024 and ADR-0005
+amendment; no new auth strategy, OAuth, provider API or witness.
+
+* Entity Model
+Entity Model trigger: yes.
+Reason: HostedOwner persistence, enrollment/session lifecycle, User/Token
+actions and prototype authority/boot authorization boundaries.
+Capabilities ai_pair=true, codex_review=true. Reviewer Claude.
+Verdict PASS, reviewer Claude, 2026-10-31T06:05:31Z.
+Correlation m_1793426737000000000_4c30871c replying to
+m_codex_sb5_r2_20261031T060504Z. Review artifact
+T/claude-sb5-r2-pass-20261031.org sha256
+9f0f86adffb844131229b49a953a77c3b19c2d775048000a53648ea37ca5b6fd.
+Approval permits RED only; separate peer GO before GREEN. Supersedes r1 sha256
+2021b2d61c6f3fa30b9326d4717236587477a4d4b1e0b9b62f448496dc54e4a9.
+Addresses Claude review 1b6c8c70f1ab85528be79d61279287c47749bd5ec1d3cac0ca0097c0672a7c02.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+--------------|
+| HostedOwner (Operations) | New, accepted P2 | Hosted human authority, never kernel/anchor/auditor | id UUID; tenant_id/user_id/binding_id/relocation_id required; status active/disabled default active; enrolled_at required forced Clock; disabled_at nullable forced on disable | required N:1 User/Binding/Relocation, RESTRICT; User FK (user_id,tenant_id)->(id,tenant_id); Binding FK (binding_id,tenant_id)->(id,tenant_id); Relocation FK (relocation_id,binding_id)->(id,binding_id), transitively tenant-bound; UNIQUE user_id; partial UNIQUE(binding_id) WHERE status=active; relocation must be latest activated current authority naming live DB | active->disabled terminal; no destroy; user/tenant/binding/relocation immutable; enrollment takes tenant head lock and rechecks active-owner absence and current authority; every create/disable uses unchanged AppendEvent, never token content | enrollment console only: marked kernel :hosted_owner in ordinary authority-compiled runtime, verified activation; disable console same marker or exact live owner self; read live owner self or kernel; no admin/auditor/forged owner access in prototype | historical disabled owner users admitted ONLY as same-tenant disabled reviewers with disabled HostedOwner and zero unexpired unrevoked tokens; no authority/resurrection; stale ACTIVE owner on non-current activation refuses boot |
+| User | Existing delta | Existing reviewer identity for HostedOwner | unchanged existing fields; role forced reviewer, status active, generated unknown >=32-character password hashed through Password.HashPasswordChange; no password printed/returned | existing unique(id,tenant_id) is HostedOwner FK target; one HostedOwner per user; existing dependency tenant unchanged | new create_hosted_owner action inside enrollment transaction only; separate disable_hosted_owner_user changes active->disabled under owner authority; existing create_user/seed/role/status prototype refusals unchanged; anchor never signs in | domain-private Operations write scope with activation checks; direct unscoped narrow actions Forbidden, including a marked kernel outside the orchestrator; no public registration; User subject/session reads remain active-only; passwords/role/status admin paths not widened | none |
+| Token | Existing delta, no new table/strategy | Existing signed enrollment token then ordinary stored session | existing jti/subject/expires_at/purpose; enrollment JWT purpose hosted_owner_enrollment, claims bind owner_id/relocation_id, exp now+900 sec | subject is existing User; owner/relocation checked against live HostedOwner at consumption | Jwt.token_for_user with distinct purpose; verified JWT plus exact stored purpose required; consume using existing TokenResource.Actions.revoke(single_use?:true), then create user-purpose session IN SAME transaction; concurrent/replayed/expired link cannot create second session; disable revokes every token atomically | consumption grants no kernel authority; active live HostedOwner only; enrollment JWT cannot be used directly as normal user session; no auth strategy/bypass additions | reuse pinned dependency's existing conditional single-use revoke, not custom token upsert |
+| Prototype authority / OperatorAction | Existing policy delta | Recognize hosted reviewer without impersonation | no new actor type | matches live HostedOwner+fresh User in binding tenant and latest activated relocation | full live revalidation, no cached role as authority; only review_read and assign allowed to HostedOwner; existing delegation path preserved | reviewer User stays User actor; wrong tenant, disabled, old activation, anchor, auditor, fabricated ids/roles denied; no provision/approve/retry/settings/outreach permission added | none |
+| BootCheck | Existing lifecycle delta | Admit the accepted hosted owner identity set | no persisted fields | anchor + optional bound auditor + bound HostedOwner users | existing exact user check includes at most one active reviewer HostedOwner for current activation; disabled historical HostedOwner users must be same-tenant disabled reviewers with disabled owner row and zero unexpired unrevoked tokens, remain non-authorities; an active owner on stale activation refuses boot; extra/unbound/foreign/wrong-role users still refuse; current authority/live identity checks unchanged | kernel-only boot reads; no authorize?:false | none |
+| MacWorker / RemoteCallResult | Existing planned dependency, S-B5b only | Owner worker controls and private transcript view | no new fields | HostedOwner authorization in same tenant/current activation | keep S-B2 action names/argument shapes; append owner policies, not endpoint-only auth; transcript bytes never available to auditor | live HostedOwner enrol/disable/intake; transcript read owner only, internal settler scope separate | implemented after Claude S-B2 API lands; no speculative resource stub |
+
+Existing dependency: unchanged — relationship/policy/lifecycle impact checked,
+none found: AuditEvent shared AppendEvent mechanism; only new event types are
+operations.hosted_owner.enrolled/disabled, same subject/full non-sensitive
+after-image/RecordHash convention. Binding's UNIQUE(id,tenant_id) target is provided by S-B2; do NOT duplicate it.
+Relocation has NO tenant_id column. Add UNIQUE(id,binding_id) on Relocation
+and use (relocation_id,binding_id) as the HostedOwner FK; combined with
+HostedOwner(binding_id,tenant_id)->Binding(id,tenant_id), that prevents a
+foreign-tenant/wrong-binding activation without adding tenant_id to history.
+Relocation identity delta only; no lifecycle/policy/history mutation.
+User creates append user.created; disable appends user.status_changed with
+previous status, unchanged AppendEvent redacting hashed_password. Test both
+User and HostedOwner ledger commitments and no password/token payload.
+
+* Affected modules (after entity PASS)
+- Operations: hosted_owner.ex, hosted_owners.ex and scoped checks/changes;
+  Operations public domain wrappers; domain owns enrollment and disable.
+- Accounts: only User two narrow scoped actions and existing Token purpose
+  reuse. No upward relationship or Operations resource in Accounts.
+- Shared authorization scope check carries transaction/process-bound proof
+  for precisely the orchestrator's User create/disable; no public boolean.
+- Prototype: KernelMarker :hosted_owner, OperatorAction User branch,
+  Authority hosted-owner live resolver, BootCheck exact users extension.
+- Auth web: dedicated /hosted-enrollment GET+POST controller/template and
+  bundled JS hook; existing session pipeline; no additional auth strategy.
+- Migration d270_10_hosted_owner and resource snapshots; exact migration
+  pins and setup/schema expectations, preserving equality/order.
+- S-B5b after S-B2: MacWorker policy, RemoteCallResult private read policy,
+  worker_live and owner-safe dashboard/draft controls through public APIs.
+
+* Steps / tests
+1. RED first for S-B5a domain: enrollment only at live latest activation,
+   exactly one active owner including concurrent attempts, role reviewer,
+   tenant/FK constraints, unchanged create_user refusal, audit rollback.
+2. RED for signed link: purpose isolation, expiry, malformed/forged/wrong
+   tenant/activation, sequential+concurrent replay at most one session,
+   atomic rollback if session creation fails. Existing password-only
+   strategy and anchor sign-in tests remain unchanged.
+3. RED for owner resolver, self/console disable and token revocation,
+   BootCheck active/disabled owner cases, foreign/unbound users rejected;
+   stale active owner on old activation and disabled owner with outstanding
+   unexpired/unrevoked token refuse boot. Disabled historical owners with
+   all tokens revoked confer zero authority and do not brick boot.
+   Submit RED canonical receipts for separate peer GO before GREEN.
+4. Minimal GREEN through Ash actions/policies; unchanged shared helpers.
+   Focused tests, WAE; separate source review/commit/push.
+5. S-B5a web RED/GREEN: single-use link uses URL FRAGMENT, never query/path
+   token. GET receives no secret. Bundled JS immediately removes fragment
+   from history and places token in a CSRF-protected POST form; token
+   parameter filtered, no referrer/cache and no third-party content. No
+   automatic GET consumption or session fixation; normal session handling.
+   GET sets Referrer-Policy:no-referrer and Cache-Control:no-store. POST
+   renews AND clears session before storing normal user token; both
+   requests have capture-log assertions that token bytes never appear.
+   Rejection uses closed text. Keep JS in app.js bundle, never inline.
+6. S-B5b integrates the real S-B2 domain APIs, no fake production stubs;
+   worker controls and read-only transcript allow/deny tests; explicitly
+   test a LiveView mounted before disable cannot review_read or assign on
+   its next event (Forbidden or redirect). If existing live_socket_id
+   disconnect pattern exists, broadcast it on disable; otherwise existing
+   per-event revalidation plus the stale-socket test suffice. Maintain
+   Layouts.app/current_scope. Update diagrams, run focused and full gate;
+   report remaining failures honestly without weakening assertions.
+
+* Risks / coordination
+- Enrollment/session single-use guarantee must be pinned to actual
+  dependency conditional revoke API; it exists in current pinned source.
+- No owner JWT in access logs: fragments+CSRF POST, sensitive arguments,
+  filtered parameter and capture-log tests. No inline script/vendor CDN.
+- Shared authority_core touches only hosted-owner resolver plus its one
+  migration pin; Claude resolves migration order/count at integration.
+- MacWorker/RemoteCallResult do not exist on this base; S-B5a has no fake
+  substitutes. Claude supplies concrete S-B2 actions for S-B5b.
+- No runtime dynamic dispatch/fallback that silently grants authority.
+
+* ADR
+Required: NO new ADR for S-B5a; accepted ADR-0024 and P2 already select
+HostedOwner, reviewer identity and single-use 15-minute link. Reusing
+existing JWT/token actions and a fragment-to-CSRF-POST browser handoff
+implements that boundary without a new strategy or dependency. Flag any
+actual contract deviation instead of silently implementing it.
+
+* Ask
+Claude: independent entity/plan PASS or exact changes; then I write S-B5a
+domain/token/resolver RED only and submit for separate RED GO. Confirm the
+historical disabled-owner boot treatment and fragment-link implementation
+fit accepted P2, or identify the precise required revision.
+
+* r2 implementation notes to copy into the project plan after PASS
+Claude confirmed the bounded historical disabled-owner and fragment-link
+handling fits P2/R3 (review 1b6c8c70). Record these bounds in
+notes/features/offline-mac-slice-b.org, not as a new ADR. S-B5a RED may run
+before S-B2 merge; GREEN migration expects the S-B2 binding composite identity
+(or a reviewed branch-base update), never an operational schema change.
+
+* S-B5a interface names used by RED
+- Operations.enrol_hosted_owner(attrs, opts) -> {:ok, %{owner:, user:, enrollment_token:}}.
+- Operations.consume_hosted_owner_link(token) -> {:ok, user_with_normal_session_token}.
+- Operations.disable_hosted_owner(owner_id, opts) -> {:ok, disabled_owner}.
+- Authority.hosted_owner?(user) revalidates live persisted authority, no impersonation.
+These are public domain wrappers around the reviewed Ash action paths;
+no external endpoint authentication substitutes for policies.
