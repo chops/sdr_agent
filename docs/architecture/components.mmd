@@ -12,6 +12,7 @@ graph TB
         UpgradeJobs[Per-anchor receipt jobs<br/>unique, 3 attempts]
         Anchoring[Audit.Anchoring]
         Relay[LiveEvents.Relay<br/>LISTEN sdr_audit_events -> PubSub]
+        RateLimiter[RateLimiter<br/>ETS fixed windows, before Endpoint]
     end
 
     subgraph AgentPlane["Agent plane"]
@@ -103,7 +104,9 @@ graph TB
     SDRAgent --> ModelProvider
     SDRAgent --> Integrations
     SDRAgent --> Domains
-    Endpoint --> Router
+    App --> RateLimiter
+    Endpoint -- "call/2: SensitiveAuth tags before socket dispatch" --> Router
+    Router -- ":auth_edge AuthRequestLimit: sign-in + enrollment" --> RateLimiter
     Endpoint --> PubSub
     Router --> Controllers
     Router --> LiveViews
