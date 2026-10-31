@@ -68,8 +68,8 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
     assert resumed.intake == :open
     assert {:ok, disabled} = disable(resumed, ctx.enrolled.user)
     assert disabled.status == :disabled and disabled.disabled_at != nil
-    assert {:error, _} = intake(worker, :open, ctx.enrolled.user)
-    assert {:error, _} = disable(worker, ctx.enrolled.user)
+    assert {:error, %Ash.Error.Invalid{}} = intake(worker, :open, ctx.enrolled.user)
+    assert {:error, %Ash.Error.Invalid{}} = disable(worker, ctx.enrolled.user)
     assert event_count("mac_worker.disabled") == 1
     assert event_count("mac_worker.intake_set") == 2
   end
@@ -155,7 +155,7 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
     H.enter!(ctx)
     _ = enrol!(ctx.enrolled.user)
 
-    for binding <- [Ecto.UUID.generate(), nil] do
+    for binding <- [Ecto.UUID.generate()] do
       assert {:error, %Ash.Error.Forbidden{}} =
                MacWorker
                |> Ash.Changeset.for_create(:enrol, %{binding_id: binding, profile_pins: F.pins()},
@@ -163,6 +163,17 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
                )
                |> Ash.create()
     end
+
+    # Ash enforces required attributes before policy evaluation; this is
+    # schema invalidity, not proof of a granted foreign-binding action.
+    assert {:error, %Ash.Error.Invalid{errors: errors}} =
+             MacWorker
+             |> Ash.Changeset.for_create(:enrol, %{binding_id: nil, profile_pins: F.pins()},
+               actor: ctx.enrolled.user
+             )
+             |> Ash.create()
+
+    assert Enum.any?(errors, &match?(%Ash.Error.Changes.Required{field: :binding_id}, &1))
 
     assert {:error, %Ash.Error.Forbidden{}} =
              enrol(%{ctx.enrolled.user | tenant_id: Ecto.UUID.generate()})
@@ -174,7 +185,8 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
     H.enter!(ctx)
     _ = enrol!(ctx.enrolled.user)
     assert {:ok, [_]} = list(ctx.enrolled.user)
-    assert {:error, %Ash.Error.Forbidden{}} = Ash.read(MacWorker, actor: ctx.enrolled.user)
+    result = Ash.read(MacWorker, actor: ctx.enrolled.user)
+    assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
   end
 
   test "owner updates refuse persisted foreign-binding and foreign-tenant rows unchanged", ctx do
@@ -199,7 +211,9 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
                    {"binding_id", F.dump(binding_id)},
                    {"tenant_id", F.dump(tenant_id)},
                    {"token_sha256", :crypto.strong_rand_bytes(32)}
-                 ], replica: true)
+                 ],
+                 replica: true
+               )
 
       foreign = Ash.get!(MacWorker, id, authorize?: false)
 

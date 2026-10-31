@@ -894,7 +894,22 @@ closes new intake, never completion/expiry. Worker tests only:
 x2-20261031T082102Z-65315, 2 existing PASS + 11 intended new assertion
 failures, no skips/exclusions, owned DBs dropped. Includes independent
 head-wait owner-disable race. Receipt codex-sb5-worker-red-receipt-20261031.org.
-Worker GREEN awaits correlated approval. Transcript/UI GREEN not started.
+Worker GREEN GO m_1793434954000000000_c5339fd0 with T1/T2 amendments:
+head-wait race requires Forbidden; foreign persisted worker updates leave
+row/events unchanged. A second fixture world cannot coexist with singleton
+tenant/binding, so the existing isolated replica fault helper plants foreign
+worker rows; this is setup only. Final tests sha ad03655d (controls),
+2a5c837a (race). First GREEN12/14 exposed two oracle mistakes: absent required
+binding is Invalid.Required before policy evaluation; unchanged private
+read may return an empty filtered list. Corrected these exact assertions,
+retaining every actual actor/binding Forbidden oracle and no-row/event
+checks. Repeated stale disable then exposed a genuine transition issue;
+the existing Transition locked?:true helper now checks the reread row.
+Final x2-20261031T083432Z-26116:23/23 (worker/race14 plus lower authority9),
+no skips/exclusions, DBs dropped. W2 remains Claude-owned, not implemented
+by this slice. Transcript RED8/8 at x2-20261031T082447Z-80827; GREEN GO
+m_1793435316000000000_74781a10 requires stronger denials, reader-scope
+forgery and head-wait revocation tests. Transcript/UI GREEN not started.
 
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 

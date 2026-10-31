@@ -16,6 +16,8 @@ flowchart LR
     HumanAuthority[Audit.HumanAuthority<br/>lower-owned role, metadata, owner and write-scope behaviour]
     AuditMetadata[Audit.Tenant and ProvenanceSnapshot<br/>lower-owned human read checks]
     Ordinary[Ordinary constant provider<br/>roles unchanged, no scoped User writes]
+    WorkerControl[Operations MacWorker controls<br/>fresh owner; worker then head lock; fresh recheck]
+    Worker[(MacWorker<br/>one active per binding; terminal disable)]
 
     Console -- marked enrollment / disable --> Operations
     Operations --> Scope
@@ -33,6 +35,9 @@ flowchart LR
     Accounts --> Authority
     Authority -- review_read / assign only --> Review[Prototype review and assignment policies]
     Authority -- exact live self disable --> Operations
+    Authority -- owner-only mac_worker_control, never delegated --> WorkerControl
+    WorkerControl -- current tenant and binding only --> Worker
+    Worker -- same-transaction redacted event --> Audit
     WebPrincipal[Hosted website admission<br/>live owner or exact persisted bound auditor]
     Authority --> WebPrincipal
     WebPrincipal -- login / mount / connected revalidation --> Session
@@ -49,5 +54,5 @@ flowchart LR
 
     %% Source-only implementation, not a deployment or real-data approval.
     %% Owner schema and POST verified on synthetic disposable databases.
-    %% Worker control, transcript scope and owner UI remain separate pending work.
+    %% Worker control is source implemented; claim revocation, transcript scope and owner UI remain pending.
     %% Ordinary production builds without prototype authority cannot enroll or exchange.

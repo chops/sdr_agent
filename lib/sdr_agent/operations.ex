@@ -102,6 +102,40 @@ defmodule SdrAgent.Operations do
 
   ## Operations
 
+  @doc "Enroll one current-binding Mac worker as the fresh hosted owner; token is returned once."
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    def enrol_mac_worker(attrs, opts) do
+      attrs = Map.new(attrs)
+
+      case SdrAgent.Prototype.binding() do
+        {:ok, binding} ->
+          attrs = Map.put_new(attrs, :binding_id, binding.id)
+          GuardedCall.create(SdrAgent.Operations.MacWorker, :enrol, attrs, opts)
+
+        _refused ->
+          {:error, Ash.Error.Forbidden.exception([])}
+      end
+    end
+  else
+    def enrol_mac_worker(_attrs, _opts), do: {:error, Ash.Error.Forbidden.exception([])}
+  end
+
+  @doc "Explicit owner-only worker metadata; default resource reads remain private."
+  def list_mac_workers(opts) do
+    SdrAgent.Operations.MacWorker
+    |> GuardedCall.read_query(Keyword.put(opts, :action, :owner_read))
+    |> Ash.Query.sort(enrolled_at: :asc, id: :asc)
+    |> Ash.read()
+  end
+
+  @doc "Open or pause intake, revalidating the exact locked worker and fresh owner."
+  def set_mac_worker_intake(%SdrAgent.Operations.MacWorker{} = worker, intake, opts),
+    do: GuardedCall.update(worker, :set_intake, %{intake: intake}, opts)
+
+  @doc "Terminal worker disable; disabled workers can never be resumed."
+  def disable_mac_worker(%SdrAgent.Operations.MacWorker{} = worker, opts),
+    do: GuardedCall.update(worker, :disable, %{}, opts)
+
   @doc "Creates an `enqueued` operation (the system actor owning its `kind`)."
   def create_operation(attrs, opts), do: GuardedCall.create(Operation, :create, attrs, opts)
 

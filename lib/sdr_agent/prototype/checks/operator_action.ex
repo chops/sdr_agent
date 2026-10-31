@@ -45,7 +45,7 @@ defmodule SdrAgent.Prototype.Checks.OperatorAction do
     end
 
     def match?(%SdrAgent.Accounts.User{} = actor, _authorizer, opts) do
-      Keyword.get(opts, :action) in [:review_read, :assign] and
+      Keyword.get(opts, :action) in [:review_read, :assign, :mac_worker_control] and
         SdrAgent.Prototype.Authority.hosted_owner?(actor)
     end
 

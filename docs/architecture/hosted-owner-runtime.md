@@ -40,8 +40,12 @@ rights after fresh id/tenant/role/status checks; real boot rejects such extra
 Users and the hosted web boundary rejects their sessions. The website admits
 only a live owner or exact bound persisted auditor. Normal runtime is unchanged.
 
-Mac worker controls, transcript read scope and owner-safe LiveViews remain
-pending; this diagram is not a claim of end-to-end completion.
+Mac worker enrol/list/pause/resume/disable are source implemented through
+an owner-only action namespace, with current-binding filters and fresh
+checks after worker/head locks. Second active enrollment is refused; disable
+is terminal and pause affects new intake only. The ordinary marked console
+path remains available. Claim-time owner revocation, transcript read scope
+and owner-safe LiveViews remain pending; this is not end-to-end completion.
 
 Generated generic diagrams were inspected in a temporary preview. Their
 resource grouping/counts and omitted runtime conditions are not authoritative;
