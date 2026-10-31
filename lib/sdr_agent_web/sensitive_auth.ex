@@ -105,14 +105,17 @@ defmodule SdrAgentWeb.SensitiveAuth do
     {:cont, socket}
   end
 
-  # The URI-decoded, downcased first segment (an encoded "/" splits it);
-  # an undecodable segment counts as a credential-bearing family.
+  # The URI-decoded, downcased first segment (an encoded "/" splits it).
+  # An undecodable segment (a malformed escape, or bytes that are not
+  # UTF-8 once decoded) counts as a credential-bearing family.
   defp family(%Plug.Conn{path_info: [first | _]}) do
-    first
-    |> URI.decode()
-    |> String.downcase()
-    |> String.split("/", trim: true)
-    |> List.first()
+    decoded = URI.decode(first)
+
+    if Regex.match?(~r/%(?![0-9A-Fa-f]{2})/, first) or not String.valid?(decoded) do
+      @undecodable
+    else
+      decoded |> String.downcase() |> String.split("/", trim: true) |> List.first()
+    end
   rescue
     ArgumentError -> @undecodable
   end
