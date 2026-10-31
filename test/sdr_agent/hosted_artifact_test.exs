@@ -15,7 +15,12 @@ defmodule SdrAgent.HostedArtifactTest do
   @root Path.expand("../..", __DIR__)
   @script Path.join(@root, "scripts/build-hosted-artifact.sh")
 
-  defp read(rel), do: File.read(Path.join(@root, rel))
+  # A plain assertion failure (never a MatchError) when the file is absent.
+  defp read!(rel) do
+    result = File.read(Path.join(@root, rel))
+    assert match?({:ok, _}, result), "#{rel} is absent"
+    elem(result, 1)
+  end
 
   defp executable?(rel) do
     case File.stat(Path.join(@root, rel)) do
@@ -26,22 +31,22 @@ defmodule SdrAgent.HostedArtifactTest do
 
   describe "release support files" do
     test "the release runs without Erlang distribution" do
-      assert {:ok, env} = read("rel/env.sh.eex"), "rel/env.sh.eex is absent"
+      env = read!("rel/env.sh.eex")
       assert env =~ ~r/^export RELEASE_DISTRIBUTION=none$/m
     end
 
     test "bin/server starts the endpoint; bin/migrate runs only Release.migrate" do
-      assert {:ok, server} = read("rel/overlays/bin/server"), "bin/server is absent"
+      server = read!("rel/overlays/bin/server")
       assert server =~ "PHX_SERVER=true exec ./sdr_agent start"
       assert executable?("rel/overlays/bin/server"), "bin/server is not executable"
 
-      assert {:ok, migrate} = read("rel/overlays/bin/migrate"), "bin/migrate is absent"
+      migrate = read!("rel/overlays/bin/migrate")
       assert migrate =~ "exec ./sdr_agent eval SdrAgent.Release.migrate"
       assert executable?("rel/overlays/bin/migrate"), "bin/migrate is not executable"
     end
 
     test "the build shell pins the devenv toolchain (OTP 29, Elixir 1.20) and Nix Hex/rebar3" do
-      assert {:ok, shell} = read("nix/build-shell.nix"), "nix/build-shell.nix is absent"
+      shell = read!("nix/build-shell.nix")
       assert shell =~ "pkgs.beam.packages.erlang_29"
       assert shell =~ "bp.elixir_1_20"
       assert shell =~ "bp.hex"
@@ -66,12 +71,11 @@ defmodule SdrAgent.HostedArtifactTest do
 
   describe "scripts/build-hosted-artifact.sh" do
     setup do
-      assert {:ok, text} = File.read(@script), "the build script is absent"
-      %{text: text}
+      %{text: read!("scripts/build-hosted-artifact.sh")}
     end
 
     test "parses (bash -n) and is executable", %{text: _text} do
-      assert {_out, 0} = System.cmd("bash", ["-n", @script], stderr_to_stdout: true)
+      assert match?({_out, 0}, System.cmd("bash", ["-n", @script], stderr_to_stdout: true))
       assert executable?("scripts/build-hosted-artifact.sh")
     end
 
