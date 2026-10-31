@@ -27,6 +27,7 @@ defmodule SdrAgent.SDR.ReplyWorker do
   alias SdrAgent.Agents.ResultGate
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
+  alias SdrAgent.SDR.OfflineGate
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
 
@@ -38,11 +39,13 @@ defmodule SdrAgent.SDR.ReplyWorker do
 
     with {:ok, %{status: :queued} = run} <- Agents.get_run(run_id, actor: actor),
          {:ok, signal} <- Signals.load(dumped),
+         resolved = resolve(),
+         :run <- OfflineGate.check(resolved, run.status == :queued, actor),
          {:ok, run} <- Agents.start_run(run, actor: actor) do
       result =
-        case Runtime.resolve(model()) do
+        case resolved do
           {:ok, model} -> safe_run(run, signal, model)
-          {:error, reason} -> {:refused, reason}
+          {:refused, _reason} = refused -> refused
         end
 
       {:ok, :ok} = Audit.transaction(fn -> finish(result, run, actor) end)
@@ -54,6 +57,13 @@ defmodule SdrAgent.SDR.ReplyWorker do
     else
       {:ok, _not_queued} -> :ok
       error -> error
+    end
+  end
+
+  defp resolve do
+    case Runtime.resolve(model()) do
+      {:ok, model} -> {:ok, model}
+      {:error, reason} -> {:refused, reason}
     end
   end
 

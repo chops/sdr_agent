@@ -247,7 +247,7 @@ defmodule SdrAgent.SDR.OfflineSnoozeTest do
     assert run.attention_failure_id == nil
     assert invocations(run) == []
 
-    if Map.has_key?(rows, :operation), do: assert(operation(rows.operation).status == :queued)
+    if Map.has_key?(rows, :operation), do: assert(operation(rows.operation).status == :enqueued)
 
     assert ledger() == before
   end
@@ -321,7 +321,7 @@ defmodule SdrAgent.SDR.OfflineSnoozeTest do
       now!(ctx, 60_000_000)
       assert %{snoozed: 0} = drain(:research)
       refute job(rows.job).state == "scheduled"
-      refute operation(rows.operation).status == :queued
+      refute operation(rows.operation).status == :enqueued
       assert_one_pending_call!(rows.run)
     end
 

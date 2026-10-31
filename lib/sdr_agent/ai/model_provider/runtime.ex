@@ -253,7 +253,8 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
 
   @doc """
   The run `failure_reason` recorded when a worker refuses to run because of
-  `reason` (`:provider_not_running`, `:provider_held`, `:provider_not_quiescent`,
+  `reason` (`:provider_not_running`, `:provider_held`, `:provider_offline`,
+  `:provider_not_quiescent`,
   `:llm_proxy_shim_not_found`, `:pinned_cli_unavailable`,
   `:real_model_staged` or `:unknown_model_provider`), or that status
   shows for ClaudeCLI (`:status_unavailable`, `:status_inconsistent`); no
@@ -271,6 +272,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
     do:
       "model provider claude_cli is held while its server is started, adopted or switched " <>
         "(see Admin); no model call was made"
+
+  def refusal_message(:provider_offline),
+    do:
+      "model provider claude_cli refuses calls: the enrolled Mac worker sent no heartbeat " <>
+        "in the last 60 s (offline); no model call was made"
 
   def refusal_message(:provider_not_quiescent),
     do:

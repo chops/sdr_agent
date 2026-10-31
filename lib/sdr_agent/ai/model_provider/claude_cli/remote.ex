@@ -8,7 +8,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
     * `prepare/2` reads the current live binding's active worker through
       `SdrAgent.Operations.remote_worker_status/1` (the request actor's
       tenant only). No active worker → `{:error, :provider_not_running}`;
-      paused intake → `{:error, :provider_held}`; enrolled pins that are not
+      paused intake → `{:error, :provider_held}`; no heartbeat in the last
+      60 s, or one later than now (S-B6 `availability/1`) →
+      `{:error, :provider_offline}`; enrolled pins that are not
       exactly one compiled real profile's (profile, model and CLI version)
       → `{:error, :worker_pins_incompatible}`; a request whose stored body
       the remote reservation would refuse, including a worst-case launch
@@ -30,7 +32,6 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
   @behaviour SdrAgent.AI.ModelProvider
 
   @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
-
   @impl true
   def complete(_request, _opts), do: :remote_dispatched
 
@@ -42,6 +43,24 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
     alias SdrAgent.AI.ModelProvider
     alias SdrAgent.AI.ModelProvider.ClaudeCLI
 
+    # S-B6: a heartbeat at most this old (inclusive, microseconds) is fresh.
+    @freshness_us 60_000_000
+
+    @doc """
+    S-B6: whether the actor's current Mac worker can take work now. `:ok`
+    only for an active worker with open intake whose `last_seen_at` lies in
+    [now - 60 s, now] (server clock, microsecond precision); else
+    `{:error, :provider_not_running}` (no active worker),
+    `{:error, :provider_held}` (paused intake) or
+    `{:error, :provider_offline}` (no heartbeat, older than 60 s or later
+    than now). A lock-free point read, never admission evidence: the claim
+    rechecks under its own locks. `prepare/2` applies it first.
+    """
+    def availability(actor) do
+      with {:ok, status} <- SdrAgent.Operations.remote_worker_status(actor),
+           do: available(status)
+    end
+
     @impl true
     def prepare(request, _opts) do
       with {:ok, status} <- SdrAgent.Operations.remote_worker_status(request.actor),
@@ -52,9 +71,18 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
       end
     end
 
-    defp available(%{present?: true, intake: :open}), do: :ok
+    defp available(%{present?: true, intake: :open, last_seen_at: seen}), do: fresh(seen)
     defp available(%{present?: true}), do: {:error, :provider_held}
     defp available(_absent), do: {:error, :provider_not_running}
+
+    # The inclusive window [now - 60 s, now]; nil or anything else fails
+    # closed. DateTime.diff in microseconds keeps sub-millisecond skew.
+    defp fresh(%DateTime{} = seen) do
+      age = DateTime.diff(SdrAgent.Clock.utc_now(), seen, :microsecond)
+      if age >= 0 and age <= @freshness_us, do: :ok, else: {:error, :provider_offline}
+    end
+
+    defp fresh(_none), do: {:error, :provider_offline}
 
     # The enrolled pins name exactly one compiled real ClaudeCLI profile.
     defp compiled_profile(%{profile_id: id, model_id: model, cli_version: version}) do
@@ -78,6 +106,9 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
       end
     end
   else
+    @doc "Production build: no live binding, so no worker."
+    def availability(_actor), do: {:error, :provider_not_running}
+
     @impl true
     def prepare(_request, _opts), do: {:error, :provider_not_running}
   end

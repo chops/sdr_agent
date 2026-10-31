@@ -1128,3 +1128,20 @@ Branch claude/sb4-remote-transport. Heads: RED 650a8585, RED r2 1b9e5c2c, GREEN 
 - Late results are fail-closed: recorded, never released into or resuming the failed run.
 - Process-dictionary capabilities share the trust level of the existing scope markers; they are not a defence against arbitrary code in the VM.
 - Source and focused evidence only: not the full gate, hosted integration, Linux artifact, deployment or live model. Inherited full-gate failures stay outstanding until resolved or dispositioned.
+
+* S-B6 offline snooze gate (2026-10-31)
+Plan r2 claude-sb6-snooze-plan-r2-20261031.org (sha256 5769d9acd044c7ad2f3a38914e7b242e741ecf104fa9d0a34c0c54f4851b3330).
+Entity Model trigger: yes (minimal delta: MacWorker availability read view; AgentWorker/ReplyWorker job lifecycle). Capabilities ai_pair=true, codex_review=true. Reviewer Codex. Verdict PASS (m_codex_sb6_snooze_r2_pass_red_go_20261031, review sha256 d2cd2625943afcb89c197a08f8230b2bd97a688511120770ce31a89c403c3894, 2026-10-31T20:38:53Z). r1 NEEDS-REVIEW 5da49f70 (enrollment is not liveness) resolved.
+
+** Behaviour
+- =ClaudeCLI.Remote.availability/1=: =:ok= only for an active worker, open intake and =last_seen_at= in [now - 60 s, now] (server clock, microseconds). Absent → =:provider_not_running=; paused → =:provider_held=; nil, stale or future → =:provider_offline=. =prepare/2= applies the same predicate first, then the unchanged pin and launch-size checks. Production build: always =:provider_not_running=.
+- =SdrAgent.SDR.OfflineGate.check/3= (AgentWorker and ReplyWorker, before START): =ClaudeCLI.Remote= resolved, run =:queued= (and Operation =:enqueued= for AgentWorker), worker offline → ={:snooze, 60}=. Unbounded, uncharged, no domain write; Oban restores the attempt (=max_attempts= 1 unchanged). Every other case: the existing path, including refused resolutions (START then fail with their attention Failure). The model is resolved once and reused.
+
+** Residuals (disclosed)
+- A disconnect inside the 60 s window still reserves (charged); the call then expires at its 120 s claim deadline (accepted B1 accounting).
+- Gate-to-prepare race: prepare refuses =:provider_offline= before reservation; the run fails =provider_error=, uncharged.
+- The gate is a lock-free point read, never admission evidence; the claim rechecks under its locks. =Runtime.status/0= stays a coarse observer (it does not report freshness).
+
+** Evidence
+- RED 499c73a6 (c3-20261031T204601Z-76692, 34/49, 15 intended); refinement e83ad13e (c3-20261031T205106Z-96677: valid synthetic lead, boundary reserves exactly one pending call pre-GREEN). Codex RED review 344d7ca8.
+- GREEN: see the S-B6 GREEN receipt. GREEN corrected two test assertions from =:queued= to =:enqueued= for the Operation (the Operation status set is =:enqueued=, =:running=, …; =:queued= never exists).

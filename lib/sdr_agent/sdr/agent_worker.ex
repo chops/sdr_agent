@@ -25,6 +25,10 @@ defmodule SdrAgent.SDR.AgentWorker do
   Operation) and the job returns `{:error, :provider_not_running}` (or
   `{:error, :unknown_model_provider}`) — never a raise, never the Fake
   instead.
+
+  S-B6: under the trusted `:remote` transport, a job whose run is queued
+  and Operation enqueued snoozes 60 s while the Mac worker is offline
+  (`SdrAgent.SDR.OfflineGate`), before START and with no charge.
   """
   use Oban.Worker, queue: :research, max_attempts: 1
   use SdrAgent.Workers.ErrorBoundary
@@ -37,6 +41,7 @@ defmodule SdrAgent.SDR.AgentWorker do
   alias SdrAgent.AI.ModelProvider.Runtime
   alias SdrAgent.Audit
   alias SdrAgent.Operations
+  alias SdrAgent.SDR.OfflineGate
   alias SdrAgent.SDR.Runner
   alias SdrAgent.SDR.Signals
 
@@ -65,10 +70,17 @@ defmodule SdrAgent.SDR.AgentWorker do
     with {:ok, %{} = operation} <- Operations.find_operation(job_id, actor: actor),
          {:ok, run} <- Agents.find_run_by_operation(operation.id, actor: actor),
          {:ok, signal} <- Signals.load(dumped),
+         resolved = opts |> Keyword.get_lazy(:model, &default_model/0) |> resolve(),
+         :run <-
+           OfflineGate.check(
+             resolved,
+             run.status == :queued and operation.status == :enqueued,
+             actor
+           ),
          {:ok, operation} <- Operations.start_operation(operation, actor: actor),
          {:ok, run} <- Agents.start_run(run, actor: actor) do
       result =
-        case opts |> Keyword.get_lazy(:model, &default_model/0) |> resolve() do
+        case resolved do
           {:ok, model} -> Runner.run(run, signal, Keyword.put(opts, :model, model))
           {:refused, _reason} = refused -> refused
         end
