@@ -78,6 +78,12 @@ defmodule SdrAgentWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Liveness probe for the reverse proxy and the runbook: no pipeline, no
+  # session, no database read. Endpoint liveness only, not readiness.
+  scope "/", SdrAgentWeb do
+    get "/health", HealthController, :show
+  end
+
   # S9: the simulated provider webhook — signature-verified, no session.
   scope "/webhooks", SdrAgentWeb do
     pipe_through :webhook
