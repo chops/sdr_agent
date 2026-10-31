@@ -177,6 +177,47 @@ defmodule SdrAgent.Prototype.HostedWorkerControlTest do
     assert {:error, %Ash.Error.Forbidden{}} = Ash.read(MacWorker, actor: ctx.enrolled.user)
   end
 
+  test "owner updates refuse persisted foreign-binding and foreign-tenant rows unchanged", ctx do
+    H.enter!(ctx)
+    worker = enrol!(ctx.enrolled.user)
+
+    # Tenant and prototype binding are database singletons. Plant isolated
+    # corrupt foreign rows with the existing fault helper; a second fixture
+    # world cannot legally coexist. The subject is the public action, not
+    # this setup write. The Sandbox owns every inserted row.
+    for tenant_id <- [ctx.fx.tenant.id, Ecto.UUID.generate()] do
+      id = Ecto.UUID.generate()
+      binding_id = Ecto.UUID.generate()
+
+      assert :ok =
+               F.copy_insert(
+                 MacWorker,
+                 "id = $1",
+                 [F.dump(worker.id)],
+                 [
+                   {"id", F.dump(id)},
+                   {"binding_id", F.dump(binding_id)},
+                   {"tenant_id", F.dump(tenant_id)},
+                   {"token_sha256", :crypto.strong_rand_bytes(32)}
+                 ], replica: true)
+
+      foreign = Ash.get!(MacWorker, id, authorize?: false)
+
+      before =
+        Repo.query!("SELECT row_to_json(w)::text FROM mac_workers w WHERE id=$1", [F.dump(id)]).rows
+
+      assert {:error, %Ash.Error.Forbidden{}} = intake(foreign, :paused, ctx.enrolled.user)
+      assert {:error, %Ash.Error.Forbidden{}} = disable(foreign, ctx.enrolled.user)
+
+      assert Repo.query!("SELECT row_to_json(w)::text FROM mac_workers w WHERE id=$1", [
+               F.dump(id)
+             ]).rows == before
+    end
+
+    assert event_count("mac_worker.intake_set") == 0
+    assert event_count("mac_worker.disabled") == 0
+  end
+
   test "enrollment token is absent from log and audit payload bytes", ctx do
     H.enter!(ctx)
     parent = self()

@@ -115,7 +115,7 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
         await_worker_waiting(backend)
         send(holder.pid, :disable_owner)
         assert {:ok, {:ok, {:ok, _}}} = Task.yield(holder, @bound)
-        assert {:ok, {:error, _}} = Task.yield(control, @bound)
+        assert {:ok, {:error, %Ash.Error.Forbidden{}}} = Task.yield(control, @bound)
 
         assert %{rows: [["open"]]} =
                  SQL.query!(Repo, "SELECT intake FROM mac_workers WHERE id=$1", [
