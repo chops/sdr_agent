@@ -57,11 +57,14 @@ The existing console LiveViews now use the lower fresh human/owner interface
 for presentation. Assignment is separate from reviewer/admin powers. Owner
 Dashboard/Operations and Run signal panels label ungranted reads unavailable,
 never as empty queues or zero counts. Worker controls use the existing domain
-facade; the one-time enrollment token is base64url text, cleared by dismissal,
-refresh or refusal, never logged or stored. Run diagnostics list only the
-current run's metadata and require an explicit click, fresh membership in that
-run's permitted call list, and the audited reader before escaped transcript
-text is returned. Refresh and refusal clear transcript content. Browser
+facade; the one-time enrollment token is base64url text, retained through
+successful authorized metadata refreshes so commit events cannot erase it
+before it is copied. Dismissal, refusal, failed reload, loss of owner controls
+or a new mount clears it; it is never logged or persisted. Run diagnostics list
+only the current run's metadata and require an explicit click, fresh membership
+in that run's permitted call list, and the audited reader before escaped
+transcript text is returned. Any relevant tenant-event refresh or refusal clears
+transcript content; viewing it again requires another explicit audited read. Browser
 responses use no-store/no-referrer with the existing secure-header defaults.
 Claim-time owner revocation remains pending; this is not end-to-end completion.
 

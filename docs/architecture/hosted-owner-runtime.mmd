@@ -71,6 +71,7 @@ flowchart LR
     %% Source-only implementation, not a deployment or real-data approval.
     %% Owner schema and POST verified on synthetic disposable databases.
     %% Owner UI uses existing public domain APIs; ungranted Failure/Operation/Webhook/AuditEvent panels say unavailable.
-    %% Enrollment token displayed once, never stored or logged; browser no-store/no-referrer.
+    %% Enrollment token displayed once, retained across successful owner metadata reloads until dismissed.
+    %% Refusal/failed reload/new mount clears token; never persisted or logged; browser no-store/no-referrer.
     %% Claim-time owner revocation remains pending; this is not end-to-end completion.
     %% Ordinary production builds without prototype authority cannot enroll or exchange.

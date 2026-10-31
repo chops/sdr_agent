@@ -832,8 +832,8 @@ independent GO permits the previously approved minimal UI GREEN next.
 Approved UI GREEN and T1 now implemented in offline-hosted-owner-green:
 fresh lower HumanAuthority presentation, separate owner assignment, explicit
 unavailable panels for ungranted Failure/Operation/Webhook/AuditEvent reads,
-existing Operations worker facade controls, one-time base64url token cleared
-on dismissal/reload/refusal, and explicit escaped RunLive diagnostics with
+existing Operations worker facade controls, one-time base64url token (refresh
+handling corrected by M1 below), and explicit escaped RunLive diagnostics with
 fresh current-run membership before the audited reader. Browser no-store and
 no-referrer retain the secure-header defaults. No new grants or model calls.
 
@@ -858,6 +858,32 @@ updated; generic generator output was inspected in an isolated preview and
 not adopted because its grouping omits conditional runtime boundaries.
 N1 clarifies AuditAccess.target_ref is the remote call ID. Claim-time owner
 revalidation W2 remains Claude-owned. No end-to-end/deployment PASS claimed.
+
+* S-B5 UI review M1 correction (2026-10-31T18:30Z)
+Claude review m_1793471049961482000_e1cb145a, artifact2e51ca78, found that
+enrollment's own committed mac_worker.enrolled event erased the token on
+LiveRefresh. The earlier refresh-clears test asserted that usability defect.
+Replace it with real PubSub event and explicit refresh persistence checks,
+and add owner-disable signed-out-view control; dismissal/refusal tests stay.
+Entity trigger: no new persisted concept, relationship, policy or backend
+contract; only ephemeral UI display lifetime in the existing owner grant.
+Architecture unchanged: no new boundary/flow, only maintained token-lifetime
+notes clarified. No new ADR; accepted owner UI remains authoritative.
+
+Tests-only e2b28f221633347fc729cf5fd5119788fa592ced pushed. Canonical RED
+x2-20261031T182753Z-13645:12/13, sole intended token-persistence assertion
+fails, all12 controls pass. Earlier diagnostic used a missing-element helper
+and raised ArgumentError; final RED explicitly asserts presence first.
+Conditional GREEN GO m_1793471220949477000_aedf690d satisfied.
+Minimal fix preserves token only through successful live-owner reloads;
+failed reload, loss of owner controls, refusal, dismissal or new mount clears
+it. Revoked-owner revalidation signs out rather than serving token content.
+N3 uses Ash.Resource.get_metadata; N2 documents transcript clearing on any
+relevant tenant-event refresh and a new audited click to view again.
+GREEN x2-20261031T182931Z-20179:104/104, skipped0/excluded0, owned pair
+dropped. Prod/test WAE, configured Credo, format and diff checks PASS.
+M1 source/result review and N1 render predicate reuse remain before hosted
+deployment; no full-gate/deployment-ready claim here.
 
 * S-B5 enrollment and human boundary checkpoint (2026-10-31)
 

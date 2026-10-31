@@ -21,7 +21,8 @@ defmodule SdrAgentWeb.OperationsLive do
   A current hosted owner sees permitted run metadata and the explicit
   Operations worker facade controls. Ungranted Failure/Operation/Webhook
   panels say unavailable, not empty. The one-time enrollment token is
-  displayed as base64url text and cleared on dismissal, reload or refusal.
+  displayed as base64url text until dismissed. Successful authorized reloads
+  preserve it; refusal, failed reload or a new mount clears it.
   No control launches a model call or grants ordinary admin/reviewer powers.
   """
   use SdrAgentWeb, :live_view
@@ -69,7 +70,7 @@ defmodule SdrAgentWeb.OperationsLive do
   end
 
   defp load(socket) do
-    socket = assign(socket, worker_token: nil, workers: [])
+    socket = assign(socket, workers: [])
     scope = socket.assigns.current_scope
     opts = [actor: scope.user]
     owner? = Scope.hosted_owner?(scope)
@@ -105,6 +106,7 @@ defmodule SdrAgentWeb.OperationsLive do
         loaded?: true,
         withheld: nil,
         workers: workers,
+        worker_token: if(owner?, do: socket.assigns.worker_token),
         owner_controls?: owner?,
         panels_unavailable?: owner?,
         counts: %{failures: length(failures), runs: length(runs)}
@@ -115,7 +117,12 @@ defmodule SdrAgentWeb.OperationsLive do
       |> stream(:webhooks, panels.webhooks, reset: true)
     else
       {:error, reason} ->
-        assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
+        assign(socket,
+          loaded?: false,
+          worker_token: nil,
+          owner_controls?: false,
+          withheld: AuditedView.error_message(reason)
+        )
     end
   end
 
@@ -145,7 +152,7 @@ defmodule SdrAgentWeb.OperationsLive do
 
           token =
             if socket.assigns.loaded? and socket.assigns.owner_controls? do
-              Base.url_encode64(worker.__metadata__.token, padding: false)
+              Base.url_encode64(Ash.Resource.get_metadata(worker, :token), padding: false)
             end
 
           {:noreply, assign(socket, worker_token: token)}
