@@ -84,6 +84,8 @@ config :sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 0
 # production build holds the refusal stubs of SdrAgent.Prototype only.
 config :sdr_agent, prototype_authority_compiled: true
 
+config :sdr_agent, human_authority_provider: SdrAgent.Operations.HostedOwners
+
 # D-237 (interfaces r6 ruling a): the hermetic, test-build-only prototype seam
 # (SdrAgent.Prototype.Authority.TestSeam: a process-scoped runtime and live
 # identity override). Never set in dev or prod; the authority flag alone does

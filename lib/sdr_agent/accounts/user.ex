@@ -390,7 +390,7 @@ defmodule SdrAgent.Accounts.User do
     # administration refusal above: no direct auth interaction can create
     # or disable a hosted identity outside the Operations transaction scope.
     policy action([:create_hosted_owner, :disable_hosted_owner_user]) do
-      forbid_unless SdrAgent.Operations.Checks.HostedOwnerWriteScope
+      forbid_unless Checks.HostedOwnerWriteScope
       authorize_if always()
     end
 

@@ -60,6 +60,7 @@ graph TB
         Relocation[Relocation]
         RelocationEvent[RelocationEvent<br/>position under head lock]
         HostedOwner[HostedOwner<br/>reviewer bound to activated relocation]
+        HostedOwnerPolicy[HostedOwners<br/>prototype human-authority implementation]
     end
     subgraph Accounts["Accounts Domain"]
         User[User]
@@ -72,6 +73,8 @@ graph TB
         ProvenanceSnapshot[ProvenanceSnapshot]
         Payload[Payload]
         AuditAccess[AuditAccess]
+        HumanAuthority[HumanAuthority<br/>lower-owned role and scoped-write interface]
+        OrdinaryAuthority[Ordinary constant provider<br/>no prototype dependency]
         RetentionMarker[RetentionMarker]
         AuditSigningKey[AuditSigningKey]
         AuditAnchor[AuditAnchor]
@@ -194,6 +197,11 @@ graph TB
 
     %% Project shape: single
     %% Layering (ADR-0009): Audit <- Accounts <- Operations <- Agents <- Sales <- Research <- Outreach
+    User -- "lower-owned role and scoped-write policy checks" --> HumanAuthority
+    HumanAuthority -. "ordinary build" .-> OrdinaryAuthority
+    HumanAuthority -. "authority-compiled build; explicit compile-time provider" .-> HostedOwnerPolicy
+    HostedOwnerPolicy -- "fresh identity; any owner history precedence" --> HostedOwner
+    %% The callback dispatch is runtime-conditional, not an upward FK or a lower-owned persistence query.
     %% Embedded resources (incl. IcpCriteria, SourceLocation, QualificationCriteria) are omitted.
 ```
 

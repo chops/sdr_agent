@@ -16,9 +16,7 @@ defmodule SdrAgent.Audit.Checks.ActorRole do
   def match?(%SdrAgent.Actor{}, _context, _opts), do: false
 
   def match?(%{role: role} = actor, _context, opts) do
-    role in List.wrap(opts[:roles]) and
-      (SdrAgent.Prototype.runtime() == :ordinary or
-         SdrAgent.Operations.HostedOwners.legacy_human?(actor))
+    role in List.wrap(opts[:roles]) and SdrAgent.Audit.HumanAuthority.role_allowed?(actor)
   end
 
   def match?(_actor, _context, _opts), do: false

@@ -838,6 +838,28 @@ Ordinary runtime semantics are unchanged. This residual must appear in the
 integration handback. Entity/plan review: Claude 219ae9a4; step2 RED GO
 m_1793432505000000000_641f4b2c; fixture GO m_1793432724000000000_ee5f1019.
 
+** Source-review M1: preserve domain layering through a lower interface
+
+f0d46454 source review d089b8b0 found ActorRole directly depending on upper
+owner persistence. Correction plan 77522295 was independently accepted by
+Claude (m_1793433855000000000_28b4f318), with no ADR-0009 exception.
+Audit owns HumanAuthority role/write-scope callbacks. Prototype dev/test
+builds explicitly bind the Operations implementation at compile time;
+ordinary builds keep a lower constant implementation; missing prototype
+selection fails closed. User and ActorRole know no upper implementation.
+The conditional callback implementation still performs the same fresh
+owner/history lookups, explicitly shown in maintained diagrams. Runtime
+config cannot replace the provider. No caching changes were introduced.
+M1 RED: x2-20261031T080537Z-97708, 5 intended assertion failures; GREEN GO
+m_1793433997000000000_a2f0305d. GREEN x2-20261031T080930Z-14721:
+124/124, no skips/exclusions. Expanded x2-20261031T081137Z-24471:
+235/251, the same 16 inherited failure names as the prior 246-test run;
+no new/removed failure names, skips or exclusions. Owned DBs dropped.
+Source review remains required. Full gate at f0d46454 passed workflow,
+format, compile, codegen and plain Credo, then stopped at the known
+dependency audit before DB effects. ADR-0008 patch 35dbf73e / PR244 awaits
+owner acceptance; no advisory ignored and no dependency upgrade assumed.
+
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
 Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.

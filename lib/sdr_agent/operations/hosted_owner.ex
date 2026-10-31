@@ -20,9 +20,9 @@ defmodule SdrAgent.Operations.HostedOwner do
     authorizers: [Ash.Policy.Authorizer]
 
   alias SdrAgent.Audit.Changes.AppendEvent
+  alias SdrAgent.Audit.Checks.HostedOwnerWriteScope
   alias SdrAgent.Audit.Checks.KernelContext
   alias SdrAgent.Operations.Checks.HostedOwnerAccess
-  alias SdrAgent.Operations.Checks.HostedOwnerWriteScope
 
   postgres do
     table "hosted_owners"

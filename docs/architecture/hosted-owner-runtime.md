@@ -6,7 +6,13 @@ have focused synthetic verification against the S-B2 dependency. See
 [the Mermaid source](hosted-owner-runtime.mmd).
 
 Operations owns HostedOwner. It uses existing Accounts User/Token actions;
-Accounts does not own or query Operations persistence. Enrollment is console
+Accounts does not own or query Operations persistence. Its policies call the
+lower Audit.HumanAuthority interface for role eligibility and the narrow write
+scope. Prototype builds explicitly select Operations.HostedOwners as the
+compile-time implementation; ordinary builds use the lower constant provider.
+The configured upper implementation performs owner/history lookups: inversion
+does not remove those runtime reads. Missing prototype selection fails closed,
+and runtime config cannot swap the provider. Enrollment is console
 only, with a generated unknown password and an ordinary reviewer role.
 Mutations require a privately registered exact transaction/process scope.
 

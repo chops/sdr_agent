@@ -12,6 +12,8 @@ defmodule SdrAgent.Operations.HostedOwners do
   bind owner+activation, and cannot directly authenticate a normal session.
   """
 
+  @behaviour SdrAgent.Audit.HumanAuthority
+
   @compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   if @compiled do
@@ -200,6 +202,13 @@ defmodule SdrAgent.Operations.HostedOwners do
     end
 
     def legacy_human?(_actor), do: false
+
+    @impl true
+    def role_allowed?(%{role: role} = actor) when role in [:admin, :reviewer, :auditor] do
+      Prototype.runtime() == :ordinary or legacy_human?(actor)
+    end
+
+    def role_allowed?(_actor), do: false
 
     @doc "Fresh hosted or validated legacy human metadata access; ordinary runtime is unchanged."
     def human_read?(%User{} = actor) do
@@ -459,6 +468,7 @@ defmodule SdrAgent.Operations.HostedOwners do
     end
 
     @doc false
+    @impl true
     def valid_write_scope?(actor, %Ash.Changeset{} = changeset) do
       with true <- Repo.in_transaction?(),
            ref when is_reference(ref) <- Map.get(changeset.context, @scope_marker),
@@ -484,6 +494,8 @@ defmodule SdrAgent.Operations.HostedOwners do
     def active?(_actor), do: false
     @doc "No prototype legacy-human resolver in an ordinary production build."
     def legacy_human?(_actor), do: false
+    @impl true
+    def role_allowed?(_actor), do: false
     @doc "Ordinary human metadata semantics are unchanged."
     def human_read?(%SdrAgent.Accounts.User{}), do: true
     def human_read?(_actor), do: false
@@ -493,6 +505,7 @@ defmodule SdrAgent.Operations.HostedOwners do
     @doc "No additional boot users in an ordinary production build."
     def boot_user_rows(_binding), do: {:ok, []}
     @doc false
+    @impl true
     def valid_write_scope?(_actor, _subject), do: false
   end
 end

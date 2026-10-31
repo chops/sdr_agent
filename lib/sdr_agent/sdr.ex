@@ -85,10 +85,8 @@ defmodule SdrAgent.SDR do
        )
        when role in [:admin, :reviewer] and is_binary(tenant_id) do
     allowed =
-      SdrAgent.Prototype.runtime() == :ordinary or
-        SdrAgent.Operations.HostedOwners.legacy_human?(actor) or
-        (not Keyword.has_key?(opts, :owner_user_id) and
-           SdrAgent.Operations.HostedOwners.active?(actor))
+      SdrAgent.Audit.HumanAuthority.role_allowed?(actor) or
+        hosted_assignment_allowed?(actor, opts)
 
     if allowed, do: :ok, else: {:error, Ash.Error.Forbidden.exception([])}
   end
@@ -112,6 +110,15 @@ defmodule SdrAgent.SDR do
   end
 
   defp authorize(_actor, _lead, _opts), do: {:error, Ash.Error.Forbidden.exception([])}
+
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp hosted_assignment_allowed?(actor, opts) do
+      not Keyword.has_key?(opts, :owner_user_id) and
+        SdrAgent.Operations.HostedOwners.active?(actor)
+    end
+  else
+    defp hosted_assignment_allowed?(_actor, _opts), do: false
+  end
 
   defp do_assign(lead, campaign_id, actor, opts) do
     agent = Actor.system(:agent_runtime, lead.tenant_id)

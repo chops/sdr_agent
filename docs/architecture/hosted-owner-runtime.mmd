@@ -13,6 +13,8 @@ flowchart LR
     Authority[Live owner resolver<br/>fresh user + owner + binding + activation]
     Boot[Boot exact user set<br/>disabled history has zero unexpired unrevoked tokens]
     Audit[(Audit ledger<br/>same transaction, no password/token bytes)]
+    HumanAuthority[Audit.HumanAuthority<br/>lower-owned role and write-scope behaviour]
+    Ordinary[Ordinary constant provider<br/>roles unchanged, no scoped User writes]
 
     Console -- marked enrollment / disable --> Operations
     Operations --> Scope
@@ -38,6 +40,10 @@ flowchart LR
     Boot --> Tokens
     Owner --> Audit
     Accounts --> Audit
+    Accounts -- lower policy checks --> HumanAuthority
+    HumanAuthority -. explicit prototype compile-time provider .-> Operations
+    HumanAuthority -. ordinary build .-> Ordinary
+    Operations -- fresh legacy eligibility / exact private write scope --> HumanAuthority
 
     %% Source-only implementation, not a deployment or real-data approval.
     %% Owner schema and POST verified on synthetic disposable databases.
