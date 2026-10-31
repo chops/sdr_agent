@@ -40,10 +40,11 @@ defmodule SdrAgent.SDR.OfflineSnoozeTest do
   alias SdrAgent.SDR.ReplyWorker
   alias SdrAgent.SDR.Signals
 
-  setup do
+  setup tags do
     ctx = H.activated!()
     admin = human(:admin, ctx.fx.tenant)
-    :ok = AgentsFixtures.ensure_offering!(ctx.fx.tenant)
+    # The seeded scenarios save the offering through the GTM seed itself.
+    unless tags[:seeded], do: :ok = AgentsFixtures.ensure_offering!(ctx.fx.tenant)
     definition = AgentsFixtures.definition!(ctx.fx.tenant)
     agent = Actor.system(:agent_runtime, ctx.fx.tenant.id)
     fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
@@ -146,6 +147,36 @@ defmodule SdrAgent.SDR.OfflineSnoozeTest do
 
     {:ok, run} = Agents.create_run(attrs, actor: ctx.fx.agent)
     %{job: job, operation: operation, run: run}
+  end
+
+  # A valid synthetic assignment that reaches the model path: the GTM seed,
+  # one dossier row imported through the real route and `op assign`, as
+  # the D-237 journey builds it (SdrAgent.DossierFixtures; reserved names).
+  defp admitted_job!(ctx) do
+    actor = ctx.fx.actor
+    seed = SdrAgent.Prototype.Seed.run(SdrAgent.DossierFixtures.seed_read(), actor)
+    assert {:ok, %{campaign_id: campaign_id}} = seed
+    rows = SdrAgent.DossierFixtures.route_rows!([SdrAgent.DossierFixtures.company(1)], ["row-1"])
+    imported = SdrAgent.Prototype.DossierImport.import_row(hd(rows), actor)
+    assert {:ok, :imported, %{lead_id: lead_id}} = imported
+
+    assigned =
+      Mix.Tasks.Sdr.Prototype.Op.execute(
+        %{command: :assign, agent: :claude_code, lead: lead_id, campaign: campaign_id},
+        actor
+      )
+
+    assert {:ok, %{id: run_id}} = assigned
+    {:ok, run} = Agents.get_run(run_id, actor: ctx.fx.agent)
+    operation = Ash.get!(Operations.Operation, run.operation_id, authorize?: false)
+    %{job: Repo.get!(Oban.Job, operation.oban_job_id), run: run, operation: operation}
+  end
+
+  # Exactly one ClaudeCLI invocation of `run`, with exactly one pending call.
+  defp assert_one_pending_call!(run) do
+    assert [invocation] = invocations(run)
+    assert invocation["provider"] == "claude_cli"
+    assert %{"state" => "pending"} = F.call_of(F.load(invocation["id"]))
   end
 
   # A queued reply run and its agent-queue job, as SDR.ReplyIntake writes them.
@@ -279,29 +310,37 @@ defmodule SdrAgent.SDR.OfflineSnoozeTest do
   ## Admission and resume
 
   describe "AgentWorker with a fresh worker" do
-    test "boundary: a heartbeat exactly 60 s old STARTs the job", ctx do
+    # Codex RED review 344d7ca8: the admitted scenarios use a valid synthetic
+    # lead (seed + one imported dossier row + op assign), so the run reaches
+    # the model path: exactly one ClaudeCLI invocation reserved with its one
+    # pending RemoteModelCall (the 50 ms wait then times out; no claim).
+    @tag :seeded
+    test "boundary: a heartbeat exactly 60 s old STARTs and reserves one call", ctx do
       ctx = world!(ctx)
+      rows = admitted_job!(ctx)
       now!(ctx, 60_000_000)
-      rows = agent_job!(ctx)
       assert %{snoozed: 0} = drain(:research)
       refute job(rows.job).state == "scheduled"
-      refute run(ctx, rows.run).status == :queued
       refute operation(rows.operation).status == :queued
+      assert_one_pending_call!(rows.run)
     end
 
+    @tag :seeded
     test "resume: the same snoozed job STARTs after a fresh heartbeat", ctx do
       ctx = world!(ctx, worker: :never_seen)
-      rows = agent_job!(ctx)
+      rows = admitted_job!(ctx)
       assert %{snoozed: 1} = drain(:research)
+      assert invocations(rows.run) == []
 
       assert {:ok, :open} = F.heartbeat(ctx.enrolled.token, ctx.pins)
       assert %{snoozed: 0} = drain_due(:research, rows.job)
 
       job = job(rows.job)
+      assert job.id == rows.job.id
       refute job.state == "scheduled"
       assert job.meta["snoozed"] == 1
       refute run(ctx, rows.run).status == :queued
-      assert length(invocations(rows.run)) <= 1
+      assert_one_pending_call!(rows.run)
     end
   end
 
