@@ -26,6 +26,10 @@ defmodule SdrAgent.Prototype.ContainmentInventoryTest do
     # after guard and preflight; app env only, no handler or sink.
     "lib/mix/tasks/sdr.prototype.serve.ex" => 1,
     "lib/sdr_agent/calibration_console.ex" => 8,
+    # Hosted auth hardening plan r1, S2: the credential-redaction primary
+    # filter and Elixir's report translator re-added after it (attach/0);
+    # filters only, no handler or sink.
+    "lib/sdr_agent/logger/credential_redaction.ex" => 4,
     "lib/sdr_agent/logger/exception_filter.ex" => 2,
     # ADR-0022: exact ssl_handler formatter-only setter, no new sink.
     "lib/sdr_agent/prototype/launch_prelude.ex" => 1,

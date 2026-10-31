@@ -76,11 +76,12 @@ defmodule SdrAgentWeb.CalibrationConsoleTest do
       [{"/live", Phoenix.LiveView.Socket, config}] =
         Enum.filter(SdrAgentWeb.Endpoint.__sockets__(), &(elem(&1, 0) == "/live"))
 
-      for transport <- [:websocket, :longpoll] do
-        assert {:session, {SdrAgentWeb.Endpoint, :session_options, []}} in config[transport][
-                 :connect_info
-               ]
-      end
+      assert {:session, {SdrAgentWeb.Endpoint, :session_options, []}} in config[:websocket][
+               :connect_info
+             ]
+
+      # Hosted auth hardening plan r1: the endpoint serves no long polling.
+      assert config[:longpoll] == false
     end
   end
 
