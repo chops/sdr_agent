@@ -1,0 +1,392 @@
+defmodule SdrAgent.AI.RemoteProviderTest do
+  @moduledoc """
+  S-B4 RED (plan r1 4f2863c8 sections A-B, r2 ca6ba97d M1-M4; Codex
+  reviews c506097c and 27883f4d): the hosted provider path under the
+  trusted `:model_transport :remote`.
+
+  - `SdrAgent.AI.ModelProvider.Runtime` under `:remote` starts no local
+    ClaudeCLI tree (`children/0` is `[]`) and resolves the provider to
+    `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote`, with no local server,
+    port, reaper or shim check.
+  - `ClaudeCLI.Remote.prepare/2` reads the actor's current live binding
+    only. No active worker → `{:error, :provider_not_running}`; paused
+    intake → `{:error, :provider_held}`; enrolled pins that are not exactly
+    a compiled profile's (profile, model and CLI version) →
+    `{:error, :worker_pins_incompatible}`. Otherwise it returns
+    `ClaudeCLI.provenance/1` of that profile (provider `:claude_cli`).
+  - Before any reservation, `prepare/2` refuses a request whose worst-case
+    encoded launch response (`SdrAgent.Agents.RemoteLaunch`, below the web
+    layer) would exceed 1048576 bytes: `{:error,
+    :remote_launch_too_large}`, with no invocation and no charge.
+  - `SdrAgent.Agents.RemoteLaunch.encode/1` gives exactly the
+    `{"call": launch}` response bytes, with the seven wire keys.
+  - Direct-domain control (Codex 27883f4d condition 2): a remote
+    reservation whose stored request passes the raw caps but whose launch
+    cannot be delivered (escaping input) is refused at reservation. This
+    asserts the proposed tightened reservation invariant (addendum pending
+    review), so that no undeliverable call is ever claimed.
+  - `SdrAgent.SDR.Model.call/4` end to end in prototype runtime: the
+    facade waits, holding no lock (the test's claim, complete and settle
+    run during the wait), and returns the released output from the result
+    gate's own read: one invocation, one settlement, a `released_unverified`
+    release.
+  - Wait timeout (`config :sdr_agent, :remote_wait_ms`): the run halts
+    `:provider_error` and is failed. A late completion is then settled
+    once by the settler, with no release, no resume and no second call.
+
+  Synthetic fixtures only; no model, CLI or network.
+  """
+  use SdrAgent.PrototypeCase, async: false
+
+  alias SdrAgent.Actor
+  alias SdrAgent.AgentsFixtures
+  alias SdrAgent.AI.ModelProvider
+  alias SdrAgent.AI.ModelProvider.ClaudeCLI
+  alias SdrAgent.AI.ModelProvider.Runtime
+  alias SdrAgent.HostedOwnerFixtures, as: H
+  alias SdrAgent.PrototypeGateFixtures, as: G
+  alias SdrAgent.RemoteCallFixtures, as: F
+  alias SdrAgent.RemoteSettlerFixtures, as: S
+  alias SdrAgent.SDR.Context
+  alias SdrAgent.SDR.Model
+  alias SdrAgent.SDR.Prompts
+  alias SdrAgent.SDR.Schemas
+
+  @remote SdrAgent.AI.ModelProvider.ClaudeCLI.Remote
+  @launch SdrAgent.Agents.RemoteLaunch
+  @launch_keys ~w(call_id model_id profile_id prompt request_digest result_deadline schema)
+
+  setup do
+    ctx = H.activated!()
+    admin = human(:admin, ctx.fx.tenant)
+    :ok = AgentsFixtures.ensure_offering!(ctx.fx.tenant)
+    definition = AgentsFixtures.definition!(ctx.fx.tenant)
+    agent = Actor.system(:agent_runtime, ctx.fx.tenant.id)
+    fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
+    F.remote!()
+    put_env!(:model_provider, ClaudeCLI)
+    Map.merge(ctx, %{fx: fx})
+  end
+
+  ## Helpers
+
+  defp put_env!(key, value) do
+    previous = Application.fetch_env(:sdr_agent, key)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, old} -> Application.put_env(:sdr_agent, key, old)
+        :error -> Application.delete_env(:sdr_agent, key)
+      end
+    end)
+
+    Application.put_env(:sdr_agent, key, value)
+  end
+
+  # A live hosted owner, prototype runtime, the provisioned grant and a run.
+  defp world!(ctx, pins \\ F.pins()) do
+    _owner = H.enrol!(ctx)
+    %{token: token, worker: worker} = F.enrol!(ctx.fx, pins)
+    H.enter!(ctx)
+    grant = G.provision!(ctx.fx)
+    run = G.run!(ctx.fx)
+    fx = Map.merge(ctx.fx, %{grant: grant, run: run})
+    Map.merge(ctx, %{fx: fx, token: token, worker: worker})
+  end
+
+  defp safely(fun) do
+    fun.()
+  rescue
+    error -> {:raised, error.__struct__, Exception.message(error)}
+  catch
+    kind, reason -> {kind, reason}
+  end
+
+  defp remote(fun, args), do: safely(fn -> apply(@remote, fun, args) end)
+
+  defp qualification_input do
+    %{
+      icp: %{
+        name: "Synthetic ICP",
+        version: 1,
+        employee_count_min: 50,
+        employee_count_max: 500,
+        industries: ["robotics"],
+        geographies: ["US"],
+        personas: ["operations"],
+        triggers: ["expansion"]
+      },
+      company: %{
+        name: "Example Robotics",
+        industry: "robotics",
+        employee_count: 120,
+        geography: "US"
+      },
+      contact: %{title: "VP Operations", persona: "operations"},
+      evidence: []
+    }
+  end
+
+  # A facade request in SDR.Model's shape, with `prompt` as given.
+  defp request(ctx, prompt) do
+    purpose = :qualification
+    p = Prompts.ref(purpose)
+    s = Schemas.ref(purpose)
+
+    %{
+      id: "sb4-#{System.unique_integer([:positive])}",
+      run: ctx.fx.run,
+      actor: ctx.fx.agent,
+      operation: "sdr.qualification",
+      prompt: prompt,
+      schema: Schemas.for_purpose(purpose),
+      input: %{},
+      content_capture: :off,
+      audit: %{
+        purpose: purpose,
+        parameters: %{},
+        prompt_template_id: p.id,
+        prompt_template_version: p.version,
+        prompt_template_sha256: p.sha256,
+        output_schema_id: s.id,
+        output_schema_version: s.version,
+        output_schema_sha256: s.sha256
+      }
+    }
+  end
+
+  defp sdr(ctx) do
+    %Context{
+      actor: ctx.fx.agent,
+      tenant_id: ctx.fx.tenant.id,
+      run_id: ctx.fx.run.id,
+      correlation_id: ctx.fx.run.correlation_id,
+      signal_id: "sig-sb4-#{System.unique_integer([:positive])}",
+      model: []
+    }
+  end
+
+  defp invocations(ctx),
+    do: F.rows(SdrAgent.Agents.ModelInvocation, "agent_run_id = $1", [F.dump(ctx.fx.run.id)])
+
+  # Waits (bounded) until the run has a pending remote call; returns its row.
+  defp await_pending!(ctx, tries \\ 200) do
+    case invocations(ctx) do
+      [invocation | _] ->
+        case F.call_of(invocation["id"] |> F.load()) do
+          %{"state" => "pending"} = call -> call
+          _other -> retry_pending!(ctx, tries)
+        end
+
+      [] ->
+        retry_pending!(ctx, tries)
+    end
+  end
+
+  defp retry_pending!(_ctx, 0), do: flunk("no pending remote call appeared for the run")
+
+  defp retry_pending!(ctx, tries) do
+    Process.sleep(25)
+    await_pending!(ctx, tries - 1)
+  end
+
+  # The caller in its own process, in prototype runtime.
+  defp call_async(ctx) do
+    Task.async(fn ->
+      H.enter!(ctx)
+
+      safely(fn ->
+        Model.call(sdr(ctx), :qualification, qualification_input(), Ecto.UUID.generate())
+      end)
+    end)
+  end
+
+  defp drive!(ctx, output \\ S.valid_output()) do
+    _call = await_pending!(ctx)
+    nonce = F.nonce()
+    launch = F.claim!(ctx.token, nonce)
+
+    result =
+      F.complete(
+        ctx.token,
+        nonce,
+        launch.call_id,
+        launch.request_sha256,
+        S.valid_transcript(output)
+      )
+
+    assert F.kind(result) == :accepted, "prerequisite: completion #{inspect(result)}"
+    S.settle!(ctx.fx)
+    launch
+  end
+
+  ## Runtime under :remote
+
+  describe "Runtime" do
+    test "children/0 starts no local ClaudeCLI tree under :remote", _ctx do
+      assert Runtime.children() == []
+    end
+
+    test "resolve/1 selects ClaudeCLI.Remote with no local server check", _ctx do
+      result = safely(fn -> Runtime.resolve([]) end)
+      assert match?({:ok, _model}, result), "resolve under :remote: #{inspect(result)}"
+      {:ok, model} = result
+      assert model[:provider] == @remote
+    end
+
+    test "control: under :local the ClaudeCLI tree is still started", _ctx do
+      F.remote!(:local)
+      assert [{SdrAgent.AI.ModelProvider.ProfileSupervisor, _}] = Runtime.children()
+    end
+  end
+
+  ## prepare/2
+
+  describe "ClaudeCLI.Remote.prepare/2" do
+    test "an active worker with compiled pins: the exact ClaudeCLI provenance", ctx do
+      ctx = world!(ctx)
+      {:ok, profile} = SdrAgent.AI.ModelProfiles.fetch_real(:claude_cli_opus)
+      result = remote(:prepare, [request(ctx, F.prompt()), []])
+      assert result == {:ok, ClaudeCLI.provenance(profile)}
+      assert match?({:ok, %{provider: :claude_cli}}, result)
+    end
+
+    test "no enrolled worker: provider_not_running", ctx do
+      _owner = H.enrol!(ctx)
+      H.enter!(ctx)
+      grant = G.provision!(ctx.fx)
+      run = G.run!(ctx.fx)
+      ctx = Map.put(ctx, :fx, Map.merge(ctx.fx, %{grant: grant, run: run}))
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_not_running}
+    end
+
+    test "a paused worker: provider_held", ctx do
+      ctx = world!(ctx)
+      :ok = PrototypeFixtures.leave_runtime()
+      :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+      F.set_intake!(ctx.fx, ctx.worker, :paused)
+      H.enter!(ctx)
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) == {:error, :provider_held}
+    end
+
+    test "enrolled pins with another CLI version: worker_pins_incompatible", ctx do
+      ctx = world!(ctx, Map.put(F.pins(), "cli_version", "9.9.9-other"))
+
+      assert remote(:prepare, [request(ctx, F.prompt()), []]) ==
+               {:error, :worker_pins_incompatible}
+    end
+
+    test "a worst-case escaping prompt: remote_launch_too_large, no reservation", ctx do
+      ctx = world!(ctx)
+      prompt = String.duplicate(<<1>>, 262_144)
+      assert remote(:prepare, [request(ctx, prompt), []]) == {:error, :remote_launch_too_large}
+
+      result = safely(fn -> ModelProvider.complete(request(ctx, prompt), provider: @remote) end)
+      assert result == {:error, :remote_launch_too_large}
+      assert invocations(ctx) == []
+    end
+
+    test "control: a maximal ASCII prompt is deliverable and prepares", ctx do
+      ctx = world!(ctx)
+      prompt = String.duplicate("a", 262_144)
+      assert match?({:ok, %{provider: :claude_cli}}, remote(:prepare, [request(ctx, prompt), []]))
+    end
+  end
+
+  ## RemoteLaunch encoder
+
+  describe "RemoteLaunch" do
+    test "encode/1 is exactly {\"call\": launch} with the seven wire keys", _ctx do
+      launch = %{
+        call_id: Ecto.UUID.generate(),
+        profile_id: :claude_cli_opus,
+        model_id: "synthetic-model",
+        request_sha256: :crypto.hash(:sha256, "r"),
+        prompt: "p",
+        schema: %{"type" => "object"},
+        result_deadline: ~U[2026-10-31 19:00:00.123456Z]
+      }
+
+      result = safely(fn -> apply(@launch, :encode, [launch]) end)
+      assert is_binary(result), "encode/1: #{inspect(result)}"
+      assert %{"call" => wire} = Jason.decode!(result)
+      assert wire |> Map.keys() |> Enum.sort() == @launch_keys
+      assert wire["request_digest"] == Base.encode16(launch.request_sha256, case: :lower)
+      assert wire["profile_id"] == "claude_cli_opus"
+      assert {:ok, _at, 0} = DateTime.from_iso8601(wire["result_deadline"])
+      assert safely(fn -> apply(@launch, :max_bytes, []) end) == 1_048_576
+    end
+  end
+
+  ## Direct-domain reservation control (addendum pending)
+
+  describe "direct reservation" do
+    test "an undeliverable escaping request is refused at remote reservation", ctx do
+      ctx = world!(ctx)
+      body = F.request(String.duplicate(<<1>>, 262_144))
+      # The gap: the stored body passes the raw caps today.
+      assert SdrAgent.Agents.RemoteCalls.check_request(body) == :ok
+
+      result = F.reserve(ctx.fx, %{request: body})
+
+      assert match?({:error, %Ash.Error.Invalid{}}, result),
+             "an undeliverable launch was reserved: #{inspect(result, limit: 5)}"
+
+      assert F.count(F.call_resource()) == 0
+    end
+
+    test "control: a deliverable maximal ASCII request is reserved", ctx do
+      ctx = world!(ctx)
+      invocation = F.reserve!(ctx.fx, %{request: F.request(String.duplicate("a", 262_144))})
+      assert %{"state" => "pending"} = F.call_of(invocation.id)
+    end
+  end
+
+  ## SDR.Model end to end
+
+  describe "SDR.Model.call/4" do
+    test "waits without a lock and returns the gate's released output", ctx do
+      ctx = world!(ctx)
+      task = call_async(ctx)
+      launch = drive!(ctx)
+      result = Task.await(task, 30_000)
+
+      assert match?({:ok, _output, _invocation}, result),
+             "remote SDR call: #{inspect(result, limit: 8)}"
+
+      {:ok, output, invocation} = result
+      assert invocation.provider == :claude_cli
+      assert invocation.status == :completed
+      assert (output["score"] || output[:score]) == 82, "released output: #{inspect(output)}"
+
+      assert [one] = invocations(ctx)
+      assert F.load(one["id"]) == invocation.id
+      assert F.call_row(launch.call_id)["state"] == "completed"
+      assert S.release_count(invocation.id) == 1
+
+      assert {:ok, %{disposition: :released_unverified}} =
+               SdrAgent.Agents.get_result_release(invocation.id, actor: ctx.fx.agent)
+    end
+
+    test "timeout: the run fails; a late result settles once with no release", ctx do
+      ctx = world!(ctx)
+      put_env!(:remote_wait_ms, 300)
+
+      result = Task.await(call_async(ctx), 30_000)
+      assert result == {:error, {:halt, :provider_error}}, "timeout: #{inspect(result, limit: 8)}"
+      assert S.run_row(ctx.fx.run.id)["status"] == "failed"
+
+      assert [invocation] = invocations(ctx)
+      id = F.load(invocation["id"])
+      assert invocation["status"] in ["reserved", "sent"], "the caller settled the invocation"
+
+      launch = drive!(ctx)
+      assert F.call_row(launch.call_id)["state"] == "completed"
+      assert S.invocation_row(id)["status"] == "completed"
+      assert S.release_count(id) == 0
+      assert length(invocations(ctx)) == 1
+      assert F.count(F.call_resource()) == 1
+      assert S.run_row(ctx.fx.run.id)["status"] == "failed"
+    end
+  end
+end
