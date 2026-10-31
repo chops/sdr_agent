@@ -536,12 +536,15 @@ defmodule SdrAgent.Prototype.SchemaTest do
 
   ## 8. migration order
 
-  test "8. the seven d237 migrations are applied last before S-B1's d270, in the IF-2 order" do
+  test "8. the seven d237 migrations are applied last before S-B1's two d270, in the IF-2 order" do
     names = applied_migrations() |> Enum.sort() |> Enum.map(&elem(&1, 1))
 
-    assert List.last(names) == "d270_01_relocation_chain"
+    assert Enum.take(names, -2) == [
+             "d270_01_relocation_chain",
+             "d270_02_relocation_event_position"
+           ]
 
-    assert Enum.slice(names, -8, 7) == ~w(d237_01_users d237_02_actor_types
+    assert Enum.slice(names, -9, 7) == ~w(d237_01_users d237_02_actor_types
              d237_03_prototype_database_bindings d237_04_prototype_delegations
              d237_05_release_decisions d237_06_sources d237_07_dossier)
   end

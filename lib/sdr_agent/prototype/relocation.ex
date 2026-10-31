@@ -10,7 +10,7 @@ defmodule SdrAgent.Prototype.Relocation do
   `relocation_seq` (positive); `from_identity` and `to_identity`, each an
   identity map `%{database:, database_oid:, system_identifier:}` read back
   with those atom keys. Relationship: `events`
-  (`SdrAgent.Prototype.RelocationEvent`, in recorded order).
+  (`SdrAgent.Prototype.RelocationEvent`, by `position`).
 
   Keys: UNIQUE `(binding_id, relocation_seq)`.
 
@@ -23,11 +23,16 @@ defmodule SdrAgent.Prototype.Relocation do
   the chain's next one (`CurrentAuthority.next_seq/1`: 1 first, then the
   highest plus one), `from_identity` equal to the current authority and
   `to_identity` different from it; any other input is `Ash.Error.Invalid`
-  and writes nothing. No audit event is appended. UPDATE, DELETE and
-  TRUNCATE are refused by a trigger. Reads: the audit kernel.
+  and writes nothing. In the same transaction it appends one AuditEvent
+  `prototype.relocation.created` (`SdrAgent.Audit.Changes.AppendEvent`); a
+  failed append rolls the row back. Prototype runtime refuses the action
+  for every actor (`SdrAgent.Prototype.Checks.PrototypeRuntime`,
+  `Ash.Error.Forbidden`). UPDATE, DELETE and TRUNCATE are refused by a
+  trigger. Reads: the audit kernel.
 
   `chain/2` reads a binding's chain in the `CurrentAuthority` shape: one
-  read of the relocations and, for a nonempty chain, one of their events;
+  read of the relocations and, for a nonempty chain, one of their events
+  by `position` (each plain event map carries it);
   in a test-seam build each read carries its own live-read fault label
   (`{:relocation_chain, :relocations}`, `{:relocation_chain, :events}`).
   """
@@ -86,6 +91,9 @@ defmodule SdrAgent.Prototype.Relocation do
       description "ADR-0024: one owner-run relocation of the prototype binding."
       accept [:binding_id, :relocation_seq, :from_identity, :to_identity]
       change SdrAgent.Prototype.Changes.RelocationChain
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "prototype.relocation.created", category: :domain_change}
     end
   end
 
@@ -95,6 +103,7 @@ defmodule SdrAgent.Prototype.Relocation do
     end
 
     policy action(:create) do
+      forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
       authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :relocation}
     end
   end
@@ -123,7 +132,7 @@ defmodule SdrAgent.Prototype.Relocation do
 
     has_many :events, SdrAgent.Prototype.RelocationEvent do
       destination_attribute :relocation_id
-      sort recorded_at: :asc, id: :asc
+      sort position: :asc
       public? true
     end
   end
@@ -164,7 +173,7 @@ defmodule SdrAgent.Prototype.Relocation do
       SdrAgent.Prototype.RelocationEvent
       |> Ash.Query.for_read(:read, %{}, opts)
       |> Ash.Query.filter(relocation_id in ^ids)
-      |> Ash.Query.sort(recorded_at: :asc, id: :asc)
+      |> Ash.Query.sort(position: :asc)
       |> Ash.read()
     end)
   end
@@ -204,7 +213,7 @@ defmodule SdrAgent.Prototype.Relocation do
       relocation_seq: relocation.relocation_seq,
       from_identity: relocation.from_identity,
       to_identity: relocation.to_identity,
-      events: Enum.map(events, &%{kind: &1.kind, identity: &1.identity})
+      events: Enum.map(events, &%{kind: &1.kind, identity: &1.identity, position: &1.position})
     }
   end
 end

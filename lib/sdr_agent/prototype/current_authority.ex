@@ -6,9 +6,11 @@ defmodule SdrAgent.Prototype.CurrentAuthority do
   - An identity is `%{database:, database_oid:, system_identifier:}`; only
     those three keys are compared.
   - A chain is a list of relocations
-    `%{relocation_seq:, from_identity:, to_identity:, events: [%{kind:, identity:}]}`,
-    in any order, each relocation's events in recorded order
-    (`SdrAgent.Prototype.Relocation.chain/2` reads one from the database).
+    `%{relocation_seq:, from_identity:, to_identity:, events: [%{kind:, identity:, position:}]}`,
+    in any order; each event carries its serialized `position`, and the
+    events of a relocation are ordered by `position` only, never by list
+    order, timestamp or id (`SdrAgent.Prototype.Relocation.chain/2` reads
+    one from the database).
   - `identity/2`: `{:ok, identity}`, the binding's original identity when no
     relocation holds an `:activated` event, else the `to_identity` of the
     highest-seq relocation that does; `{:error, :chain_invalid}` when a
@@ -19,8 +21,8 @@ defmodule SdrAgent.Prototype.CurrentAuthority do
     restored archive (matching no activation and not the original) are
     never spendable.
   - `fenced?/2`: true when some relocation holds a `:fenced` event whose
-    identity equals the live identity with no later `:aborted` event in
-    that relocation. The copied fence names the source, so it never fences
+    identity equals the live identity with no `:aborted` event at a later
+    `position` in that relocation. The copied fence names the source, so it never fences
     a destination with another identity.
   - `next_seq/1`: the highest `relocation_seq` plus one, 1 for an empty
     chain (a return relocation is seq + 1).
@@ -33,7 +35,7 @@ defmodule SdrAgent.Prototype.CurrentAuthority do
           database_oid: pos_integer(),
           system_identifier: integer()
         }
-  @type event :: %{kind: atom(), identity: identity()}
+  @type event :: %{kind: atom(), identity: identity(), position: pos_integer()}
   @type relocation :: %{
           relocation_seq: pos_integer(),
           from_identity: identity(),
@@ -71,7 +73,7 @@ defmodule SdrAgent.Prototype.CurrentAuthority do
   @spec fenced?(chain(), identity()) :: boolean()
   def fenced?(chain, live) do
     live = normalize(live)
-    Enum.any?(chain, &fences?(&1.events, live))
+    Enum.any?(chain, &fences?(Enum.sort_by(&1.events, fn event -> event.position end), live))
   end
 
   @doc "The next relocation_seq: the highest plus one, 1 for an empty chain."
@@ -97,7 +99,8 @@ defmodule SdrAgent.Prototype.CurrentAuthority do
 
   defp activated?(relocation), do: Enum.any?(relocation.events, &(&1.kind == :activated))
 
-  # A fenced event naming `live`, with no aborted after it in this relocation.
+  # A fenced event naming `live`, with no aborted after it in this
+  # relocation; `events` are sorted by position.
   defp fences?([], _live), do: false
 
   defp fences?([%{kind: :fenced, identity: identity} | rest], live) do

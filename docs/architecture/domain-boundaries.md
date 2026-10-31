@@ -56,6 +56,9 @@ graph TB
         Operation[Operation]
         Failure[Failure]
         WebhookEvent[WebhookEvent]
+        PrototypeDatabaseBinding[PrototypeDatabaseBinding]
+        Relocation[Relocation]
+        RelocationEvent[RelocationEvent<br/>position under head lock]
     end
     subgraph Accounts["Accounts Domain"]
         User[User]
@@ -140,6 +143,11 @@ graph TB
     Failure -. detail sha256 FK .-> Payload
     Operations -. tenant_id FK .-> Tenant
     Operations == "AppendEvent (operations.*)" ==> Kernel
+    PrototypeDatabaseBinding --> Relocation
+    Relocation --> RelocationEvent
+    Relocation == "AppendEvent (prototype.relocation.created); ordinary runtime only" ==> Kernel
+    RelocationEvent == "AppendEvent (prototype.relocation.event_appended); ordinary runtime only" ==> Kernel
+    Kernel -. "check_fence after lock_head: a fenced source refuses every append" .-> RelocationEvent
     Accounts == "AppendEvent (user.*, auth.*)" ==> Kernel
     Sales == "AppendEvent (sales.*)" ==> Kernel
     Research == "AppendEvent (research.*)" ==> Kernel

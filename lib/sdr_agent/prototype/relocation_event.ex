@@ -6,8 +6,12 @@ defmodule SdrAgent.Prototype.RelocationEvent do
   Attributes: `id`; `relocation_id` (RESTRICT); `kind`, exactly one of
   `kinds/0`; `identity`, the live database identity
   `%{database:, database_oid:, system_identifier:}` at the write, read by
-  the action itself and never caller input; `recorded_at`; and
-  `recorded_by`, the writer (`"kernel:relocation"`).
+  the action itself and never caller input; `position`, the serialized
+  append ordinal (positive, never caller input: set under the head lock to
+  the count of recorded events plus one, so it starts at 1 and is gap-free
+  over committed appends); `recorded_at`, set after the lock and
+  informational only (read order is `position`); and `recorded_by`, the
+  writer (`"kernel:relocation"`).
 
   `:append` (owner-run only) accepts `relocation_id` and `kind`.
   Authorization: only a kernel request carrying the
@@ -19,19 +23,24 @@ defmodule SdrAgent.Prototype.RelocationEvent do
   events:
 
   - order: planned → writers_stopped → fenced → restored → activated; one
-    event of each kind; `aborted` only after `planned` (never on an empty
-    event chain) and before `activated` and, when
-    `restored` exists, only after `destination_disabled`;
+    event of each kind; `aborted` only after `planned` and while `fenced`
+    is not recorded (corrective r3b M2: a source cannot prove locally that
+    no restored copy exists; the fork-safe post-fence abort is S-B1b,
+    INCOMPLETE);
     `destination_disabled` only after `restored`; nothing after `aborted`
     or `activated`, and no `activated` after `destination_disabled`;
   - identity: source kinds (planned, writers_stopped, fenced, aborted) at
     the relocation's `from_identity`, destination kinds (restored,
     activated, destination_disabled) at its `to_identity`.
 
-  Any other append is `Ash.Error.Invalid` and writes nothing. A unique
-  partial index allows at most one `activated` row per relocation. No
-  audit event is appended. UPDATE, DELETE and TRUNCATE are refused by a
-  trigger. Reads: the audit kernel.
+  Any other append is `Ash.Error.Invalid` and writes nothing. Keys: UNIQUE
+  `(relocation_id, position)`; a unique partial index allows at most one
+  `activated` row per relocation. In the same transaction the action
+  appends one AuditEvent `prototype.relocation.event_appended`
+  (`SdrAgent.Audit.Changes.AppendEvent`); a failed append rolls the row
+  back. Prototype runtime refuses the action for every actor
+  (`SdrAgent.Prototype.Checks.PrototypeRuntime`, `Ash.Error.Forbidden`).
+  UPDATE, DELETE and TRUNCATE are refused by a trigger. Reads: the audit kernel.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -96,6 +105,9 @@ defmodule SdrAgent.Prototype.RelocationEvent do
       description "ADR-0024: one owner-run relocation step."
       accept [:relocation_id, :kind]
       change SdrAgent.Prototype.Changes.RelocationAppend
+
+      change {SdrAgent.Audit.Changes.AppendEvent,
+              event_type: "prototype.relocation.event_appended", category: :domain_change}
     end
   end
 
@@ -105,6 +117,7 @@ defmodule SdrAgent.Prototype.RelocationEvent do
     end
 
     policy action(:append) do
+      forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
       authorize_if {SdrAgent.Prototype.Checks.KernelMarker, marker: :relocation}
     end
   end
@@ -119,6 +132,12 @@ defmodule SdrAgent.Prototype.RelocationEvent do
       writable?: false,
       public?: true,
       constraints: @identity_constraints
+
+    attribute :position, :integer,
+      allow_nil?: false,
+      writable?: false,
+      public?: true,
+      constraints: [min: 1]
 
     attribute :recorded_at, :utc_datetime_usec do
       allow_nil? false
@@ -135,6 +154,10 @@ defmodule SdrAgent.Prototype.RelocationEvent do
       allow_nil? false
       public? true
     end
+  end
+
+  identities do
+    identity :unique_relocation_position, [:relocation_id, :position]
   end
 
   @doc "The seven event kinds."

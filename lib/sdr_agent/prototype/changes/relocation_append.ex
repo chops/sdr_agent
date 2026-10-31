@@ -9,8 +9,11 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
   recorded events as plain kernel reads, checks the order rules of
   `allowed?/2`, reads the live database identity and requires it to be the
   relocation's `from_identity` for a source kind or its `to_identity` for
-  a destination kind (`destination_kinds/0`). It then sets `identity` to
-  that live identity and `recorded_by`. A failed rule is an
+  a destination kind (`destination_kinds/0`). It then force-sets `identity`
+  to that live identity, `recorded_by`, `position` to the count of
+  recorded events plus one (under the lock: gap-free over committed
+  appends; a rolled-back append consumes none) and `recorded_at` to the
+  clock read after the lock (informational only). A failed rule is an
   `Ash.Error.Changes.InvalidAttribute` (`Ash.Error.Invalid`, no row); a
   returned read error is added as itself.
 
@@ -39,9 +42,9 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
   Whether `kind` may follow the relocation's recorded kinds: planned
   first; writers_stopped, fenced, restored and activated each after its
   predecessor; one of each kind; destination_disabled after restored;
-  aborted after planned and before activated, after destination_disabled
-  when restored exists (never on an empty event chain); nothing after
-  aborted or activated; no activated after destination_disabled.
+  aborted after planned and only while fenced is not recorded (corrective
+  r3b M2; the fork-safe post-fence abort is S-B1b, INCOMPLETE); nothing
+  after aborted or activated; no activated after destination_disabled.
   """
   @spec allowed?(atom(), [atom()]) :: boolean()
   def allowed?(kind, recorded) do
@@ -62,10 +65,7 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
 
   defp follows?(:destination_disabled, recorded), do: :restored in recorded
 
-  defp follows?(:aborted, recorded),
-    do:
-      :planned in recorded and
-        (:restored not in recorded or :destination_disabled in recorded)
+  defp follows?(:aborted, recorded), do: :planned in recorded and :fenced not in recorded
 
   defp follows?(_kind, _recorded), do: false
 
@@ -88,6 +88,8 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
       changeset
       |> Ash.Changeset.force_change_attribute(:identity, live)
       |> Ash.Changeset.force_change_attribute(:recorded_by, @recorded_by)
+      |> Ash.Changeset.force_change_attribute(:position, length(recorded) + 1)
+      |> Ash.Changeset.force_change_attribute(:recorded_at, SdrAgent.Clock.utc_now())
     else
       {:invalid, field, message} ->
         Ash.Changeset.add_error(

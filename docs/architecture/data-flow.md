@@ -46,6 +46,7 @@ flowchart LR
 
     subgraph AuditKernel["Audit kernel (system of record)"]
         Append[Append: lock chain head,<br/>sequence+1, sha256 chain]
+        Fence[Relocation fence: check_fence after the head lock<br/>fenced source identity refuses every append]
         Verify[verify/read/export<br/>recorded as AuditAccess]
         Anchor[Ed25519 anchor + export]
         Upgrade[Public proof upgrade<br/>serialized receipt confirmation]
@@ -106,6 +107,7 @@ flowchart LR
     Resources --> Postgres
     Actions -- same transaction --> Append
     Append --> Postgres
+    Append -- after lock_head --> Fence
     Postgres -. NOTIFY on commit only .-> Relay[LiveEvents.Relay]
     Relay -. tenant PubSub topic .-> LiveViews
     Verify --> Postgres

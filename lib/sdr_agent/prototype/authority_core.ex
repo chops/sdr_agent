@@ -1142,7 +1142,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_028_052_257, "d237_05_release_decisions"},
       {20_261_028_052_400, "d237_06_sources"},
       {20_261_028_052_425, "d237_07_dossier"},
-      {20_261_031_001_212, "d270_01_relocation_chain"}
+      {20_261_031_001_212, "d270_01_relocation_chain"},
+      {20_261_031_022_459, "d270_02_relocation_event_position"}
     ]
 
     # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
