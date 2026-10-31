@@ -46,7 +46,7 @@ flowchart LR
 
     subgraph AuditKernel["Audit kernel (system of record)"]
         Append[Append: lock chain head,<br/>sequence+1, sha256 chain]
-        Fence[Relocation fence: check_fence after the head lock<br/>fenced source identity refuses every append]
+        Fence[Relocation fence: check_fence after every head lock<br/>prototype runtime: a fenced source identity refuses every append<br/>ordinary runtime: :ok]
         Verify[verify/read/export<br/>recorded as AuditAccess]
         Anchor[Ed25519 anchor + export]
         Upgrade[Public proof upgrade<br/>serialized receipt confirmation]

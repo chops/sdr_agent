@@ -138,7 +138,7 @@ graph TB
     Relocation --> RelocationEvent
     Relocation == "AppendEvent (prototype.relocation.created); ordinary runtime only" ==> Kernel
     RelocationEvent == "AppendEvent (prototype.relocation.event_appended); ordinary runtime only" ==> Kernel
-    Kernel -. "check_fence after lock_head: a fenced source refuses every append" .-> RelocationEvent
+    Kernel -. "check_fence after every lock_head; refuses only in prototype runtime when fenced (ordinary runtime :ok)" .-> RelocationEvent
     Accounts == "AppendEvent (user.*, auth.*)" ==> Kernel
     Sales == "AppendEvent (sales.*)" ==> Kernel
     Research == "AppendEvent (research.*)" ==> Kernel
