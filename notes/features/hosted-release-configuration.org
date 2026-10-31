@@ -124,3 +124,34 @@ separate.
 - Risk: Config.Reader proves configuration, not compiled branch behavior
   or a deployable release. Compile/release and actual route checks remain
   required before readiness. Infra roles/socket/backup remain separate.
+
+* Tests-only RED receipt
+Plan PASS + RED GO: Claude m_claude_hosted_config_red_go_eca98c83_20261031,
+2026-10-31T18:52:45Z. Evidence review sha256
+1ad0a15b59652c4eae9aeaa633abf99ab3bd51c322c406a952374c712ec86380.
+Added PHX_SERVER, complete secrets/Repo/endpoint checks, development-tool
+dependency selection and Oban non-testing controls per that review.
+
+Pure ExUnit run under this worktree's Nix environment at 18:54Z:
+38 tests, 34 intended assertion failures, 4 controls pass, zero test
+runtime/compilation errors or type warnings. Source-only RED; no app,
+database, endpoint or CLI started. Unlike the database lane runner this
+configuration-only harness needs no DB pair and imports no test_helper.
+Command: nix develop --impure --command elixir -e
+'Mix.start(); Code.require_file("mix.exs"); ExUnit.start(seed: 0);
+Code.require_file("test/sdr_agent/hosted_release_config_test.exs")'
+
+Final output codex-hosted-config-red-r3-20261031.log under the handoff tmp
+directory; sha256
+cf506fd487032e1fd57e2663c7e2d34103fca7868bd8266fc13dcff46f8b88b6.
+Test sha256 b0c9c835daee92f39b5b8f60628f71d1e73242674db2d0605d5f66852163169f.
+Failures: absent hosted compile file, current switch_outside_dev instead
+of accepted hosted startup/refusal codes, non-permanent hosted Mix mode.
+Controls: ordinary prod authority exclusion, prod/test switch refusal,
+dev/test Fake/listener defaults, development/test dependency exclusion.
+Earlier exploratory r1 log exposed assert-with-message MatchErrors and
+constant-nil type warnings in the test harness; fixed before this measured
+RED, without production edits or weakened assertions. r2 was 36/33; r3
+adds the final two plan-review conditions. Nix enterShell has an inherited
+Hex-output EPIPE from its piped banner; the ExUnit tests compile/run clean.
+Separate GREEN GO pending. No full-gate or release-readiness claim.
