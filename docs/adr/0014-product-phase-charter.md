@@ -235,6 +235,24 @@ terms, telemetry, suppression and accepted deletion limitations still apply.
 
 ### Accepted rules and consequences
 
+#### Owner-approved delivery exception (2026-10-31)
+
+Charles explicitly requested an exception to the backup/snapshot restriction
+to prioritize delivery of a working product: "let's make an exception just
+to get a working product."
+
+For this delivery, the backup-exclusion and no-containing-snapshot conditions
+in rule 3 below are not deployment prerequisites. Existing or potential
+backup/snapshot copies must not block SDR delivery. Their actual contents
+are not thereby proven absent, and application deletion may not remove
+retained copies. This exception does not authorize deleting snapshots,
+disabling another application's backups, or changing backup settings.
+
+The existing SDR-only deployment authorization, isolated access, capture-only
+operation, subscription Claude CLI requirement, call accounting and
+single-current-authority fencing remain in effect. No additional approval
+round is required to record this owner-approved exception.
+
 1. **Access.** The SDR app uses an isolated database role with no access to
    other application databases. Human access is the owner through HostedOwner
    plus the existing bound auditor. Host root and the cluster superuser can
