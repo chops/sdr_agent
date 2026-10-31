@@ -136,13 +136,22 @@ defmodule SdrAgent.Prototype.LiveFaultConsumerTest do
     end
   end
 
-  # The exact texts of the two live reads, from one real `check_live/0`.
+  # The exact texts of the three live reads, from one real `check_live/0`
+  # (the binding, the identity, then the empty relocation chain's read).
   defp live_texts! do
     {result, rows} = raw(&SdrAgent.Prototype.check_live/0)
     assert result == :ok, "prerequisite: check_live"
-    assert length(rows) == 2, "prerequisite: two live reads, got #{length(rows)}"
-    [{binding, binding_source, _, :ok, _}, {identity, identity_source, _, :ok, _}] = rows
-    assert {binding_source, identity_source} == {"prototype_database_bindings", nil}
+    assert length(rows) == 3, "prerequisite: three live reads, got #{length(rows)}"
+
+    [
+      {binding, binding_source, _, :ok, _},
+      {identity, identity_source, _, :ok, _},
+      {_chain, chain_source, _, :ok, _}
+    ] = rows
+
+    assert {binding_source, identity_source, chain_source} ==
+             {"prototype_database_bindings", nil, "prototype_relocations"}
+
     %{binding_read: binding, identity_read: identity}
   end
 

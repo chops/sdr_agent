@@ -12,6 +12,9 @@ defmodule SdrAgent.Audit.Kernel do
        all appends of a tenant, so the sequence is gap-free without a
        Postgres `SEQUENCE` (a rolled-back append also rolls back its head
        advance);
+    1a. re-check the identity-scoped relocation fence
+       (`SdrAgent.Prototype.check_fence/0`, ADR-0024 decision 1): a
+       refusal returns `SdrAgent.Audit.RelocationFenced` before any write;
     2. resolve the current `ProvenanceSnapshot` (inserted if absent);
     3. build the event: `sequence = head + 1`, `prev_hash = head hash`,
        actor, authorization decision, clock time and source, version refs,
@@ -45,6 +48,7 @@ defmodule SdrAgent.Audit.Kernel do
   alias SdrAgent.Audit.Provenance
   alias SdrAgent.Audit.ProvenanceSnapshot
   alias SdrAgent.Audit.RecordHash
+  alias SdrAgent.Audit.RelocationFenced
   alias SdrAgent.Audit.Tenant
   alias SdrAgent.Audit.Trace
   alias SdrAgent.Audit.Verifier
@@ -313,12 +317,23 @@ defmodule SdrAgent.Audit.Kernel do
 
     with {:ok, tenant_id} <- resolve_tenant(attrs, actor, opts),
          {:ok, head} <- lock_head(tenant_id),
+         :ok <- relocation_fence(),
          {:ok, snapshot, new?} <- ensure_provenance(tenant_id),
          {:ok, event} <- insert_event(attrs, actor, tenant_id, head, snapshot),
          {:ok, _head} <- advance_head(head, event),
          :ok <- LiveEvents.notify(event),
          :ok <- record_new_provenance(new?, snapshot, tenant_id) do
       {:ok, event}
+    end
+  end
+
+  # ADR-0024 decision 1 (plan R2 "Final fence serialization"): every append
+  # re-checks the identity-scoped relocation fence after the head lock and
+  # before any write; a refusal is `SdrAgent.Audit.RelocationFenced`.
+  defp relocation_fence do
+    case SdrAgent.Prototype.check_fence() do
+      :ok -> :ok
+      _refused -> {:error, RelocationFenced.exception([])}
     end
   end
 

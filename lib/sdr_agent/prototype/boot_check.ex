@@ -15,7 +15,10 @@ defmodule SdrAgent.Prototype.BootCheck do
 
   "Exact": the binding row exists exactly once; its instance and policy
   digest equal the switch and the compiled entry; the live database name,
-  oid and `system_identifier` equal the row's; the suppression check is the
+  oid and `system_identifier` are the current authority of the binding's
+  relocation chain (`SdrAgent.Prototype.CurrentAuthority`: the row's own
+  identity until a relocation is activated, then the latest activated
+  destination's; ADR-0024 decision 1, r4a C1); the suppression check is the
   Store implementation; the users are exactly the anchor plus at most the
   one bound auditor; no agent-environment (C2*) configuration is set.
 
@@ -166,21 +169,35 @@ defmodule SdrAgent.Prototype.BootCheck do
       end
     end
 
+    # The live identity must be the current authority of the binding's
+    # relocation chain (the row's own identity while nothing is activated;
+    # ADR-0024 decision 1, r4a C1): the relocated-away source and a restored
+    # archive are `:database_mismatch` and never boot the spending runtime.
+    # A failed chain read is `:database_mismatch` too.
     defp live(row) do
       case Authority.live_identity() do
         {:ok, live} ->
-          expect(
-            live == %{
-              database: row.database,
-              database_oid: row.database_oid,
-              system_identifier: row.system_identifier
-            },
-            :database_mismatch
-          )
+          expect(current_authority?(row, live), :database_mismatch)
 
         {:error, _unavailable} ->
           {:error, :live_identity_unavailable}
       end
+    end
+
+    defp current_authority?(row, live) do
+      case SdrAgent.Prototype.Relocation.chain(row.id, row.tenant_id) do
+        {:ok, chain} ->
+          SdrAgent.Prototype.CurrentAuthority.spendable?(
+            chain,
+            SdrAgent.Prototype.CurrentAuthority.normalize(row),
+            live
+          )
+
+        {:error, _error} ->
+          false
+      end
+    rescue
+      _error -> false
     end
 
     # Exactly the credential-less active anchor plus, at most, the one bound

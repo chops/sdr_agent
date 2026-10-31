@@ -11,6 +11,10 @@ defmodule SdrAgent.Audit.Guard do
   rolls back with the refused write. The append goes straight to the kernel
   (no domain action, no policy evaluation), so it cannot recurse.
 
+  A result carrying the relocation fence's refusal
+  (`SdrAgent.Audit.RelocationFenced`) is returned as the plain
+  `{:error, :relocation_fenced}` and is never a denial.
+
   An auditor's mutation attempt is refused here before the action runs (so
   even an invalid attempt is denied and audited); the per-resource auditor
   guard policies refuse it again if the action is reached another way.
@@ -48,10 +52,12 @@ defmodule SdrAgent.Audit.Guard do
               "transaction not opened by SdrAgent.Audit.transaction/1"
     end
 
+    # ADR-0024 decision 1: a relocation-fenced append surfaces as the plain
+    # `{:error, :relocation_fenced}` (never a denial).
     result =
       if auditor?(actor) and meta.action not in @auditor_exempt,
         do: {:error, Ash.Error.Forbidden.exception([])},
-        else: fun.()
+        else: SdrAgent.Audit.RelocationFenced.normalize(fun.())
 
     with {:error, %Ash.Error.Forbidden{}} <- result,
          true <- audit_denial?(meta, actor) do

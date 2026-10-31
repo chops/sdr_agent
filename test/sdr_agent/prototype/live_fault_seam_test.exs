@@ -45,7 +45,7 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   @identity_sql "SELECT current_database()::text, d.oid::bigint, " <>
                   "(pg_control_system()).system_identifier FROM pg_database d " <>
                   "WHERE d.datname = current_database()"
-  @read_sources ["prototype_database_bindings", "prototype_delegations"]
+  @read_sources ["prototype_database_bindings", "prototype_relocations", "prototype_delegations"]
   @counts [
     {"prototype_database_bindings", "SELECT count(*) FROM prototype_database_bindings"},
     {"prototype_delegations", "SELECT count(*) FROM prototype_delegations"},
@@ -494,10 +494,15 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   defp reads_before(:identity_read), do: [{read_label(:binding_read), :ok}]
 
   defp reads_before(:delegation_read),
-    do: [{read_label(:binding_read), :ok}, {read_label(:identity_read), :ok}]
+    do: [{read_label(:binding_read), :ok}, {read_label(:identity_read), :ok}, chain_read()]
 
-  defp reads_after(:binding_read), do: [{read_label(:identity_read), :ok}]
+  defp reads_after(:binding_read), do: [{read_label(:identity_read), :ok}, chain_read()]
+  defp reads_after(:identity_read), do: [chain_read()]
   defp reads_after(_stage), do: []
+
+  # `check_live/0`'s third real read, after the identity query: the empty
+  # relocation chain (no events read).
+  defp chain_read, do: {{:read, "prototype_relocations"}, :ok}
 
   # The `:abort` case in the test's transaction: the outcome callback pins
   # the owner's result and the in-fun observers; here the exact statement
@@ -630,7 +635,7 @@ defmodule SdrAgent.Prototype.LiveFaultSeamTest do
   end
 
   # A closed oracle (Codex 2026-10-28 R3): only the exact identity query and
-  # a SELECT on one of the two live-read tables are recognized; every other
+  # a SELECT on one of the three live-read tables are recognized; every other
   # statement (any write form included) is `:unknown`, so an exact list
   # assertion fails on it.
   defp statement(@identity_sql, nil), do: :identity

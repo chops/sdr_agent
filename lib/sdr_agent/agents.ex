@@ -478,6 +478,7 @@ defmodule SdrAgent.Agents do
       with {:ok, locked} <- lock_run(run.id, actor),
            {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
            {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
+           :ok <- relocation_fence(),
            now = SdrAgent.Clock.utc_now(),
            {:ok, run} <- do_update(run, :reserve_model_call, %{}, actor),
            :ok <- check_daily_limit(run.tenant_id, now),
@@ -731,7 +732,8 @@ defmodule SdrAgent.Agents do
          :ok <- calibration_target(invocation, actor, expected),
          :ok <- launch_state(invocation),
          :ok <- Admission.lock_charge(invocation),
-         {:ok, _head} <- Kernel.lock_head(actor.tenant_id) do
+         {:ok, _head} <- Kernel.lock_head(actor.tenant_id),
+         :ok <- relocation_fence() do
       # The launch instant is read only once every lock is held.
       run
       |> Admission.launch_check(invocation, profile, SdrAgent.Clock.utc_now(), store, expected)
@@ -777,6 +779,15 @@ defmodule SdrAgent.Agents do
   else
     defp usable_after_live_refusal(_check), do: :ok
   end
+
+  # ADR-0024 decision 1 (plan R2 "Final fence serialization"): the
+  # identity-scoped relocation fence, re-checked by a reservation and a
+  # launch admission after `Kernel.lock_head/1`, so a writer that locked
+  # before the owner-run `fenced` append commits first and any later writer
+  # sees the fence: `{:error, :relocation_fenced}`, and the transaction
+  # rolls back with no write (before an admission refusal could be
+  # recorded; every audit append re-checks it too, `SdrAgent.Audit.Kernel`).
+  defp relocation_fence, do: SdrAgent.Prototype.check_fence()
 
   # An unlocked read only to find the run to lock first; the row is re-read
   # under its own lock.

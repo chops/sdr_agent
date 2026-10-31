@@ -51,7 +51,9 @@ defmodule SdrAgent.Prototype.RelocationFenceRaceTest do
     :ok = Sandbox.checkout(Repo, sandbox: false)
     assert_test_database!()
     assert %{rows: [[0]]} = SQL.query!(Repo, "SELECT count(*) FROM tenants", [])
-    on_exit(fn -> with_connection(&cleanup!/0) end)
+    # D2: the provenance snapshots present before any fixture write.
+    provenance_before = provenance_ids()
+    on_exit(fn -> with_connection(fn -> cleanup!(provenance_before) end) end)
     supervisor = start_supervised!(Task.Supervisor)
 
     fx = G.prototype!()
@@ -350,13 +352,57 @@ defmodule SdrAgent.Prototype.RelocationFenceRaceTest do
 
   # The database held no tenant at setup, so every tenant now present is
   # this test's: its tenant rows, its users' tokens and its relocation
-  # chain. Never global provenance snapshots or signing keys.
-  defp cleanup! do
+  # chain; then only the provenance snapshots this test created. Never
+  # signing keys or a pre-existing provenance snapshot.
+  defp cleanup!(provenance_before) do
     assert_test_database!()
     tenant_ids = List.flatten(SQL.query!(Repo, "SELECT id FROM tenants", []).rows)
     Enum.each(tenant_ids, &cleanup_tenant!/1)
     assert %{rows: [[0]]} = SQL.query!(Repo, "SELECT count(*) FROM tenants", [])
+    cleanup_provenance!(provenance_before)
   end
+
+  # D2 (Codex 005940Z): on the exact disposable test database (asserted),
+  # after every participant is joined (on_exit runs once the test process
+  # and its supervised tasks have exited; this async: false test is the
+  # only writer), the snapshots present now and absent at setup are this
+  # fixture's. Their referring rows (audit_events, tenant rows) were
+  # removed above; only those ids are deleted, by bound parameter. Every
+  # pre-existing row is preserved and no owned row is left.
+  defp cleanup_provenance!(before) do
+    assert_test_database!()
+    owned = provenance_ids() -- before
+
+    if owned != [] do
+      assert %{rows: [[0]]} =
+               SQL.query!(
+                 Repo,
+                 "SELECT count(*) FROM audit_events WHERE provenance_snapshot_id = ANY($1)",
+                 [owned]
+               )
+
+      assert {:ok, _} =
+               Repo.transaction(fn ->
+                 SQL.query!(Repo, "SET LOCAL session_replication_role = replica", [])
+
+                 assert %{num_rows: deleted} =
+                          SQL.query!(
+                            Repo,
+                            "DELETE FROM provenance_snapshots WHERE id = ANY($1)",
+                            [
+                              owned
+                            ]
+                          )
+
+                 assert deleted == length(owned)
+               end)
+    end
+
+    assert provenance_ids() == before, "a pre-existing provenance snapshot changed"
+  end
+
+  defp provenance_ids,
+    do: List.flatten(SQL.query!(Repo, "SELECT id FROM provenance_snapshots ORDER BY id", []).rows)
 
   defp cleanup_tenant!(tenant_id) do
     tables = tenant_tables()

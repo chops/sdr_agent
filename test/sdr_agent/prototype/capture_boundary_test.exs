@@ -327,23 +327,27 @@ defmodule SdrAgent.Prototype.CaptureBoundaryTest do
 
   # ------------------------------------------------------------------ T13
 
-  test "T13: each boundary stage's call, as the delivery worker, queries only its own source (control)" do
+  test "T13: each boundary stage's call, as the delivery worker, queries exactly its own sources (control)" do
     {ctx, _delivery, operation} = held!()
     dlv = Actor.system(:delivery_worker, ctx.tenant.id)
 
+    # check_live reads its binding, then the (empty) relocation chain; every
+    # other stage reads exactly its own table.
     stages = [
-      {"prototype_database_bindings", fn -> SdrAgent.Prototype.check_live() end},
-      {"delivery_operations",
+      {"prototype_database_bindings", ["prototype_database_bindings", "prototype_relocations"],
+       fn -> SdrAgent.Prototype.check_live() end},
+      {"delivery_operations", ["delivery_operations"],
        fn -> tenant_row(DeliveryOperation, operation.id, ctx.tenant.id, dlv) end},
-      {"approvals", fn -> tenant_row(Approval, operation.approval_id, ctx.tenant.id, dlv) end},
-      {"suppressions",
+      {"approvals", ["approvals"],
+       fn -> tenant_row(Approval, operation.approval_id, ctx.tenant.id, dlv) end},
+      {"suppressions", ["suppressions"],
        fn -> Outreach.matching_suppressions(to_string(operation.recipient_email), actor: dlv) end}
     ]
 
-    for {source, call} <- stages do
+    for {source, expected, call} <- stages do
       {result, queries} = queries(call)
       sources = queries |> Enum.map(&elem(&1, 0)) |> Enum.reject(&is_nil/1) |> Enum.uniq()
-      assert {source, sources} == {source, [source]}
+      assert {source, MapSet.new(sources)} == {source, MapSet.new(expected)}
       refute match?({:error, _}, result), "the #{source} stage call returned an error"
     end
   end

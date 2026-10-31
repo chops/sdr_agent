@@ -23,7 +23,10 @@ defmodule SdrAgent.Prototype do
 
   Every function other than `runtime/0`, `label/0` and `operator?/1`
   returns `{:error, :not_prototype_runtime}` outside prototype runtime, and
-  callers handle it.
+  callers handle it. `check_fence/0` (S-B1, ADR-0024 decision 1), the
+  identity-scoped relocation fence every audit append re-checks after the
+  chain-head lock, is `:ok` outside prototype runtime and in a build
+  without the authority.
 
   In a build with the authority (`:prototype_authority_compiled`, set only
   by config/dev.exs and config/test.exs) the facade reads
@@ -74,6 +77,10 @@ defmodule SdrAgent.Prototype do
     @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
     defdelegate check_live(), to: Authority
 
+    @doc "The identity-scoped relocation fence (ADR-0024 decision 1); `:ok` outside prototype runtime."
+    @spec check_fence() :: :ok | {:error, :relocation_fenced}
+    defdelegate check_fence(), to: Authority
+
     @doc "The IF-5 assurance block."
     @spec assurance() :: {:ok, map()} | {:error, :not_prototype_runtime}
     defdelegate assurance(), to: Authority
@@ -118,6 +125,10 @@ defmodule SdrAgent.Prototype do
     @doc "Refused: no prototype authority in this build."
     @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
     def check_live, do: {:error, :not_prototype_runtime}
+
+    @doc "The relocation fence: always `:ok` in this build (no relocation authority)."
+    @spec check_fence() :: :ok
+    def check_fence, do: :ok
 
     @doc "Refused: no prototype authority in this build."
     @spec assurance() :: {:ok, map()} | {:error, :not_prototype_runtime}

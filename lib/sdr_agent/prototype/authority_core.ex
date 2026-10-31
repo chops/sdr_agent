@@ -60,7 +60,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     B2b1's `snapshot/1`, and B2b2's `check_live/0`, `operator_actor/1`,
     `resolve_delegation/2` and `operator?/1`, `assurance/0`, and C1's pure
     `check_worksheet/3` steps 1-3, and I4 r3 maintenance target/decoder/read
-    primitives are implemented. Remaining declarations that still call
+    primitives are implemented. S-B1 (ADR-0024 decision 1): `check_live/0`
+    follows the relocation chain's current authority, and `check_fence/0`
+    is the spending writes' identity-scoped fence. Remaining declarations that still call
     red/1 are non-permissive and return
     `{:error, :not_implemented}`; none fabricates success.
     """
@@ -79,6 +81,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Prototype.Binding
     alias SdrAgent.Prototype.BoundedJson
     alias SdrAgent.Prototype.Checks.KernelMarker
+    alias SdrAgent.Prototype.CurrentAuthority
+    alias SdrAgent.Prototype.Relocation
     alias SdrAgent.Repo
 
     @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
@@ -823,9 +827,13 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def snapshot(_other), do: {:error, :not_a_binding}
 
     @doc """
-    Re-reads the singleton binding row (one plain kernel read) and the live
-    identity, and compares every field with the boot snapshot. A missing or
-    second row, any difference, an unavailable identity or an exception is
+    Re-reads the singleton binding row (one plain kernel read), the live
+    identity and the binding's relocation chain, compares every row field
+    with the boot snapshot, and requires the live identity to be the
+    chain's current authority (`SdrAgent.Prototype.CurrentAuthority`; the
+    binding row's identity while nothing is activated; ADR-0024 decision 1,
+    r4a C1). A missing or second row, any difference, an unavailable
+    identity, a failed chain read, an invalid chain or an exception is
     `{:error, :binding_mismatch}`. Nothing is cached.
     """
     @spec check_live() :: :ok | {:error, :not_prototype_runtime | :binding_mismatch}
@@ -838,17 +846,55 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp live_matches?(snapshot) do
       with {:ok, [row]} <- read_bindings(),
            {:ok, ^snapshot} <- snapshot(row),
-           {:ok, live} <- live_identity() do
-        live == %{
-          database: row.database,
-          database_oid: row.database_oid,
-          system_identifier: row.system_identifier
-        }
+           {:ok, live} <- live_identity(),
+           {:ok, chain} <- Relocation.chain(row.id, row.tenant_id) do
+        CurrentAuthority.spendable?(chain, CurrentAuthority.normalize(row), live)
       else
         _mismatch -> false
       end
     rescue
       _error -> false
+    end
+
+    @doc """
+    The identity-scoped relocation fence (ADR-0024 decision 1; plan R2
+    "Final fence serialization"), for a spending write that already holds
+    the chain-head lock: `{:error, :relocation_fenced}` when the binding's
+    relocation chain holds a `fenced` event naming the live identity with
+    no later `aborted` in that relocation (`CurrentAuthority.fenced?/2`), or
+    when the snapshot, the live identity or the chain cannot be read; else
+    `:ok`. Outside prototype runtime it is `:ok` (no binding, no chain).
+    """
+    @spec check_fence() :: :ok | {:error, :relocation_fenced}
+    def check_fence do
+      case binding() do
+        {:ok, snapshot} -> fence(snapshot)
+        {:error, :not_prototype_runtime} -> :ok
+      end
+    end
+
+    # The chain first; the live identity is read only when some relocation
+    # holds a fenced event (no fenced event fences nothing).
+    defp fence(snapshot) do
+      with {:ok, chain} <- Relocation.chain(snapshot.id, snapshot.tenant_id),
+           false <- fenced_on_live?(chain) do
+        :ok
+      else
+        _fenced_or_unreadable -> {:error, :relocation_fenced}
+      end
+    rescue
+      _error -> {:error, :relocation_fenced}
+    end
+
+    defp fenced_on_live?(chain) do
+      if Enum.any?(chain, fn relocation -> Enum.any?(relocation.events, &(&1.kind == :fenced)) end) do
+        case live_identity() do
+          {:ok, live} -> CurrentAuthority.fenced?(chain, live)
+          {:error, _unavailable} -> true
+        end
+      else
+        false
+      end
     end
 
     defp read_bindings_real do
@@ -1095,7 +1141,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_028_052_139, "d237_04_prototype_delegations"},
       {20_261_028_052_257, "d237_05_release_decisions"},
       {20_261_028_052_400, "d237_06_sources"},
-      {20_261_028_052_425, "d237_07_dossier"}
+      {20_261_028_052_425, "d237_07_dossier"},
+      {20_261_031_001_212, "d270_01_relocation_chain"}
     ]
 
     # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
@@ -1114,6 +1161,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       model_profile_settings model_profile_switches model_result_releases
       model_server_counters model_server_starts oban_jobs oban_peers operations
       payloads prototype_database_bindings prototype_delegations
+      prototype_relocation_events prototype_relocations
       provenance_snapshots qualification_evidences qualifications replies
       reply_assessments research_artifacts retention_markers revision_citations
       run_settings_snapshots send_quota_days sequence_steps sequences
@@ -1330,7 +1378,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       - `with_live_fault/3` and `live_fault_hits/1`: the live-read fault
         seam (proposal r2; Codex 7ba6d116, 382437da). A scope arms ONE
         fault of a kind at one live-read stage (`:binding_read`,
-        `:identity_read`, `:delegation_read`) for the calling process and
+        `:identity_read`, `:delegation_read`, or S-B1's relocation-chain reads
+        `{:relocation_chain, :relocations}` and
+        `{:relocation_chain, :events}`, read by
+        `SdrAgent.Prototype.Relocation.chain/2`) for the calling process and
         every process that inherits it through `$callers`; the first read
         at that stage that wins the scope's shared atomic claim fires it,
         exactly once per scope. The scope's prior binding is restored on
@@ -1355,11 +1406,21 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       @boot_switch_key {SdrAgent.Prototype, :boot_switch}
       @maintenance_key {SdrAgent.Prototype, :maintenance}
       @maintenance_keys [:connector, :down_ms, :reply_ms, :stop_ms]
-      @live_stages [:binding_read, :identity_read, :delegation_read]
+      @live_stages [
+        :binding_read,
+        :identity_read,
+        :delegation_read,
+        {:relocation_chain, :relocations},
+        {:relocation_chain, :events}
+      ]
       @live_kinds [:returned_error, :raise, :abort]
 
       @typedoc "A live-read stage of the fault seam."
-      @type live_stage :: :binding_read | :identity_read | :delegation_read
+      @type live_stage ::
+              :binding_read
+              | :identity_read
+              | :delegation_read
+              | {:relocation_chain, :relocations | :events}
 
       @typedoc "A live-read fault kind."
       @type live_kind :: :returned_error | :raise | :abort
@@ -1482,6 +1543,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       defp live_key(:binding_read), do: {SdrAgent.Prototype, :live_fault_binding_read}
       defp live_key(:identity_read), do: {SdrAgent.Prototype, :live_fault_identity_read}
       defp live_key(:delegation_read), do: {SdrAgent.Prototype, :live_fault_delegation_read}
+
+      defp live_key({:relocation_chain, :relocations}),
+        do: {SdrAgent.Prototype, :live_fault_relocation_chain_relocations}
+
+      defp live_key({:relocation_chain, :events}),
+        do: {SdrAgent.Prototype, :live_fault_relocation_chain_events}
 
       defp restore(key, nil), do: Process.delete(key)
       defp restore(key, previous), do: Process.put(key, previous)

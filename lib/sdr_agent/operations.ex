@@ -8,7 +8,10 @@ defmodule SdrAgent.Operations do
   resolution) and `WebhookEvent` (S9: every inbound webhook request, verified
   and deduplicated before any effect; written only by the webhook ingestor
   through `SdrAgent.Outreach.Webhooks`). `IntegrationCredential` (S6) is not
-  built yet. Operations sits above Audit and Accounts (FKs to tenants and users)
+  built yet. The D-237 prototype binding and delegations, and S-B1's
+  append-only relocation chain (`SdrAgent.Prototype.Relocation`,
+  `SdrAgent.Prototype.RelocationEvent`; ADR-0024 decision 1), are
+  kernel-only resources here. Operations sits above Audit and Accounts (FKs to tenants and users)
   and below Agents, Sales, Research and Outreach, which open Failures here in
   the same transaction as the state change that causes them (S2 "Operator
   attention"): AgentRun failed / budget exhausted / system-cancelled, Lead
@@ -50,6 +53,9 @@ defmodule SdrAgent.Operations do
     # D-237 (interfaces r6 IF-2, IF-3): the prototype binding and delegations.
     resource SdrAgent.Operations.PrototypeDatabaseBinding
     resource SdrAgent.Operations.PrototypeDelegation
+    # ADR-0024 decision 1 (S-B1): the append-only relocation chain.
+    resource SdrAgent.Prototype.Relocation
+    resource SdrAgent.Prototype.RelocationEvent
   end
 
   ## Operations

@@ -74,6 +74,7 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   @tables %{
     "prototype_database_bindings" => :bindings,
     "prototype_delegations" => :delegations,
+    "prototype_relocations" => :relocations,
     "users" => :users,
     "payloads" => :payloads,
     "settings_revisions" => :settings_revisions,
@@ -100,8 +101,10 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   @live_check [
     {:select, :bindings, :ok, nil},
     {:select, :none, :ok, nil},
+    {:select, :relocations, :ok, nil},
     {:select, :bindings, :ok, nil},
     {:select, :none, :ok, nil},
+    {:select, :relocations, :ok, nil},
     {:select, :delegations, :ok, nil}
   ]
 
@@ -438,10 +441,12 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
   # G1: S1's live-read fault at the in-action live check, exactly (pinned
   # from the source of S1 at 5a6daa6 and Ash 3.37.2; verified by the first
   # sealed run). Inside the wrapper the real check is bindings, identity,
-  # bindings, identity, delegation; the faulted stage's first read is the
-  # fault point.
+  # relocations, bindings, identity, relocations, delegation (each
+  # check_live reads the empty relocation chain after the identity); the
+  # faulted stage's first read is the fault point.
   @b {:select, :bindings, :ok, nil}
   @i {:select, :none, :ok, nil}
+  @r {:select, :relocations, :ok, nil}
   @rollback {:rollback, :none, :ok, nil}
   @g1_statements %{
     {:binding_read, :returned_error} => [@rollback],
@@ -459,13 +464,15 @@ defmodule SdrAgent.Prototype.SeedInActionFaultTest do
       {:select, :none, :in_failed_sql_transaction, nil},
       @rollback
     ],
-    {:delegation_read, :returned_error} => [@b, @i, @b, @i, @rollback],
-    {:delegation_read, :raise} => [@b, @i, @b, @i, @rollback],
+    {:delegation_read, :returned_error} => [@b, @i, @r, @b, @i, @r, @rollback],
+    {:delegation_read, :raise} => [@b, @i, @r, @b, @i, @r, @rollback],
     {:delegation_read, :abort} => [
       @b,
       @i,
+      @r,
       @b,
       @i,
+      @r,
       {:select, :none, :division_by_zero, {:live, :delegation_read}},
       {:select, :delegations, :in_failed_sql_transaction, nil},
       @rollback
