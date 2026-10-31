@@ -48,7 +48,6 @@ defmodule SdrAgent.Audit.Kernel do
   alias SdrAgent.Audit.Provenance
   alias SdrAgent.Audit.ProvenanceSnapshot
   alias SdrAgent.Audit.RecordHash
-  alias SdrAgent.Audit.RelocationFenced
   alias SdrAgent.Audit.Tenant
   alias SdrAgent.Audit.Trace
   alias SdrAgent.Audit.Verifier
@@ -330,11 +329,17 @@ defmodule SdrAgent.Audit.Kernel do
   # ADR-0024 decision 1 (plan R2 "Final fence serialization"): every append
   # re-checks the identity-scoped relocation fence after the head lock and
   # before any write; a refusal is `SdrAgent.Audit.RelocationFenced`.
-  defp relocation_fence do
-    case SdrAgent.Prototype.check_fence() do
-      :ok -> :ok
-      _refused -> {:error, RelocationFenced.exception([])}
+  # Without the prototype authority the fence is the constant :ok stub, so
+  # the refusal branch is compiled only with the authority.
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp relocation_fence do
+      case SdrAgent.Prototype.check_fence() do
+        :ok -> :ok
+        _refused -> {:error, SdrAgent.Audit.RelocationFenced.exception([])}
+      end
     end
+  else
+    defp relocation_fence, do: :ok
   end
 
   defp resolve_tenant(attrs, actor, opts) do

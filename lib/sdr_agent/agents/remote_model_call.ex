@@ -103,7 +103,7 @@ defmodule SdrAgent.Agents.RemoteModelCall do
     defaults [:read]
 
     create :create do
-      description "S-B2: the reservation's remote call (RemoteCalls scope only)."
+      description "S-B2: the reservation's remote call (reservation scope only, inside :reserve)."
 
       accept [:model_invocation_id, :request_sha256, :profile_id, :model_id, :claim_deadline]
 

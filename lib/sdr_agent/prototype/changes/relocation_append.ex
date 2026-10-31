@@ -27,12 +27,10 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
 
   alias Ash.Error.Changes.InvalidAttribute
   alias SdrAgent.Audit.Kernel, as: AuditKernel
-  alias SdrAgent.Prototype.CurrentAuthority
   alias SdrAgent.Prototype.Relocation
   alias SdrAgent.Prototype.RelocationEvent
 
   @destination_kinds [:restored, :activated, :destination_disabled]
-  @recorded_by "kernel:relocation"
 
   @doc "The kinds written at the relocation's destination (`to_identity`)."
   @spec destination_kinds() :: [atom()]
@@ -82,25 +80,21 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
          {:ok, relocation} <-
            relocation(Ash.Changeset.get_attribute(changeset, :relocation_id), tenant_id),
          {:ok, recorded} <- recorded(relocation.id, tenant_id),
-         :ok <- order(kind, recorded),
-         {:ok, live} <- live_identity(),
-         :ok <- side(kind, relocation, live) do
-      changeset
-      |> Ash.Changeset.force_change_attribute(:identity, live)
-      |> Ash.Changeset.force_change_attribute(:recorded_by, @recorded_by)
-      |> Ash.Changeset.force_change_attribute(:position, length(recorded) + 1)
-      |> Ash.Changeset.force_change_attribute(:recorded_at, SdrAgent.Clock.utc_now())
+         :ok <- order(kind, recorded) do
+      identified(changeset, kind, relocation, recorded)
     else
-      {:invalid, field, message} ->
-        Ash.Changeset.add_error(
-          changeset,
-          InvalidAttribute.exception(field: field, message: message)
-        )
-
-      {:error, error} ->
-        Ash.Changeset.add_error(changeset, error)
+      refused -> refuse(changeset, refused)
     end
   end
+
+  defp refuse(changeset, {:invalid, field, message}),
+    do:
+      Ash.Changeset.add_error(
+        changeset,
+        InvalidAttribute.exception(field: field, message: message)
+      )
+
+  defp refuse(changeset, {:error, error}), do: Ash.Changeset.add_error(changeset, error)
 
   defp lock(tenant_id) when is_binary(tenant_id) do
     case AuditKernel.lock_head(tenant_id) do
@@ -141,25 +135,45 @@ defmodule SdrAgent.Prototype.Changes.RelocationAppend do
       else: {:invalid, :kind, "is out of order for this relocation"}
   end
 
-  defp side(kind, relocation, live) do
-    expected =
-      if kind in @destination_kinds,
-        do: relocation.to_identity,
-        else: relocation.from_identity
-
-    if CurrentAuthority.normalize(expected) == CurrentAuthority.normalize(live),
-      do: :ok,
-      else: {:invalid, :kind, "is not written at this relocation's identity for the kind"}
-  end
-
+  # The identity step is compiled only with the prototype authority: without
+  # it there is no live identity, so after the same lock, relocation and
+  # order checks the append is refused with the fixed identity error.
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    @recorded_by "kernel:relocation"
+
+    defp identified(changeset, kind, relocation, recorded) do
+      with {:ok, live} <- live_identity(),
+           :ok <- side(kind, relocation, live) do
+        changeset
+        |> Ash.Changeset.force_change_attribute(:identity, live)
+        |> Ash.Changeset.force_change_attribute(:recorded_by, @recorded_by)
+        |> Ash.Changeset.force_change_attribute(:position, length(recorded) + 1)
+        |> Ash.Changeset.force_change_attribute(:recorded_at, SdrAgent.Clock.utc_now())
+      else
+        refused -> refuse(changeset, refused)
+      end
+    end
+
+    defp side(kind, relocation, live) do
+      expected =
+        if kind in @destination_kinds,
+          do: relocation.to_identity,
+          else: relocation.from_identity
+
+      if SdrAgent.Prototype.CurrentAuthority.normalize(expected) ==
+           SdrAgent.Prototype.CurrentAuthority.normalize(live),
+         do: :ok,
+         else: {:invalid, :kind, "is not written at this relocation's identity for the kind"}
+    end
+
     defp live_identity do
       case SdrAgent.Prototype.Authority.live_identity() do
-        {:ok, live} -> {:ok, CurrentAuthority.normalize(live)}
+        {:ok, live} -> {:ok, SdrAgent.Prototype.CurrentAuthority.normalize(live)}
         {:error, _unavailable} -> {:invalid, :kind, "has no live database identity"}
       end
     end
   else
-    defp live_identity, do: {:invalid, :kind, "has no live database identity"}
+    defp identified(changeset, _kind, _relocation, _recorded),
+      do: refuse(changeset, {:invalid, :kind, "has no live database identity"})
   end
 end

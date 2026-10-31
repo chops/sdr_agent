@@ -6,10 +6,13 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
   ## The RemoteCalls scope
 
-  Every action of `SdrAgent.Agents.RemoteModelCall`, `ClaimNonce`,
-  `RemoteCallResult`, `RemoteCallReceipt` and
+  Every action of `SdrAgent.Agents.RemoteModelCall` (except `:create`),
+  `ClaimNonce`, `RemoteCallResult`, `RemoteCallReceipt` and
   `SdrAgent.Operations.MacWorker` `:touch_last_seen` authorizes only with
   the domain-private scope (`SdrAgent.Agents.Checks.RemoteCallsScope`).
+  `RemoteModelCall` `:create` instead requires the reservation scope
+  (`SdrAgent.Agents.Checks.RemoteReservationScope`), bound only inside the
+  `:reserve` transaction by `SdrAgent.Agents.Changes.CreateRemoteCall`.
   This module alone opens it: inside a transaction it opens (or joins), it
   binds a fresh reference to the current process and passes the context
   (key `:sdr_agent_remote_calls_scope`) to its own requests;
