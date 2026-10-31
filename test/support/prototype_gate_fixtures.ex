@@ -309,7 +309,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
       },
       "funding" => %{
         "id" => "d237-funding/1",
-        "sha256" => "d56308736c6c5ef7a4521b9b442ec85298ab06f82d8ea447de35637e45d6349a",
+        "sha256" => SdrAgent.Prototype.Authority.funding_entry_sha256(),
         "grant_id" => fx.grant.id,
         "grant_revision" => fx.grant.revision,
         "allocation_id" => inv.allocation_id,
