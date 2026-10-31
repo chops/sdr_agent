@@ -1,6 +1,6 @@
 #+TITLE: Hosted prototype build/configuration slice under ADR-0024
 #+DATE: 2026-10-31
-#+STATUS: entity/contract confirmation pending; no production edits
+#+STATUS: entity PASS; module/RED plan ready; no production edits
 
 * Summary and authority
 Make the accepted hosted_prototype build/release configuration explicit,
@@ -27,9 +27,12 @@ in notes/features/offline-mac-slice-b.org. The following is the bounded
 configuration application of those existing Runtime/BootCheck rows, not a
 new provider, auth strategy, authority class or architecture alternative.
 Capabilities .workflow/recipe.json: ai_pair=true, codex_review=true.
-Reviewer Claude via correlated peer review; exact slice confirmation
-UNREVIEWED until reply. No self-review and no configuration implementation
-before PASS; affected-module selection follows that confirmation.
+Reviewer Claude via correlated peer review; PASS at 2026-10-31T18:47:06Z,
+m_claude_hosted_config_entity_pass_e65571f7_20261031 replying to
+m_codex_hosted_config_entity_e65571f7_20261031. Evidence:
+claude-hosted-config-entity-review-e65571f7-20261031.org sha256
+969935349470864430ba0a8453dc8a4a99cc5b03ee620a91e5aed4e1edae0c96.
+No self-review. Selection below follows that independent PASS.
 
 | Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
 |--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
@@ -69,7 +72,55 @@ resource/domain is planned. Do not label source/build PASS as deployed or
 as a completed real remote call.
 
 * Ask
-Claude: scoped entity/key-contract PASS or precise required delta; then
-Codex names the minimal affected modules/steps and writes source-only RED.
-No new owner decision requested for the already accepted mode. Cloud backup
-console facts and live input/launcher prerequisites remain separate.
+Entity/key PASS received. Owner source implementation approval is D-270,
+broadened by D-271 and the instruction to continue unattended to delivery.
+Claude: review this bounded module/RED plan; separate GREEN GO follows
+measured RED. No new owner decision requested for the accepted mode.
+Cloud backup console facts and live input/launcher prerequisites remain
+separate.
+
+* Affected modules and minimal steps (after entity PASS)
+1. Tests-only: test/sdr_agent/hosted_release_config_test.exs evaluates
+   Config.Reader with synthetic environment values, no application/Repo,
+   endpoint, model process or network start. Existing dev/test/prod
+   config tests remain controls. Tests restore every environment value.
+2. config/hosted_prototype.exs: import prod's TLS/static/capture baseline;
+   explicitly compile prototype authority + HostedOwners; dev routes,
+   seeding, all test seams, reload/debug/watchers and content capture off.
+   No new dependency or local CLI settings. No witness store configured.
+3. config/runtime.exs: accept a valid policy/instance switch in hosted as
+   well as dev, but require it in hosted. Hosted never selects 5542 or
+   inherits a dev DB. Require DATABASE_URL, SECRET_KEY_BASE,
+   TOKEN_SIGNING_SECRET, PHX_HOST and PORT explicitly; listener loopback,
+   HTTPS advertised origin and existing HTTP/2 refusal retained. Hosted
+   selects trusted ClaudeCLI + :remote; reject any SDR_MODEL_PROVIDER
+   override (including fake/API/local CLI), non-remote transport override,
+   SDR_CLAUDE_CLI_BIN and SDR_WITNESS_STORE_ROOT rather than overwriting.
+   Leave ResultGate wait and :remote_wait_ms unset. Preserve ordinary
+   dev/test/prod selection and refusal behavior byte-for-byte where possible.
+4. mix.exs: hosted start_permanent and explicit Unix release entry only;
+   existing env restrictions already exclude Tidewave/live_reload/exporter
+   and test support from hosted. No automatic seed/migration/setup/activation.
+5. Verify targeted RED then request GREEN GO; implement only those files;
+   compile hosted/prod/test WAE, targeted/regression suite and full gate;
+   review diagrams for hosted runtime selection. No live deployment here.
+
+* Required checks and interface conditions
+- Happy hosted config: explicit synthetic identity/secrets/db/port/host;
+  exact :remote/ClaudeCLI, compiled authority/HostedOwners, no local CLI
+  options, no wait override or witness root, content-free telemetry.
+- Refusals: absent/partial/invalid switch; missing/blank required inputs;
+  invalid port/host, provider/Fake/API, local/invalid transport, local CLI
+  and witness-root overrides. Errors are fixed codes, never input values.
+- Compile flags and release: no dev routes/test seams/seeding/reload;
+  prod authority remains absent/refusing; test keeps hermetic defaults;
+  permanent hosted release excludes test support and dev-only dependencies.
+- Preserve Oban agent/integration queues and minute RemoteSettler cron.
+  Verify /worker routes and Endpoint intake after Claude S-B4 integration;
+  they must not be inside dev_routes. Do not claim that pending integration
+  check as already passing. No new global body cap below WorkerIntake.
+- TLS/proxy/origin are production-style. No endpoint/router/filter edits
+  in this slice; Claude owns WorkerIntake and sensitive filter additions.
+- Risk: Config.Reader proves configuration, not compiled branch behavior
+  or a deployable release. Compile/release and actual route checks remain
+  required before readiness. Infra roles/socket/backup remain separate.
