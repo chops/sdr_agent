@@ -7,7 +7,10 @@ defmodule SdrAgent.AI.RemoteProviderTest do
   - `SdrAgent.AI.ModelProvider.Runtime` under `:remote` starts no local
     ClaudeCLI tree (`children/0` is `[]`) and resolves the provider to
     `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote`, with no local server,
-    port, reaper or shim check.
+    port, reaper or shim check. `status/0` under `:remote` reports the
+    trusted singleton tenant's worker view (presence, intake, last seen;
+    no executable digest) and no local server, or the
+    `:provider_not_running` refusal.
   - `ClaudeCLI.Remote.prepare/2` reads the actor's current live binding
     only. No active worker → `{:error, :provider_not_running}`; paused
     intake → `{:error, :provider_held}`; enrolled pins that are not exactly
@@ -267,6 +270,33 @@ defmodule SdrAgent.AI.RemoteProviderTest do
     test "control: under :local the ClaudeCLI tree is still started", _ctx do
       F.remote!(:local)
       assert [{SdrAgent.AI.ModelProvider.ProfileSupervisor, _}] = Runtime.children()
+    end
+
+    # Plan r2 row "Runtime.status/0 remote branch" (Codex terminal-settle
+    # review f25f89c8: an owned S-B4 deliverable). The tenant comes from
+    # the trusted singleton tenant, never a caller argument.
+    test "status/0 under :remote reports the worker view and no local server", ctx do
+      _ctx = world!(ctx)
+      status = safely(fn -> Runtime.status() end)
+      assert is_map(status), "status: #{inspect(status, limit: 8)}"
+      assert status[:transport] == :remote, "no remote branch: #{inspect(status, limit: 8)}"
+      assert status.configured == ClaudeCLI
+      assert status.effective == @remote
+      assert status.refusal == nil
+      assert status.server == :not_applicable
+      assert status.cli_executable == nil
+
+      assert %{present?: true, intake: :open, last_seen_at: _} = status.worker
+      refute Map.has_key?(status.worker, :executable_sha256)
+    end
+
+    test "status/0 under :remote with no worker reports the refusal", _ctx do
+      status = safely(fn -> Runtime.status() end)
+      assert is_map(status), "status: #{inspect(status, limit: 8)}"
+      assert status[:transport] == :remote, "no remote branch: #{inspect(status, limit: 8)}"
+      assert status.effective == nil
+      assert status.refusal == :provider_not_running
+      assert status.worker.present? == false
     end
   end
 
