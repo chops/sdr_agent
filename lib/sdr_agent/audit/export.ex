@@ -13,6 +13,8 @@ defmodule SdrAgent.Audit.Export do
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Audit.Signing
 
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
+
   def build(scope, opts) do
     actor = Keyword.fetch!(opts, :actor)
     output = Keyword.fetch!(opts, :output)
@@ -139,29 +141,31 @@ defmodule SdrAgent.Audit.Export do
   end
 
   defp build_bundle(data, private_key) do
-    with {:ok, block} <- prototype_block() do
-      data |> payload() |> with_prototype(block) |> sign_bundle(private_key)
+    with {:ok, payload} <- with_prototype(payload(data)) do
+      sign_bundle(payload, private_key)
     end
   end
 
   # IF-5 (docs/product/d237/prototype-runtime.md): in prototype runtime the
   # signed payload carries exactly one assurance block under `prototype`, or
-  # the export fails closed; the ordinary payload is unchanged (no key).
-  defp prototype_block do
-    case SdrAgent.Prototype.runtime() do
-      :prototype ->
-        case SdrAgent.Prototype.assurance() do
-          {:ok, %{} = block} -> {:ok, block}
-          _unavailable -> {:error, :prototype_assurance_unavailable}
-        end
+  # the export fails closed; the ordinary payload is unchanged (no key). A
+  # build without prototype authority has no prototype branch at all.
+  if @prototype_compiled do
+    defp with_prototype(payload) do
+      case SdrAgent.Prototype.runtime() do
+        :prototype ->
+          case SdrAgent.Prototype.assurance() do
+            {:ok, %{} = block} -> {:ok, Map.put(payload, :prototype, block)}
+            _unavailable -> {:error, :prototype_assurance_unavailable}
+          end
 
-      :ordinary ->
-        {:ok, nil}
+        :ordinary ->
+          {:ok, payload}
+      end
     end
+  else
+    defp with_prototype(payload), do: {:ok, payload}
   end
-
-  defp with_prototype(payload, nil), do: payload
-  defp with_prototype(payload, block), do: Map.put(payload, :prototype, block)
 
   defp payload(data) do
     %{
