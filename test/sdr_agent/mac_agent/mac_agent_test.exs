@@ -727,6 +727,39 @@ defmodule SdrAgent.MacAgentTest do
     end
   end
 
+  test "task refuses complete and partial prototype switches before parsing or config", ctx do
+    names = ["SDR_PROTOTYPE", "SDR_PROTOTYPE_INSTANCE"]
+    previous = Map.new(names, &{&1, System.get_env(&1)})
+
+    try do
+      for switch <- [
+            %{"SDR_PROTOTYPE" => ""},
+            %{"SDR_PROTOTYPE_INSTANCE" => "synthetic"},
+            %{
+              "SDR_PROTOTYPE" => "d237-prototype/1",
+              "SDR_PROTOTYPE_INSTANCE" => Ecto.UUID.generate()
+            }
+          ] do
+        Enum.each(names, &System.delete_env/1)
+        Enum.each(switch, fn {name, value} -> System.put_env(name, value) end)
+
+        for args <- [
+              ["--token", @token],
+              ["--config", Path.join(ctx.root, "absent.json"), "--once"]
+            ] do
+          assert_raise Mix.Error, "prototype runtime: task refused", fn ->
+            Mix.Tasks.Sdr.MacAgent.run(args)
+          end
+        end
+      end
+    after
+      Enum.each(previous, fn
+        {name, nil} -> System.delete_env(name)
+        {name, value} -> System.put_env(name, value)
+      end)
+    end
+  end
+
   test "task refuses credential arguments instead of reading them from argv" do
     task = Mix.Tasks.Sdr.MacAgent
     assert Code.ensure_loaded?(task), "S-B7 standalone task is not implemented yet"
@@ -743,6 +776,9 @@ defmodule SdrAgent.MacAgentTest do
     paths = Path.wildcard(Path.join([Mix.Project.build_path(), "lib", "*", "ebin"]))
 
     code = """
+    before_guard = Application.started_applications()
+    :ok = SdrAgent.Prototype.Output.task_refusal("sdr.mac_agent")
+    if Application.started_applications() != before_guard, do: System.halt(72)
     :ok = Mix.Tasks.Sdr.MacAgent.bootstrap()
     apps = Enum.map(Application.started_applications(), &elem(&1, 0))
     if :sdr_agent in apps or :postgrex in apps or Process.whereis(SdrAgent.Repo),

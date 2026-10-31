@@ -14,6 +14,10 @@ defmodule Mix.Tasks.Sdr.MacAgent do
   it polls every five seconds. Authorization loss stops it. Unknown launch
   outcomes are reported as status atoms; model calls are never relaunched.
   Only delivery of the same in-memory result can retry, within its deadline.
+
+  Run in an ordinary standalone VM, without either prototype switch. Like
+  other non-allow-listed tasks, this command refuses prototype runtime or
+  even a partial prototype switch before reading arguments or settings.
   """
   use Mix.Task
 
@@ -36,6 +40,9 @@ defmodule Mix.Tasks.Sdr.MacAgent do
 
   @impl Mix.Task
   def run(args) do
+    if SdrAgent.Prototype.Output.task_refusal("sdr.mac_agent") != :ok,
+      do: Mix.raise("prototype runtime: task refused")
+
     {opts, rest, invalid} = OptionParser.parse(args, strict: [config: :string, once: :boolean])
 
     unless rest == [] and invalid == [] and is_binary(opts[:config]) and
