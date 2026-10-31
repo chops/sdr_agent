@@ -112,9 +112,12 @@ defmodule SdrAgent.Accounts.UserTest do
       # ADM create, the kernel's first-admin bootstrap, the dev/test seed,
       # and the two D-237 setup-only creates (interfaces r6 IF-3), which only
       # a kernel request carrying the prototype `:setup` marker authorizes
-      # (`SdrAgent.Prototype.Checks.KernelMarker`, marker: :setup).
+      # (`SdrAgent.Prototype.Checks.KernelMarker`, marker: :setup), and S-B5's
+      # owner-run hosted owner create, which requires the registered
+      # `HostedOwnerWriteScope` (Operations hosted enrolment only).
       assert creates == [
                :bootstrap_admin,
+               :create_hosted_owner,
                :create_prototype_anchor,
                :create_prototype_auditor,
                :create_user,
