@@ -65,9 +65,11 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
       enrolled Mac worker: `children/0` is `[]` (no local ClaudeCLI tree)
       and `resolve/1` selects `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote`
       with no local server, port, reaper or shim check; that provider's
-      `prepare/2` checks the worker before any reservation. `status/0` is
-      unchanged: it samples the local coordinator, which is not started
-      under `:remote` (status is never authority).
+      `prepare/2` checks the worker before any reservation. `status/0` has
+      no local sample: it reports the trusted singleton tenant's worker
+      (presence, intake, last seen; `transport: :remote`) and the same
+      refusals as `prepare/2` for absence or a paused intake (status is
+      never authority).
     * `desired_profile/0` — the coordinator's confirmed desired profile
       (`{:ok, %{profile_id, source, confirmed_at}}`), `{:error, :unknown}`,
       or `:not_applicable` for an in-process provider.
@@ -81,6 +83,7 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   alias SdrAgent.AI.ModelProvider.ProfileSupervisor
 
   @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
   @attempts 3
 
   @doc "The selected provider module (`config :sdr_agent, :model_provider`)."
@@ -308,10 +311,84 @@ defmodule SdrAgent.AI.ModelProvider.Runtime do
   moduledoc. Never authority: a later instant may differ.
   """
   def status do
-    case provider() do
-      ClaudeCLI -> claude_cli_status()
-      configured -> in_process_status(configured)
+    case {RemoteCalls.remote?(), provider()} do
+      {true, configured} when configured in [ClaudeCLI, Remote] -> remote_status(configured)
+      {_transport, ClaudeCLI} -> claude_cli_status()
+      {_transport, configured} -> in_process_status(configured)
     end
+  end
+
+  # S-B4 (plan r2 row "Runtime.status/0 remote branch"): under the trusted
+  # :remote transport there is no local coordinator or server to sample.
+  # The view is the trusted singleton tenant's current live binding's
+  # worker (`SdrAgent.Operations.remote_worker_status/1` as that tenant's
+  # agent runtime; no caller-selected tenant): presence, intake and last
+  # seen, with the enrolled profile and model ids. No token, digest, nonce
+  # or call data. A failed lookup is an absent worker. Status is never
+  # authority: `ClaudeCLI.Remote.prepare/2` and the claim recheck.
+  defp remote_status(configured) do
+    {worker, effective, refusal} = remote_view()
+
+    %{
+      transport: :remote,
+      configured: configured,
+      effective: effective,
+      refusal: refusal,
+      provider: configured,
+      profile_id: worker.profile_id,
+      model_alias: nil,
+      model_id: worker.model_id,
+      reviewed_version: nil,
+      cli_executable: nil,
+      server: :not_applicable,
+      attestation: %{status: :not_applicable},
+      ledger_observation: :not_applicable,
+      runtime_observation: :not_applicable,
+      desired_profile: :not_applicable,
+      switch: :not_applicable,
+      observed_profile: :not_applicable,
+      hold: :not_applicable,
+      stage: :not_applicable,
+      effective_profile: nil,
+      published_at: nil,
+      worker: Map.take(worker, [:present?, :intake, :last_seen_at])
+    }
+  end
+
+  @absent_worker %{
+    present?: false,
+    intake: nil,
+    last_seen_at: nil,
+    profile_id: nil,
+    model_id: nil
+  }
+
+  # Compiled only with the prototype authority (the only build with a live
+  # binding and so a worker); the production build reports it absent.
+  if @prototype_compiled do
+    defp remote_view do
+      worker = remote_worker()
+
+      case worker do
+        %{present?: true, intake: :open} -> {worker, Remote, nil}
+        %{present?: true} -> {worker, nil, :provider_held}
+        _absent -> {worker, nil, :provider_not_running}
+      end
+    end
+
+    defp remote_worker do
+      with {:ok, tenant_id} <- SdrAgent.Audit.Kernel.singleton_tenant_id(),
+           actor = SdrAgent.Actor.system(:agent_runtime, tenant_id),
+           {:ok, %{present?: true} = status} <- SdrAgent.Operations.remote_worker_status(actor) do
+        status
+      else
+        _absent_or_refused -> @absent_worker
+      end
+    rescue
+      _lookup_failed -> @absent_worker
+    end
+  else
+    defp remote_view, do: {@absent_worker, nil, :provider_not_running}
   end
 
   # An in-process provider (the Fake): its fixed provenance, its effective

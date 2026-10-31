@@ -14,6 +14,9 @@ defmodule SdrAgent.Agents.RemoteTerminalSettleTest do
     drift transcript: failed with one critical attention Failure. The run
     is never resumed.
   - The settler's private capability is restored after the pass.
+  - Test-seam build: the capability's previous value is restored after
+    an error and a raise; under a valid scope, a capability naming another
+    invocation, tenant or call, or a call not yet settled, is refused.
   - Controls (pass before GREEN): a local invocation of a terminal run is
     still refused and rolled back; a genuine remote invocation finished
     through the public `Agents` wrappers (also with a forged
@@ -26,6 +29,7 @@ defmodule SdrAgent.Agents.RemoteTerminalSettleTest do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Agents
+  alias SdrAgent.Agents.RemoteCalls
   alias SdrAgent.Clock
   alias SdrAgent.Operations.Failure
   alias SdrAgent.Operations.Operation
@@ -240,6 +244,91 @@ defmodule SdrAgent.Agents.RemoteTerminalSettleTest do
         Process.delete(@capability)
         assert refused?(result), "accepted with #{inspect(forged)}: #{inspect(result)}"
         assert_untouched!(fx, sent, events)
+      end
+    end
+  end
+
+  ## Cleanup and identity under a valid scope (Codex e59e7c47; test-seam build)
+
+  describe "the capability under a valid RemoteCalls scope" do
+    setup do
+      on_exit(fn -> Process.delete(@capability) end)
+      :ok
+    end
+
+    defp scope_ref(scope), do: Map.fetch!(scope, :sdr_agent_remote_calls_scope)
+
+    # Runs `fun.(scope)` in the test-seam scope; the refusal of a nested
+    # finish may abort the scope's transaction, so the value is sent back.
+    defp in_scope(fun) do
+      _ =
+        F.safely(fn ->
+          RemoteCalls.__with_scope_for_test__(&send(self(), {:in_scope, fun.(&1)}))
+        end)
+
+      assert_received {:in_scope, value}
+      value
+    end
+
+    test "the previous value is restored after an error and after a raise", %{fx: fx} do
+      c = S.completed!(fx, S.valid_transcript())
+      sent = F.invocation(c.invocation.id)
+      Process.put(@capability, :previous)
+
+      assert {:ok, {:error, :synthetic}} =
+               RemoteCalls.__with_terminal_for_test__(c.call_id, sent, fn ->
+                 assert {_ref, _tenant, _id, _call} = Process.get(@capability)
+                 {:error, :synthetic}
+               end)
+
+      assert Process.get(@capability) == :previous
+
+      assert_raise RuntimeError, "synthetic raise", fn ->
+        RemoteCalls.__with_terminal_for_test__(c.call_id, sent, fn -> raise "synthetic raise" end)
+      end
+
+      assert Process.get(@capability) == :previous
+
+      Process.delete(@capability)
+      RemoteCalls.__with_terminal_for_test__(c.call_id, sent, fn -> :ok end)
+      assert Process.get(@capability) == nil
+    end
+
+    test "another invocation, tenant or call, or an unsettled call, is refused", %{fx: fx} do
+      c = S.completed!(fx, S.valid_transcript())
+      sent = F.invocation(c.invocation.id)
+      claimed = S.claimed!(fx)
+      claimed_sent = F.invocation(claimed.invocation.id)
+      fail_run!(fx)
+      events = F.event_count(fx)
+      other = Ecto.UUID.generate()
+
+      cases = [
+        {sent, fn ref -> {ref, fx.tenant.id, other, c.call_id} end},
+        {sent, fn ref -> {ref, other, sent.id, c.call_id} end},
+        {sent, fn ref -> {ref, fx.tenant.id, sent.id, other} end},
+        {sent, fn ref -> {ref, fx.tenant.id, sent.id, claimed.call_id} end},
+        {claimed_sent, fn ref -> {ref, fx.tenant.id, claimed_sent.id, claimed.call_id} end}
+      ]
+
+      for {invocation, tuple} <- cases do
+        result =
+          in_scope(fn scope ->
+            Process.put(@capability, tuple.(scope_ref(scope)))
+
+            F.safely(fn ->
+              Agents.complete_model_invocation(
+                invocation,
+                SdrAgent.AgentsFixtures.completion(),
+                actor: fx.agent
+              )
+            end)
+          end)
+
+        Process.delete(@capability)
+        assert refused?(result), "accepted: #{inspect(result, limit: 6)}"
+        assert S.invocation_row(invocation.id)["status"] == "sent"
+        assert F.event_count(fx) == events
       end
     end
   end

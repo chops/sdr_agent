@@ -106,37 +106,46 @@ defmodule SdrAgent.Operations do
   also reads as absent (fail closed).
   """
   def remote_worker_status(%SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id})
-      when is_binary(tenant_id) do
-    with {:ok, binding} <- SdrAgent.Prototype.binding(),
-         true <- binding.tenant_id == tenant_id,
-         {:ok, %SdrAgent.Operations.MacWorker{} = worker} <- active_worker(binding) do
-      pins = worker.profile_pins
-
-      {:ok,
-       %{
-         present?: true,
-         intake: worker.intake,
-         last_seen_at: worker.last_seen_at,
-         profile_id: pins["profile_id"],
-         model_id: pins["model_id"],
-         cli_version: pins["cli_version"]
-       }}
-    else
-      # Fail closed: no runtime, another tenant, no active worker or a read
-      # error all read as absent (the provider then refuses the call).
-      _absent -> {:ok, %{present?: false}}
-    end
-  end
+      when is_binary(tenant_id),
+      do: remote_worker_view(tenant_id)
 
   def remote_worker_status(_actor), do: {:error, :forbidden}
 
-  defp active_worker(binding) do
-    SdrAgent.Operations.MacWorker
-    |> Ash.Query.for_read(:read, %{}, Kernel.opts(binding.tenant_id))
-    |> Ash.Query.filter(
-      tenant_id == ^binding.tenant_id and binding_id == ^binding.id and status == :active
-    )
-    |> Ash.read_one()
+  # Compiled only with the prototype authority (no live binding exists in
+  # the production build, where the view is always absent).
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    defp remote_worker_view(tenant_id) do
+      with {:ok, binding} <- SdrAgent.Prototype.binding(),
+           true <- binding.tenant_id == tenant_id,
+           {:ok, %SdrAgent.Operations.MacWorker{} = worker} <- active_worker(binding) do
+        pins = worker.profile_pins
+
+        {:ok,
+         %{
+           present?: true,
+           intake: worker.intake,
+           last_seen_at: worker.last_seen_at,
+           profile_id: pins["profile_id"],
+           model_id: pins["model_id"],
+           cli_version: pins["cli_version"]
+         }}
+      else
+        # Fail closed: no runtime, another tenant, no active worker or a read
+        # error all read as absent (the provider then refuses the call).
+        _absent -> {:ok, %{present?: false}}
+      end
+    end
+
+    defp active_worker(binding) do
+      SdrAgent.Operations.MacWorker
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(binding.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^binding.tenant_id and binding_id == ^binding.id and status == :active
+      )
+      |> Ash.read_one()
+    end
+  else
+    defp remote_worker_view(_tenant_id), do: {:ok, %{present?: false}}
   end
 
   @doc "Terminal owner disable, coupled to disabling the reviewer and revoking every token."

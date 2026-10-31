@@ -1332,10 +1332,10 @@ defmodule SdrAgent.Agents do
   # invocation → chain → run, and the stale-run sweeper locks run →
   # invocations (review #25); both now take the run row first.
   defp do_finish_model_invocation(invocation, action, attrs, response, actor) do
-    with {:ok, _run} <- lock_run(invocation.agent_run_id, actor),
+    with {:ok, run} <- lock_run(invocation.agent_run_id, actor),
          {:ok, attrs} <- put_body(attrs, :response_sha256, response, actor),
          {:ok, done} <- do_update(invocation, action, attrs, actor),
-         {:ok, _run} <- settle(done, actor) do
+         {:ok, _run} <- settle(done, run, actor) do
       {:ok, done}
     end
   end
@@ -1352,9 +1352,26 @@ defmodule SdrAgent.Agents do
     end
   end
 
-  defp settle(%{sent_at: nil}, _actor), do: {:ok, :not_sent}
+  defp settle(%{sent_at: nil}, _run, _actor), do: {:ok, :not_sent}
 
-  defp settle(invocation, actor) do
+  # S-B4 (addendum r2, Codex PASS f25f89c8): a remote invocation of a run
+  # already terminal (locked above, read fresh) is finished ledger-only by
+  # the settler: no run, Operation or counter write; the charge stays as
+  # reserved. Only `RemoteCalls.terminal_settlement?/1` admits it; every
+  # other terminal settle is still refused by BudgetCounter below.
+  # Compiled only with the prototype authority (the only build with a
+  # settler; the production build keeps the plain counted settle).
+  if @prototype_compiled do
+    defp settle(invocation, %AgentRun{status: status}, actor) when status in @terminal_runs do
+      if RemoteCalls.terminal_settlement?(invocation),
+        do: {:ok, :terminal_ledger_only},
+        else: settle_counted(invocation, actor)
+    end
+  end
+
+  defp settle(invocation, _run, actor), do: settle_counted(invocation, actor)
+
+  defp settle_counted(invocation, actor) do
     tokens =
       case invocation.usage do
         %{input_tokens: input, output_tokens: output} -> input + output

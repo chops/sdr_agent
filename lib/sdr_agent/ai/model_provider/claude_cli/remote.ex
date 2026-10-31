@@ -22,50 +22,63 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI.Remote do
       the worker claims and completes. `SdrAgent.AI.ModelProvider` accepts
       that reply from this module only, for an invocation that has a
       RemoteModelCall, and then waits (bounded) for the settler's outcome.
+
+  In a build without the prototype authority (`:prototype_authority_compiled`
+  unset, the production build) there is no live binding and so no worker:
+  `prepare/2` always refuses `{:error, :provider_not_running}`.
   """
   @behaviour SdrAgent.AI.ModelProvider
 
-  alias SdrAgent.Agents.RemoteCalls
-  alias SdrAgent.AI.ModelProfiles
-  alias SdrAgent.AI.ModelProvider
-  alias SdrAgent.AI.ModelProvider.ClaudeCLI
-
-  @impl true
-  def prepare(request, _opts) do
-    with {:ok, status} <- SdrAgent.Operations.remote_worker_status(request.actor),
-         :ok <- available(status),
-         {:ok, profile} <- compiled_profile(status),
-         :ok <- deliverable(request) do
-      {:ok, ClaudeCLI.provenance(profile)}
-    end
-  end
+  @prototype_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   @impl true
   def complete(_request, _opts), do: :remote_dispatched
 
-  defp available(%{present?: true, intake: :open}), do: :ok
-  defp available(%{present?: true}), do: {:error, :provider_held}
-  defp available(_absent), do: {:error, :provider_not_running}
+  # Compiled only with the prototype authority: only that build has a live
+  # binding, so a worker. The production build has none and refuses.
+  if @prototype_compiled do
+    alias SdrAgent.Agents.RemoteCalls
+    alias SdrAgent.AI.ModelProfiles
+    alias SdrAgent.AI.ModelProvider
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI
 
-  # The enrolled pins name exactly one compiled real ClaudeCLI profile.
-  defp compiled_profile(%{profile_id: id, model_id: model, cli_version: version}) do
-    ModelProfiles.real_ids()
-    |> Enum.map(&elem(ModelProfiles.fetch_real(&1), 1))
-    |> Enum.find(
-      &(&1.adapter == ClaudeCLI and Atom.to_string(&1.id) == id and &1.resolved_model == model and
-          &1.cli_version == version)
-    )
-    |> case do
-      nil -> {:error, :worker_pins_incompatible}
-      profile -> {:ok, profile}
+    @impl true
+    def prepare(request, _opts) do
+      with {:ok, status} <- SdrAgent.Operations.remote_worker_status(request.actor),
+           :ok <- available(status),
+           {:ok, profile} <- compiled_profile(status),
+           :ok <- deliverable(request) do
+        {:ok, ClaudeCLI.provenance(profile)}
+      end
     end
-  end
 
-  # The same check the remote reservation applies to the same stored body.
-  defp deliverable(request) do
-    case RemoteCalls.check_request(ModelProvider.request_body(request)) do
-      :ok -> :ok
-      {:error, _message} -> {:error, :remote_launch_too_large}
+    defp available(%{present?: true, intake: :open}), do: :ok
+    defp available(%{present?: true}), do: {:error, :provider_held}
+    defp available(_absent), do: {:error, :provider_not_running}
+
+    # The enrolled pins name exactly one compiled real ClaudeCLI profile.
+    defp compiled_profile(%{profile_id: id, model_id: model, cli_version: version}) do
+      ModelProfiles.real_ids()
+      |> Enum.map(&elem(ModelProfiles.fetch_real(&1), 1))
+      |> Enum.find(
+        &(&1.adapter == ClaudeCLI and Atom.to_string(&1.id) == id and &1.resolved_model == model and
+            &1.cli_version == version)
+      )
+      |> case do
+        nil -> {:error, :worker_pins_incompatible}
+        profile -> {:ok, profile}
+      end
     end
+
+    # The same check the remote reservation applies to the same stored body.
+    defp deliverable(request) do
+      case RemoteCalls.check_request(ModelProvider.request_body(request)) do
+        :ok -> :ok
+        {:error, _message} -> {:error, :remote_launch_too_large}
+      end
+    end
+  else
+    @impl true
+    def prepare(_request, _opts), do: {:error, :provider_not_running}
   end
 end
