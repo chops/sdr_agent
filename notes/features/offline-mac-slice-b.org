@@ -882,8 +882,19 @@ N3 uses Ash.Resource.get_metadata; N2 documents transcript clearing on any
 relevant tenant-event refresh and a new audited click to view again.
 GREEN x2-20261031T182931Z-20179:104/104, skipped0/excluded0, owned pair
 dropped. Prod/test WAE, configured Credo, format and diff checks PASS.
-M1 source/result review and N1 render predicate reuse remain before hosted
-deployment; no full-gate/deployment-ready claim here.
+M1 source/result review remains before hosted deployment; no full-gate or
+deployment-ready claim here.
+
+N1 follow-up: Operations and Draft templates compute display predicates once
+per render, not per streamed failure/run/webhook/operation/delivery/approval.
+The values are render-local rather than stored only at load time: the event
+hook can refresh a role even when a refused action does not reload data.
+This preserves demotion/refusal button updates while removing row-multiplied
+authority reads. Domain authorization remains unchanged. Pure display
+refactor: no entity or architecture delta, no new grant or backend contract.
+Canonical x2-20261031T183408Z-39938:69/69 including owner, Draft, Operations,
+session revalidation and LiveRefresh; skipped0/excluded0, pair dropped.
+Prod/test WAE, configured Credo, format, workflow and diff checks PASS.
 
 * S-B5 enrollment and human boundary checkpoint (2026-10-31)
 

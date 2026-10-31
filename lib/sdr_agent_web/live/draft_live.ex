@@ -430,6 +430,10 @@ defmodule SdrAgentWeb.DraftLive do
 
   @impl true
   def render(assigns) do
+    # The event hook can refresh the role even when a refused action does
+    # not reload the draft. Recompute once here, never per delivery/approval.
+    assigns = assign(assigns, :can_review?, Scope.reviewer?(assigns.current_scope))
+
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:review}>
       <.link
@@ -515,7 +519,7 @@ defmodule SdrAgentWeb.DraftLive do
                   by {humanize(@current.author_type)} · <.timestamp at={@current.inserted_at} />
                 </p>
                 <.ui_button
-                  :if={Scope.reviewer?(@current_scope) and @draft.status == :pending_review}
+                  :if={@can_review? and @draft.status == :pending_review}
                   id="edit-toggle"
                   size="sm"
                   variant="ghost"
@@ -623,7 +627,7 @@ defmodule SdrAgentWeb.DraftLive do
                   </div>
                   <div class="flex gap-2">
                     <.ui_button
-                      :if={Scope.reviewer?(@current_scope) and delivery.state == :failed_retryable}
+                      :if={@can_review? and delivery.state == :failed_retryable}
                       id={"cancel-retry-#{delivery.id}"}
                       size="sm"
                       variant="danger"
@@ -719,7 +723,7 @@ defmodule SdrAgentWeb.DraftLive do
               </div>
 
               <div
-                :if={Scope.reviewer?(@current_scope) and @draft.status == :pending_review}
+                :if={@can_review? and @draft.status == :pending_review}
                 class="mt-4 space-y-4"
               >
                 <.form for={@approve_form} id="approve-form" phx-submit="approve">
@@ -828,7 +832,7 @@ defmodule SdrAgentWeb.DraftLive do
                       <.badge status={approval.status} />
                     </div>
                     <.ui_button
-                      :if={Scope.reviewer?(@current_scope) and approval.status == :granted}
+                      :if={@can_review? and approval.status == :granted}
                       id={"revoke-#{approval.id}"}
                       size="sm"
                       variant="danger"
