@@ -47,7 +47,10 @@ defmodule SdrAgent.Agents.RemoteCalls do
       `{:ok, launch}` with `call_id`, `profile_id`, `model_id`,
       `request_sha256`, `prompt`, `schema` and `result_deadline`. A refused
       launch check rolls the whole claim back (`{:error, {:launch_refused,
-      reason}}`); a candidate lost to a concurrent claim returns
+      reason}}`); in prototype runtime, a worker whose binding has no fresh
+      live hosted owner (`SdrAgent.Operations.hosted_owner_live?/2`, read
+      after the head lock and fence) is refused writing nothing,
+      `{:error, :owner_unavailable}` (W2); a candidate lost to a concurrent claim returns
       `{:ok, :none}` with no write; no candidate at all spends the nonce
       with a null call.
     * `complete(token, nonce, call_id, request_digest, transcript)` — the
@@ -341,7 +344,8 @@ defmodule SdrAgent.Agents.RemoteCalls do
          {:ok, call} <- call(candidate.id, worker.tenant_id, :for_update, scope),
          :ok <- Admission.lock_charge(invocation),
          {:ok, _head} <- Kernel.lock_head(worker.tenant_id),
-         :ok <- SdrAgent.Prototype.check_fence() do
+         :ok <- SdrAgent.Prototype.check_fence(),
+         :ok <- live_owner(worker) do
       # The claim instant is read only once every lock is held.
       now = SdrAgent.Clock.utc_now()
 
@@ -587,11 +591,30 @@ defmodule SdrAgent.Agents.RemoteCalls do
     |> Ash.update()
   end
 
+  @prototype_authority Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
+
+  ## Live hosted owner (W2)
+
+  if @prototype_authority do
+    # W2: in prototype runtime a claim launches only while the worker's
+    # binding has a fresh live hosted owner. Checked after the retained head
+    # lock and fence (take/5), by plain reads: no new lock edge, and an
+    # owner disable that committed while the claim waited is seen here.
+    defp live_owner(worker) do
+      if SdrAgent.Prototype.runtime() == :prototype and
+           not SdrAgent.Operations.hosted_owner_live?(worker.tenant_id, worker.binding_id),
+         do: {:error, :owner_unavailable},
+         else: :ok
+    end
+  else
+    # The production build has no hosted owner and no prototype runtime.
+    defp live_owner(_worker), do: :ok
+  end
+
   ## Settlement (S-B3)
 
   # Compiled only with the prototype authority: the production build has no
   # :remote_settler marker, so its settle_due/1 refuses every caller.
-  @prototype_authority Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
 
   if @prototype_authority do
     alias Ash.Error.Forbidden

@@ -186,6 +186,22 @@ defmodule SdrAgent.Operations.HostedOwners do
     def hosted_owner?(actor), do: active?(actor)
 
     @doc """
+    W2: whether `binding_id` has a fresh live hosted owner: its one active
+    HostedOwner and that owner's User pass `active?/1`. Reads only (no
+    row locks), so a caller holding the audit head adds no lock edge.
+    """
+    def binding_owner_live?(tenant_id, binding_id) do
+      with {:ok, %HostedOwner{user_id: user_id}} <- active_binding_owner(binding_id, tenant_id),
+           {:ok, %User{} = user} <- read_user(user_id, tenant_id) do
+        active?(user)
+      else
+        _refused -> false
+      end
+    rescue
+      _error -> false
+    end
+
+    @doc """
     Validates the retained legacy prototype human path against persisted
     identity. ANY owner association, including disabled history, takes
     precedence; no role fallback is available to a hosted identity.
@@ -324,6 +340,15 @@ defmodule SdrAgent.Operations.HostedOwners do
       HostedOwner
       |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
       |> Ash.Query.filter(user_id == ^id and tenant_id == ^tenant_id and status == :active)
+      |> Ash.read_one()
+    end
+
+    defp active_binding_owner(binding_id, tenant_id) do
+      HostedOwner
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+      |> Ash.Query.filter(
+        binding_id == ^binding_id and tenant_id == ^tenant_id and status == :active
+      )
       |> Ash.read_one()
     end
 
@@ -498,6 +523,8 @@ defmodule SdrAgent.Operations.HostedOwners do
     def active?(_actor), do: false
     @impl true
     def hosted_owner?(_actor), do: false
+    @doc "No hosted owner in an ordinary production build."
+    def binding_owner_live?(_tenant_id, _binding_id), do: false
     @doc "No prototype legacy-human resolver in an ordinary production build."
     def legacy_human?(_actor), do: false
     @impl true

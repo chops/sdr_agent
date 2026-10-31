@@ -86,6 +86,13 @@ defmodule SdrAgent.Operations do
   @doc "Whether the User is admissible to this runtime's website, with fresh hosted authority."
   def hosted_web_principal?(user), do: SdrAgent.Operations.HostedOwners.web_principal?(user)
 
+  @doc """
+  W2: whether the binding has a fresh live hosted owner (prototype runtime;
+  always `false` in an ordinary production build). Read-only, no row locks.
+  """
+  def hosted_owner_live?(tenant_id, binding_id),
+    do: SdrAgent.Operations.HostedOwners.binding_owner_live?(tenant_id, binding_id)
+
   @doc "Terminal owner disable, coupled to disabling the reviewer and revoking every token."
   def disable_hosted_owner(id, opts) do
     Guard.run(
