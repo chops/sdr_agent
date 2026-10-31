@@ -1,9 +1,11 @@
 flowchart LR
     subgraph Hosted[Hosted SDR runtime - prototype authority compiled]
+        Workers[AgentWorker / ReplyWorker<br/>Oban job, before START]
+        OfflineGate[SDR.OfflineGate<br/>offline: snooze 60 s, no write, attempt restored]
         Caller[SDR.Model.call/4<br/>agent run, running]
         Facade[AI.ModelProvider facade<br/>reserve then complete]
         Runtime[ModelProvider.Runtime<br/>transport :remote]
-        RemoteProv[ClaudeCLI.Remote<br/>prepare: worker, intake, pins, launch bound]
+        RemoteProv[ClaudeCLI.Remote<br/>availability: worker, intake, heartbeat at most 60 s old<br/>prepare: availability, pins, launch bound]
         WorkerView[Operations.remote_worker_status/1<br/>current binding, agent_runtime actor]
         Reserve[Agents.reserve_model_invocation<br/>CreateRemoteCall + check_request bound]
         Invocation[(ModelInvocation<br/>reserved / sent / terminal)]
@@ -28,6 +30,9 @@ flowchart LR
 
     Local[Local transport only:<br/>ProfileSupervisor, server, reaper, shim]
 
+    Workers -- resolved Remote, run queued, Operation enqueued --> OfflineGate
+    OfflineGate -- availability/1, lock-free read --> RemoteProv
+    OfflineGate -. available: START .-> Caller
     Caller --> Facade
     Facade --> Runtime
     Runtime -- resolve: Remote, no local server --> RemoteProv
@@ -64,5 +69,7 @@ flowchart LR
 
     %% Production build without prototype authority: prepare refuses provider_not_running,
     %% worker view absent, no settler, no terminal-settle clause.
+    %% S-B6: a disconnect inside the 60 s freshness window still reserves (charged); a worker going
+    %% stale between gate and prepare is refused provider_offline before reservation. Gate is never admission.
     %% Late results are recorded but never released into or resume a terminal run.
     %% Source + focused evidence only; not deployment or live end-to-end.

@@ -722,11 +722,13 @@ Hosted staging:
 
 ** P4: lifecycle-accurate acceptance; live-check input
 - Offline (replaces plan r1 S-B6 tests):
-  - assign creates the queued run, Operation and job (sdr.ex:125-154);
+  - assign creates the queued run, the enqueued Operation and the job
+    (sdr.ex:125-154);
   - the gate snoozes BEFORE the START transition, the reservation and any
     charge;
-  - the tests assert that the run and Operation stay `queued` after a
-    snooze and that the attempt bookkeeping is restored (attempt
+  - the tests assert that the run stays `queued` and the Operation stays
+    `enqueued` (its waiting state; corrected 2026-10-31, Codex 1a91061c)
+    after a snooze and that the attempt bookkeeping is restored (attempt
     decremented, max_attempts unchanged).
 - Live-check input (replaces plan r1 owner-run step 6):
   - The retained leads are not assignable: one is disqualified and one is
