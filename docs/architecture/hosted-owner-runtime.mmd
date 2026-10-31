@@ -18,6 +18,10 @@ flowchart LR
     Ordinary[Ordinary constant provider<br/>roles unchanged, no scoped User writes]
     WorkerControl[Operations MacWorker controls<br/>fresh owner; worker then head lock; fresh recheck]
     Worker[(MacWorker<br/>one active per binding; terminal disable)]
+    TranscriptReader[Agents.RemoteTranscripts<br/>head lock then fresh owner recheck]
+    TranscriptScope[Private named-action read scope<br/>process + transaction + actor + call]
+    Transcript[(RemoteCallResult<br/>immutable sensitive bytes)]
+    Diagnostic[Explicit diagnostic result after commit<br/>not released business output]
 
     Console -- marked enrollment / disable --> Operations
     Operations --> Scope
@@ -38,6 +42,11 @@ flowchart LR
     Authority -- owner-only mac_worker_control, never delegated --> WorkerControl
     WorkerControl -- current tenant and binding only --> Worker
     Worker -- same-transaction redacted event --> Audit
+    Authority -- owner-only transcript_read, never delegated --> TranscriptReader
+    TranscriptReader --> TranscriptScope
+    TranscriptScope -- exact named action and field check --> Transcript
+    TranscriptReader -- AuditAccess in same transaction, no bytes in event --> Audit
+    TranscriptReader -- only after successful access commit --> Diagnostic
     WebPrincipal[Hosted website admission<br/>live owner or exact persisted bound auditor]
     Authority --> WebPrincipal
     WebPrincipal -- login / mount / connected revalidation --> Session
@@ -54,5 +63,5 @@ flowchart LR
 
     %% Source-only implementation, not a deployment or real-data approval.
     %% Owner schema and POST verified on synthetic disposable databases.
-    %% Worker control is source implemented; claim revocation, transcript scope and owner UI remain pending.
+    %% Worker controls and transcript reader are source implemented; claim revocation and owner UI remain pending.
     %% Ordinary production builds without prototype authority cannot enroll or exchange.

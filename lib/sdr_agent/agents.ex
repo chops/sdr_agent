@@ -152,6 +152,13 @@ defmodule SdrAgent.Agents do
 
   ## Definitions
 
+  @doc "Explicit hosted-owner remote-call status for one run; never transcript bytes."
+  def list_remote_calls(run_id, opts), do: SdrAgent.Agents.RemoteTranscripts.list(run_id, opts)
+
+  @doc "Explicit hosted-owner diagnostics, returned only after the access record commits."
+  def read_remote_transcript(call_id, opts),
+    do: SdrAgent.Agents.RemoteTranscripts.read(call_id, opts)
+
   @doc "Registers a definition (KRN). Same name/version and hash returns the existing row."
   def register_definition(attrs, opts) do
     actor = Keyword.get(opts, :actor)

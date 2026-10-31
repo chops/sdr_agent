@@ -33,6 +33,10 @@ defmodule SdrAgent.Agents.RemoteModelCall do
   refuses DELETE, TRUNCATE, any update of a terminal row and any update of a
   column other than `state`, `worker_id`, `claimed_at` and
   `result_deadline`.
+
+  S-B5's explicit `:owner_metadata` read permits only the fresh hosted
+  owner, filtered by tenant and invocation run id. It carries no transcript
+  bytes and does not change the default private read or any transition.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -44,6 +48,7 @@ defmodule SdrAgent.Agents.RemoteModelCall do
   alias SdrAgent.Agents.Checks.RemoteReservationScope
   alias SdrAgent.Audit.Changes.AppendEvent
   alias SdrAgent.Audit.Changes.Transition
+  alias SdrAgent.Prototype.Checks.OperatorAction
 
   @states [:pending, :claimed, :completed, :expired_unclaimed, :expired_unknown]
   @terminal ["completed", "expired_unclaimed", "expired_unknown"]
@@ -102,6 +107,15 @@ defmodule SdrAgent.Agents.RemoteModelCall do
   actions do
     defaults [:read]
 
+    read :owner_metadata do
+      description "Explicit current-owner call status for one run, without transcript content."
+      argument :run_id, :uuid
+
+      filter expr(
+               tenant_id == ^actor(:tenant_id) and model_invocation.agent_run_id == ^arg(:run_id)
+             )
+    end
+
     create :create do
       description "S-B2: the reservation's remote call (reservation scope only, inside :reserve)."
 
@@ -139,8 +153,17 @@ defmodule SdrAgent.Agents.RemoteModelCall do
       authorize_if RemoteReservationScope
     end
 
-    policy action_type([:read, :update]) do
+    policy action(:read) do
       authorize_if RemoteCallsScope
+    end
+
+    policy action_type(:update) do
+      authorize_if RemoteCallsScope
+    end
+
+    policy action(:owner_metadata) do
+      access_type :strict
+      authorize_if {OperatorAction, action: :transcript_read}
     end
   end
 

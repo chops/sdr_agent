@@ -44,8 +44,14 @@ Mac worker enrol/list/pause/resume/disable are source implemented through
 an owner-only action namespace, with current-binding filters and fresh
 checks after worker/head locks. Second active enrollment is refused; disable
 is terminal and pause affects new intake only. The ordinary marked console
-path remains available. Claim-time owner revocation, transcript read scope
-and owner-safe LiveViews remain pending; this is not end-to-end completion.
+path remains available. Explicit remote transcript diagnostics are source
+implemented too: the API takes the head, rechecks the owner, opens an exact
+private named-action/field scope, reads and records AuditAccess in one
+transaction, and returns only after commit. Caller transactions are refused.
+Direct named reads, copied contexts and roles alone expose no bytes; ordinary
+production has refusal stubs. Metadata lists never contain transcripts and
+no business output release is implied. Claim-time owner revocation and
+owner-safe LiveViews remain pending; this is not end-to-end completion.
 
 Generated generic diagrams were inspected in a temporary preview. Their
 resource grouping/counts and omitted runtime conditions are not authoritative;

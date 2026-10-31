@@ -14,14 +14,18 @@ defmodule SdrAgent.Agents.RemoteCallResult do
   `:store` is reached only from `SdrAgent.Agents.RemoteCalls.complete/5`
   inside the RemoteCalls scope (`SdrAgent.Agents.Checks.RemoteCallsScope`)
   and appends one AuditEvent `remote_call.result_stored` (ids, digest and
-  size only). The only read is the domain-private metadata read in the
+  size only). The default read is the domain-private metadata read in the
   RemoteCalls scope (duplicate versus conflict), whose `transcript` field
   stays forbidden in S-B2 (`%Ash.ForbiddenField{}`); every external or
   unscoped read is Forbidden, auditors included. The audit kernel's
   integrity read (`SdrAgent.Audit.Kernel.integrity_opts/1`) is the only
-  reader of the bytes, to hash the stored row. S-B3 adds a scoped
-  settlement read and S-B5 the hosted owner's. A trigger refuses UPDATE,
-  DELETE and TRUNCATE.
+  reader of the bytes under the default action, to hash the stored row.
+  S-B3 adds its separate internal settlement read. S-B5's explicit
+  `:owner_transcript` read and field policy require RemoteTranscripts'
+  exact private process/transaction/actor/call scope. That API revalidates
+  the current owner after the audit-head lock and records access before
+  returning bytes after commit. Direct named-action reads grant nothing.
+  A trigger refuses UPDATE, DELETE and TRUNCATE.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -29,6 +33,7 @@ defmodule SdrAgent.Agents.RemoteCallResult do
     data_layer: AshPostgres.DataLayer,
     authorizers: [Ash.Policy.Authorizer]
 
+  alias SdrAgent.Agents.Checks.HostedTranscriptScope
   alias SdrAgent.Agents.Checks.RemoteCallsScope
   alias SdrAgent.Audit.Checks.IntegrityRead
 
@@ -63,6 +68,7 @@ defmodule SdrAgent.Agents.RemoteCallResult do
   field_policies do
     field_policy :transcript do
       authorize_if IntegrityRead
+      authorize_if HostedTranscriptScope
     end
 
     field_policy :* do
@@ -72,6 +78,12 @@ defmodule SdrAgent.Agents.RemoteCallResult do
 
   actions do
     defaults [:read]
+
+    read :owner_transcript do
+      description "Audited owner diagnostics, exact private reader scope only."
+      argument :call_id, :uuid
+      filter expr(call_id == ^arg(:call_id) and tenant_id == ^actor(:tenant_id))
+    end
 
     create :store do
       description "S-B2: the first accepted transcript of a claimed call."
@@ -85,9 +97,14 @@ defmodule SdrAgent.Agents.RemoteCallResult do
   end
 
   policies do
-    policy action_type(:read) do
+    policy action(:read) do
       authorize_if RemoteCallsScope
       authorize_if IntegrityRead
+    end
+
+    policy action(:owner_transcript) do
+      access_type :strict
+      authorize_if HostedTranscriptScope
     end
 
     policy action(:store) do

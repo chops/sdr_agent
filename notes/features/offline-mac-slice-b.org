@@ -911,6 +911,32 @@ by this slice. Transcript RED8/8 at x2-20261031T082447Z-80827; GREEN GO
 m_1793435316000000000_74781a10 requires stronger denials, reader-scope
 forgery and head-wait revocation tests. Transcript/UI GREEN not started.
 
+** Explicit transcript domain reader checkpoint
+
+Transcript T1-T3 amended RED x2-20261031T084126Z-51033:3 existing pass,
+10 intended assertions; tests af07fe44 (transcript),2c93a623 (race).
+Source adds explicit owner metadata and private owner_transcript actions;
+the latter's row and transcript-field checks require exact registered
+process/transaction/actor/call scope. No public constructor/test seam.
+Read takes the audit head, rechecks the current owner, reads and appends
+fixed-purpose User-attributed AuditAccess in one transaction, then returns
+after commit. Caller transactions are refused; error text/bytes never log.
+Default/integrity and future settlement reads remain separate. Optional
+read arguments ensure unauthorized missing-argument requests still hit the
+strict refusal rather than exposing schema-validation oracles; the public
+API and private scope require a canonical id. Ordinary production compiles
+only refusal stubs (no unreachable true-vs-false WAE branches).
+GREEN x2-20261031T084426Z-61913:13/13. Combined worker/lower authority/
+S-B2 transport/S-B7 agent x2-20261031T084721Z-72240:142/142, no skips or
+exclusions, owned DBs dropped. Format, test compile, plainCredo and codegen
+rc0; prod/dev WAE rc0 before final behavior-preserving list/callback
+extraction for Credo. Full gate remains blocked by owner-pending ADR-0008
+dependency amendment. Source review required. No UI implementation yet.
+
+Worker source PASS9f61decc is now backed by broad251/267 with exact same16
+inherited failure names (new0 removed0), plus S-B2/S-B7 120/120 at
+x1-20261031T084156Z-53247. Reviewed S-B7 d25ae812 integrated at f28fb03e.
+
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
 Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.
