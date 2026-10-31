@@ -937,6 +937,36 @@ Worker source PASS9f61decc is now backed by broad251/267 with exact same16
 inherited failure names (new0 removed0), plus S-B2/S-B7 120/120 at
 x1-20261031T084156Z-53247. Reviewed S-B7 d25ae812 integrated at f28fb03e.
 
+** 2026-10-31T08:55Z capacity blocker and source checkpoint
+
+Claude's terminal reports a weekly subscription limit (HTTP429), resets
+November3 at2pm America/Denver. Its S-B3 GREEN child terminated early;
+the parent is idle and cannot answer pending transcript source/UI reviews.
+Observed directly with read-only pane capture after the allowed15-minute
+wake exception; no direct API or paid-credit bypass attempted.
+Source19d83e22 is pushed with transcript domain implementation142/142;
+UI RED3e9b594b is pushed,9 intended assertion failures at
+x2-20261031T085218Z-89229, test a14d6b16. No UI production edits. UI GREEN
+awaits independent GO; transcript source review remains unanswered.
+Gate19d83e22 x1-20261031T085457Z-97675 passed workflow/format/WAE/codegen/
+plainCredo, then stopped at audit before DB effects: assent0.2.13 critical
+117656, ssl_verify_fun1.1.7 critical117666, phoenix_html4.3.0 medium117645.
+No full tests/precommit result is claimed. ADR-0008 amendment/PR244 remains
+owner pending; no pins changed. Optional strictCredo baseline and unavailable
+Sobelow/Dialyzer/deps.audit are not PASS.
+
+Claude tree offline-mac-b at c84c14a7 contains partial uncommitted S-B3
+production and frozen RED files. Preserve, do not merge unreviewed. Tracked
+binary diff sha25680c9bc90261e0ddfc651548aa2035d2dcb0418ee29443e0c5872ffc059218353;
+new remote_settler.ex sha256b977958b847807cc01e95b5df877ffb971c3a0f01ca46295a5fafe83982d012d.
+W2 not delivered. S-B4/S-B6/serializer/rollback remain Claude-owned pending
+work. N2 rejected-login token revocation was inspected, not implemented.
+
+Next requires owner restoring subscription CLI capacity or explicitly
+authorizing replacement implementation/review ownership; no silent reviewer
+fallback. D-270 stays source-only synthetic. Hosting/data/backup approvals
+remain separate. Detailed local continuation is in notes/sessions/.
+
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
 Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.
