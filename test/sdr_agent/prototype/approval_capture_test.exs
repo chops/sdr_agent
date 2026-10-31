@@ -38,6 +38,7 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
   alias SdrAgent.Actor
   alias SdrAgent.Audit
   alias SdrAgent.Audit.Export
+  alias SdrAgent.Audit.ExportVerifier
   alias SdrAgent.Clock
   alias SdrAgent.Outreach
   alias SdrAgent.Outreach.Approval
@@ -547,6 +548,10 @@ defmodule SdrAgent.Prototype.ApprovalCaptureTest do
     wrapper = path |> File.read!() |> Jason.decode!()
     payload = wrapper["payload"] |> Base.decode64!() |> Jason.decode!()
     assert payload["prototype"] == block!()
+
+    # The block is inside the signed bytes: the verifier accepts the bundle.
+    trusted = %{key_id: "d237-export", public_key: public_key, status: :active, revoked_at: nil}
+    assert {:ok, %{valid?: true}} = ExportVerifier.verify(path, trusted_key: trusted)
   end
 
   # ------------------------------------------------------------------ the window

@@ -382,6 +382,29 @@ defmodule SdrAgent.Audit.ExportTest do
     assert export.failure_reason =~ "invalid_sequence_range"
   end
 
+  # G4 regression guard (passes before and after): the ordinary runtime's
+  # signed payload keeps exactly today's keys, so its bytes are unchanged and
+  # it never carries the prototype assurance block.
+  test "the ordinary signed payload has exactly the existing keys and no prototype block",
+       ctx do
+    assert {:ok, _result} =
+             Export.build(
+               %{scope: :sequence_range, scope_ref: "1:latest"},
+               actor: ctx.actor,
+               anchor_actor: ctx.anchorer,
+               private_key: ctx.private_key,
+               sinks: [],
+               output: ctx.path,
+               output_root: Path.dirname(ctx.path)
+             )
+
+    payload =
+      ctx.path |> File.read!() |> Jason.decode!() |> Map.fetch!("payload") |> Base.decode64!()
+
+    assert payload |> Jason.decode!() |> Map.keys() |> Enum.sort() ==
+             ~w(anchor anchors chain_index events format payloads scope signing_key sink_receipts)
+  end
+
   defp trusted_key(key) do
     %{
       key_id: key.key_id,
