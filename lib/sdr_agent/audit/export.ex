@@ -139,7 +139,32 @@ defmodule SdrAgent.Audit.Export do
   end
 
   defp build_bundle(data, private_key) do
-    payload = %{
+    with {:ok, block} <- prototype_block() do
+      data |> payload() |> with_prototype(block) |> sign_bundle(private_key)
+    end
+  end
+
+  # IF-5 (docs/product/d237/prototype-runtime.md): in prototype runtime the
+  # signed payload carries exactly one assurance block under `prototype`, or
+  # the export fails closed; the ordinary payload is unchanged (no key).
+  defp prototype_block do
+    case SdrAgent.Prototype.runtime() do
+      :prototype ->
+        case SdrAgent.Prototype.assurance() do
+          {:ok, %{} = block} -> {:ok, block}
+          _unavailable -> {:error, :prototype_assurance_unavailable}
+        end
+
+      :ordinary ->
+        {:ok, nil}
+    end
+  end
+
+  defp with_prototype(payload, nil), do: payload
+  defp with_prototype(payload, block), do: Map.put(payload, :prototype, block)
+
+  defp payload(data) do
+    %{
       format: "sdr-audit-export/1",
       scope: data.scope,
       events: Enum.map(data.events, &event_map/1),
@@ -155,7 +180,9 @@ defmodule SdrAgent.Audit.Export do
         revoked_at: data.key.revoked_at
       }
     }
+  end
 
+  defp sign_bundle(payload, private_key) do
     bytes = Canonical.encode!(payload)
     signature = Signing.sign(bytes, private_key)
     wrapper = Jason.encode!(%{payload: Base.encode64(bytes), signature: Base.encode64(signature)})
