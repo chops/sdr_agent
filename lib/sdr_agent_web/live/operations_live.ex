@@ -260,7 +260,14 @@ defmodule SdrAgentWeb.OperationsLive do
 
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, worker_pin_keys: @worker_pin_keys)
+    # Presentation is fresh for this render (including a refused event),
+    # but authority queries must never run once per streamed row.
+    assigns =
+      assign(assigns,
+        worker_pin_keys: @worker_pin_keys,
+        can_review?: Scope.reviewer?(assigns.current_scope),
+        can_admin?: Scope.admin?(assigns.current_scope)
+      )
 
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:operations}>
@@ -379,7 +386,7 @@ defmodule SdrAgentWeb.OperationsLive do
                   </p>
                 </div>
                 <div
-                  :if={Scope.reviewer?(@current_scope)}
+                  :if={@can_review?}
                   class="flex shrink-0 flex-wrap items-start gap-2"
                 >
                   <.ui_button
@@ -447,7 +454,7 @@ defmodule SdrAgentWeb.OperationsLive do
                   <.badge status={run.status} />
                 </.link>
                 <.ui_button
-                  :if={Scope.admin?(@current_scope) and retryable?(run)}
+                  :if={@can_admin? and retryable?(run)}
                   id={"retry-run-#{run.id}"}
                   size="sm"
                   phx-click="retry_run"
@@ -493,7 +500,7 @@ defmodule SdrAgentWeb.OperationsLive do
                   <div class="flex shrink-0 items-center gap-2">
                     <.badge status={event.processing_status} />
                     <.ui_button
-                      :if={Scope.admin?(@current_scope)}
+                      :if={@can_admin?}
                       id={"retry-webhook-#{event.id}"}
                       size="sm"
                       phx-click="retry_webhook"
@@ -540,7 +547,7 @@ defmodule SdrAgentWeb.OperationsLive do
                   <div class="flex shrink-0 items-center gap-2">
                     <.badge status={operation.status} />
                     <.ui_button
-                      :if={Scope.admin?(@current_scope) and operation.status in [:enqueued, :failed]}
+                      :if={@can_admin? and operation.status in [:enqueued, :failed]}
                       id={"cancel-operation-#{operation.id}"}
                       size="sm"
                       variant="danger"
