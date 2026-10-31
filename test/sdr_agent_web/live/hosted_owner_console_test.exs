@@ -180,13 +180,46 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
     assert {:ok, [_]} = SdrAgent.Operations.list_mac_workers(actor: ctx.enrolled.user)
   end
 
-  test "worker metadata refresh clears the one-time token", ctx do
+  test "enrollment event and successful metadata refresh preserve the one-time token", ctx do
     {:ok, view, _} = ctx.conn |> signed_conn(ctx.token) |> live("/operations")
     view |> form("#worker-enrol", worker: F.pins()) |> render_submit()
     assert has_element?(view, "#worker-token")
+    token_html = view |> element("#worker-token") |> render()
+    assert {:ok, [worker]} = SdrAgent.Operations.list_mac_workers(actor: ctx.enrolled.user)
+
+    # Sandbox transactions do not commit: publish the same content-free
+    # event the real commit relay sends, through the real PubSub path.
+    :ok =
+      SdrAgent.LiveEvents.broadcast(%{
+        tenant_id: ctx.fx.tenant.id,
+        sequence: 0,
+        category: "domain_change",
+        event_type: "mac_worker.enrolled",
+        subject_resource: "SdrAgent.Operations.MacWorker",
+        subject_id: worker.id,
+        agent_run_id: nil
+      })
+
+    assert has_element?(view, "#worker-token"), "enrollment event erased the one-time token"
+    assert view |> element("#worker-token") |> render() == token_html
     send(view.pid, :live_refresh)
-    refute render(view) =~ "id=\"worker-token\""
+    assert has_element?(view, "#worker-token"), "successful refresh erased the one-time token"
+    assert view |> element("#worker-token") |> render() == token_html
     assert has_element?(view, "#mac-worker-controls")
+  end
+
+  test "owner disable signs out the token-bearing view instead of refreshing it", ctx do
+    {:ok, view, _} = ctx.conn |> signed_conn(ctx.token) |> live("/operations")
+    view |> form("#worker-enrol", worker: F.pins()) |> render_submit()
+    assert has_element?(view, "#worker-token")
+
+    assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id, actor: ctx.enrolled.user)
+    send(view.pid, :live_refresh)
+    assert_redirect(view, "/sign-in", 1_000)
+
+    conn = ctx.conn |> signed_conn(ctx.token) |> get("/operations")
+    assert redirected_to(conn) == "/sign-in"
+    refute conn.resp_body =~ "worker-token"
   end
 
   test "bound auditor sees no worker controls and forged enrolment is refused", ctx do
