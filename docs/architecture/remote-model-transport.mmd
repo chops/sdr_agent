@@ -30,7 +30,7 @@ flowchart LR
 
     Local[Local transport only:<br/>ProfileSupervisor, server, reaper, shim]
 
-    Workers -- resolved Remote, run queued, Operation enqueued --> OfflineGate
+    Workers -- resolved Remote, run queued; AgentWorker also Operation enqueued --> OfflineGate
     OfflineGate -- availability/1, lock-free read --> RemoteProv
     OfflineGate -. available: START .-> Caller
     Caller --> Facade
