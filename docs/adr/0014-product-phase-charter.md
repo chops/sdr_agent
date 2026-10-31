@@ -286,3 +286,35 @@ No generic second deployment approval is needed for the approved sequence;
 material departures or destructive operations outside it require direction.
 New live imports/assignments retain their separately scoped controls; this
 amendment grants no extra model calls and does not reset prior usage.
+
+## Amendment 4 (2026-10-31): owner's initial-delivery backup exception
+
+**Status: ACCEPTED** by Charles in the subsequent delivery instruction:
+
+> let's make an exception just to get a working product.
+
+The accompanying instruction explicitly prioritized completing the working
+product over further backup/snapshot prerequisites. For this initial hosted
+delivery only, Amendment 3 rule 3 and its execution boundary do not require
+proving Cloud backups are off, that snapshots contain no SDR data, or fresh
+backup-exclusion evidence before transferring the fenced archive. This
+records the owner's exception; it does not assert those external facts.
+
+The accepted tradeoff is that real SDR data could be retained in a
+whole-server backup or snapshot independently of application deletion.
+Existing isolated database/application identities, private retained dumps,
+credential/content-free logs, fenced single-current authority, exact-target
+restore checks and capture-only operation remain required. No backup,
+snapshot or other application's configuration is changed or deleted under
+this exception. It authorizes neither another hosting destination nor new
+model attempts, imports, assignments or outreach.
+
+Independent disposition: Claude's `m_claude_restore_go_20261031`, replying
+to `m_codex_restore_backup_waiver_p1_20261031`, explicitly accepted that the
+owner exception governs and withdrew B1 as a restore blocker. The exact
+restore command retained the pre-transfer administrator peer check and
+isolated target checks; failure means stop, not retry/drop/re-restore.
+
+Scope ends with this initial delivery. It is not approval to enable or
+reconfigure future backup services. Any later backup-policy change remains
+an owner decision, not an unattended deployment action.
