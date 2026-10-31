@@ -64,7 +64,13 @@ defmodule SdrAgent.AI.ClaudeCLIPinnedExecutableTest do
 
     test "only config/test.exs compiles the test seams in" do
       for file <- Path.wildcard("config/*.exs"), file != "config/test.exs" do
-        refute File.read!(file) =~ "claude_cli_test_seams", file
+        if file == "config/hosted_prototype.exs" do
+          config = Config.Reader.read!(file, env: :hosted_prototype, target: :host)
+          app = Keyword.fetch!(config, :sdr_agent)
+          assert Keyword.fetch(app, :claude_cli_test_seams) === {:ok, false}, file
+        else
+          refute File.read!(file) =~ "claude_cli_test_seams", file
+        end
       end
 
       assert File.read!("config/test.exs") =~ "config :sdr_agent, :claude_cli_test_seams, true"
