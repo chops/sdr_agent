@@ -191,11 +191,58 @@ defmodule SdrAgent.Prototype.RelocationFenceTest do
       assert result == {:error, :relocation_fenced}, "reserve on the source: #{inspect(result)}"
     end
 
-    test "aborted after the fence lifts it", ctx do
+    # r3b M2 (Codex bbb5c558): interim post-fence abort refusal; fork-safe abort is S-B1b.
+    test "aborted after the fence is refused (r3b M2 interim; S-B1b)", ctx do
       relocation = fenced!(ctx)
-      owner_run!(ctx, ctx.original, fn -> append!(ctx, relocation, [:aborted]) end)
-      result = G.reserve(ctx.fx, ctx.run)
-      assert match?({:ok, %ModelInvocation{}}, result), "reserve after abort: #{inspect(result)}"
+      before = {abort_rows(relocation), abort_events(ctx, relocation)}
+
+      result =
+        owner_run!(ctx, ctx.original, fn ->
+          @event
+          |> Ash.Changeset.for_create(
+            :append,
+            %{relocation_id: relocation.id, kind: :aborted},
+            owner(ctx.fx)
+          )
+          |> Ash.create()
+        end)
+
+      assert match?({:error, %Ash.Error.Invalid{}}, result),
+             "post-fence abort: expected Invalid, got #{inspect(result)}"
+
+      assert {abort_rows(relocation), abort_events(ctx, relocation)} == before,
+             "the refused abort wrote a row or ledger event"
+
+      assert PrototypeFixtures.put_live_identity(ctx.original) == :ok
+      reserved = G.reserve(ctx.fx, ctx.run)
+
+      assert reserved == {:error, :relocation_fenced},
+             "reserve after refusal: #{inspect(reserved)}"
+    end
+
+    defp abort_rows(relocation) do
+      table = AshPostgres.DataLayer.Info.table(@event)
+
+      %{rows: [[n]]} =
+        Repo.query!(
+          "SELECT count(*) FROM #{table} WHERE relocation_id = $1 AND kind::text = 'aborted'",
+          [Ecto.UUID.dump!(relocation.id)]
+        )
+
+      n
+    end
+
+    defp abort_events(ctx, relocation) do
+      %{rows: [[n]]} =
+        Repo.query!(
+          "SELECT count(*) FROM audit_events WHERE tenant_id = $1 " <>
+            "AND event_type = 'prototype.relocation.event_appended' " <>
+            "AND payload -> 'changes' ->> 'relocation_id' = $2 " <>
+            "AND payload -> 'changes' ->> 'kind' = 'aborted'",
+          [Ecto.UUID.dump!(ctx.fx.tenant.id), relocation.id]
+        )
+
+      n
     end
   end
 

@@ -453,16 +453,20 @@ defmodule SdrAgent.Prototype.RelocationChainTest do
       chain!(ctx, relocation, [:planned, :aborted])
     end
 
-    test "abort after the fence, with nothing restored, needs no destination_disabled", ctx do
+    # r3b M2 (Codex bbb5c558): interim post-fence abort refusal; fork-safe abort is S-B1b.
+    test "abort after the fence, with nothing restored, is refused, writing no row", ctx do
       relocation = relocation!(ctx)
-      chain!(ctx, relocation, [:planned, :writers_stopped, :fenced, :aborted])
+      chain!(ctx, relocation, [:planned, :writers_stopped, :fenced])
+      refused_invalid!(ctx, relocation, :aborted)
     end
 
-    test "after restored, abort is refused until destination_disabled exists", ctx do
+    # r3b M2 (Codex bbb5c558): interim post-fence abort refusal; fork-safe abort is S-B1b.
+    test "after restored, abort is refused before and after destination_disabled", ctx do
       relocation = relocation!(ctx)
       chain!(ctx, relocation, [:planned, :writers_stopped, :fenced, :restored])
       refused_invalid!(ctx, relocation, :aborted)
-      chain!(ctx, relocation, [:destination_disabled, :aborted])
+      chain!(ctx, relocation, [:destination_disabled])
+      refused_invalid!(ctx, relocation, :aborted)
     end
 
     test "destination_disabled requires restored", ctx do

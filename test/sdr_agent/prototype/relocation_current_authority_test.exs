@@ -8,8 +8,9 @@ defmodule SdrAgent.Prototype.RelocationCurrentAuthorityTest do
 
   - an identity is `%{database:, database_oid:, system_identifier:}`;
   - a chain is a list of relocations
-    `%{relocation_seq:, from_identity:, to_identity:, events: [%{kind:, identity:}]}`,
-    each relocation's events in recorded order;
+    `%{relocation_seq:, from_identity:, to_identity:, events: [%{kind:, identity:, position:}]}`;
+    r5 M3: each event carries its serialized `position`, and order is by
+    position only, never list order, timestamp or UUID;
   - `identity(chain, original)` is `{:ok, identity}`: the original with no
     activation, else the `to_identity` of the highest-seq relocation holding
     an `:activated` event; a chain with two `:activated` events in one
@@ -47,8 +48,16 @@ defmodule SdrAgent.Prototype.RelocationCurrentAuthorityTest do
 
   defp ev(kind, identity), do: %{kind: kind, identity: identity}
 
+  # r5 M3: pure fixtures carry `position`; an event without one is numbered
+  # by its list order (1 first).
   defp relocation(seq, from, to, events),
-    do: %{relocation_seq: seq, from_identity: from, to_identity: to, events: events}
+    do: %{relocation_seq: seq, from_identity: from, to_identity: to, events: numbered(events)}
+
+  defp numbered(events) do
+    events
+    |> Enum.with_index(1)
+    |> Enum.map(fn {event, index} -> Map.put_new(event, :position, index) end)
+  end
 
   # The source-side prefix of a relocation from `from`.
   defp fenced_prefix(from),
@@ -98,7 +107,7 @@ defmodule SdrAgent.Prototype.RelocationCurrentAuthorityTest do
 
     test "two activated events in one relocation make the chain invalid" do
       twice = activated(1, @a, @b)
-      chain = [%{twice | events: twice.events ++ [ev(:activated, @b)]}]
+      chain = [%{twice | events: twice.events ++ [Map.put(ev(:activated, @b), :position, 6)]}]
       assert call(:identity, [chain, @a]) == {:error, :chain_invalid}
     end
 
@@ -143,7 +152,7 @@ defmodule SdrAgent.Prototype.RelocationCurrentAuthorityTest do
 
     test "an invalid chain is spendable for no identity" do
       twice = activated(1, @a, @b)
-      chain = [%{twice | events: twice.events ++ [ev(:activated, @b)]}]
+      chain = [%{twice | events: twice.events ++ [Map.put(ev(:activated, @b), :position, 6)]}]
 
       for live <- [@a, @b, @c] do
         refute call(:spendable?, [chain, @a, live]),
@@ -189,6 +198,47 @@ defmodule SdrAgent.Prototype.RelocationCurrentAuthorityTest do
     test "an aborted recorded before the fenced event does not lift it" do
       chain = [relocation(1, @a, @b, [ev(:planned, @a), ev(:aborted, @a), ev(:fenced, @a)])]
       assert call(:fenced?, [chain, @a])
+    end
+  end
+
+  ## r5 M3: order is by position only (Codex 85b05b45 M3)
+
+  describe "fenced? orders events by position, not list order or recorded_at" do
+    # An event at `position` whose recorded_at runs BACKWARDS with position
+    # (a pre-lock timestamp), so neither list nor time order is the truth.
+    defp at(kind, identity, position) do
+      %{
+        kind: kind,
+        identity: identity,
+        position: position,
+        recorded_at: DateTime.add(~U[2026-10-31 00:00:00.000000Z], -position, :second)
+      }
+    end
+
+    test "an aborted at a LATER position lifts the fence, though listed first" do
+      events = [
+        at(:aborted, @a, 4),
+        at(:fenced, @a, 3),
+        at(:writers_stopped, @a, 2),
+        at(:planned, @a, 1)
+      ]
+
+      refute call(:fenced?, [[relocation(1, @a, @b, events)], @a]),
+             "the fence was read in list order, not by position"
+    end
+
+    test "an aborted at an EARLIER position does not lift the fence, though listed after it" do
+      # Codex's M3 schedule: the abort was serialized first (position 3)
+      # but listed after the fence by its later pre-lock timestamp.
+      events = [
+        at(:planned, @a, 1),
+        at(:writers_stopped, @a, 2),
+        at(:fenced, @a, 4),
+        at(:aborted, @a, 3)
+      ]
+
+      assert call(:fenced?, [[relocation(1, @a, @b, events)], @a]),
+             "an abort serialized before the fence lifted it"
     end
   end
 end
