@@ -135,11 +135,15 @@ defmodule SdrAgent.AI.ModelProvider do
   Performs the call. `{:ok, %{output, raw_response}}` (optional `:usage`)
   is a reply to validate; `{:error, reason}` is a known failure;
   `{:unknown, reason}` means the outcome is not known, and the call is
-  never repeated. Anything else is treated as malformed (see the module
-  doc).
+  never repeated. `:remote_dispatched` (S-B4) means the call was handed to
+  the enrolled Mac worker through its RemoteModelCall; the facade accepts it
+  only from `SdrAgent.AI.ModelProvider.ClaudeCLI.Remote` and only for an
+  invocation that has a RemoteModelCall, then waits for the settler's
+  outcome. Anything else, including `:remote_dispatched` from any other
+  provider, is treated as malformed (see the module doc).
   """
   @callback complete(request(), keyword()) ::
-              {:ok, result()} | {:error, term()} | {:unknown, term()}
+              {:ok, result()} | {:error, term()} | {:unknown, term()} | :remote_dispatched
 
   @doc """
   Completes one structured model request and persists its full lifecycle.

@@ -1,0 +1,68 @@
+flowchart LR
+    subgraph Hosted[Hosted SDR runtime - prototype authority compiled]
+        Caller[SDR.Model.call/4<br/>agent run, running]
+        Facade[AI.ModelProvider facade<br/>reserve then complete]
+        Runtime[ModelProvider.Runtime<br/>transport :remote]
+        RemoteProv[ClaudeCLI.Remote<br/>prepare: worker, intake, pins, launch bound]
+        WorkerView[Operations.remote_worker_status/1<br/>current binding, agent_runtime actor]
+        Reserve[Agents.reserve_model_invocation<br/>CreateRemoteCall + check_request bound]
+        Invocation[(ModelInvocation<br/>reserved / sent / terminal)]
+        Call[(RemoteModelCall<br/>pending / claimed / completed / expired)]
+        Wait[Bounded wait<br/>no tx, lock or connection; monotonic; poll + audit event]
+        Gate[ResultGate.gate<br/>release-gated read only]
+        Intake[WorkerIntake plug<br/>POST, JSON object, 13 MiB cap]
+        Controller[WorkerController<br/>bearer token; fixed error codes]
+        RemoteCalls[Agents.RemoteCalls<br/>heartbeat / claim / complete under locks]
+        Result[(RemoteCallResult<br/>immutable transcript)]
+        Settler[RemoteSettler Oban cron<br/>settle_due: kernel + :remote_settler marker]
+        Finish[Agents finish actions<br/>complete / fail / mark_unknown]
+        Run[(AgentRun budget<br/>BudgetCounter: running only)]
+        Ledger[(Audit ledger)]
+        Release[(ModelResultRelease)]
+    end
+
+    subgraph Mac[Owner Mac - ordinary standalone VM]
+        MacAgent[mix sdr.mac_agent<br/>outbound HTTPS only]
+        CLI[Pinned claude CLI<br/>one launch per claimed call]
+    end
+
+    Local[Local transport only:<br/>ProfileSupervisor, server, reaper, shim]
+
+    Caller --> Facade
+    Facade --> Runtime
+    Runtime -- resolve: Remote, no local server --> RemoteProv
+    Runtime -. status/0 observational .-> WorkerView
+    RemoteProv --> WorkerView
+    Facade -- prepare ok --> Reserve
+    Reserve --> Invocation
+    Reserve --> Call
+    Facade -- :remote_dispatched only from ClaudeCLI.Remote --> Wait
+    Wait -- completed --> Gate
+    Gate -- released read --> Caller
+    Gate --> Release
+    Wait -- timeout: run fails remote_wait_timeout --> Run
+
+    MacAgent -- heartbeat / claim / complete --> Intake
+    Intake --> Controller
+    Controller --> RemoteCalls
+    RemoteCalls -- claim: launch bytes or call null --> Controller
+    Controller -- launch --> MacAgent
+    MacAgent --> CLI
+    CLI -- stream-json transcript --> MacAgent
+    RemoteCalls --> Call
+    RemoteCalls -- complete --> Result
+
+    Settler --> RemoteCalls
+    RemoteCalls -- expire / settle from stored transcript --> Finish
+    Finish --> Invocation
+    Finish -- running run: settle_model_call --> Run
+    Finish -. terminal run: ledger-only under private settler capability .-> Invocation
+    Finish --> Ledger
+    Invocation -- audit event wakes --> Wait
+
+    Runtime -. transport :local only .-> Local
+
+    %% Production build without prototype authority: prepare refuses provider_not_running,
+    %% worker view absent, no settler, no terminal-settle clause.
+    %% Late results are recorded but never released into or resume a terminal run.
+    %% Source + focused evidence only; not deployment or live end-to-end.
