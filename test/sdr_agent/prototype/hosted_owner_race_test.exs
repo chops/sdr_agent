@@ -217,6 +217,79 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
     end
   end
 
+  # W2 RED (steps 60407d82 item 2): the claim waits on the retained audit
+  # head while the owner disable commits, then rechecks and emits nothing.
+  test "remote claim waiting at head is refused after owner disable commits", ctx do
+    admin = SdrAgent.AuditCase.human(:admin, ctx.fx.tenant)
+    :ok = SdrAgent.AgentsFixtures.ensure_offering!(ctx.fx.tenant)
+    definition = SdrAgent.AgentsFixtures.definition!(ctx.fx.tenant)
+    agent = SdrAgent.Actor.system(:agent_runtime, ctx.fx.tenant.id)
+    fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
+    f = SdrAgent.RemoteCallFixtures
+    f.remote!()
+    %{token: token, worker: worker} = f.enrol!(fx)
+    enrolled = H.enrol!(ctx)
+    H.enter!(ctx)
+    grant = SdrAgent.PrototypeGateFixtures.provision!(fx)
+    run = SdrAgent.PrototypeGateFixtures.run!(fx)
+    invocation = f.reserve!(Map.merge(fx, %{grant: grant, run: run}))
+    assert %{"state" => "pending"} = f.call_of(invocation.id)
+    parent = self()
+
+    holder =
+      Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        with_connection(fn ->
+          :ok = PrototypeFixtures.leave_runtime()
+          :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+
+          SdrAgent.Audit.transaction(fn ->
+            assert {:ok, _} = SdrAgent.Audit.Kernel.lock_head(ctx.fx.tenant.id)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:claim_head_held, backend})
+
+            receive do
+              :disable_owner -> H.disable(ctx, enrolled.owner.id)
+            after
+              @bound -> flunk("claim disable barrier timed out")
+            end
+          end)
+        end)
+      end)
+
+    try do
+      assert_receive {:claim_head_held, holder_backend}, @bound
+
+      claimer =
+        Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+          with_connection(fn ->
+            H.enter!(ctx)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:claim_backend, backend})
+            f.claim(token, f.nonce())
+          end)
+        end)
+
+      try do
+        assert_receive {:claim_backend, backend}, @bound
+        await_head_holder(backend, holder_backend)
+        send(holder.pid, :disable_owner)
+        assert {:ok, {:ok, {:ok, _}}} = Task.yield(holder, @bound)
+        assert {:ok, {:error, :owner_unavailable} = refused} = Task.yield(claimer, @bound)
+        refute inspect(refused) =~ f.prompt_marker()
+        call = f.call_of(invocation.id)
+        assert call["state"] == "pending"
+        assert call["worker_id"] == nil
+        assert f.invocation(invocation.id).status == :reserved
+        assert f.count(f.nonce_resource(), "worker_id = $1", [f.dump(worker.id)]) == 0
+        assert f.subject_count(fx, "remote_call.claimed", f.load(call["id"])) == 0
+      after
+        Task.shutdown(claimer, :brutal_kill)
+      end
+    after
+      Task.shutdown(holder, :brutal_kill)
+    end
+  end
+
   defp await_head_holder(backend, holder, attempts \\ 400)
 
   defp await_head_holder(_backend, _holder, 0),
