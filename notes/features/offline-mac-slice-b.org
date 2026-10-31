@@ -859,6 +859,11 @@ Source review remains required. Full gate at f0d46454 passed workflow,
 format, compile, codegen and plain Credo, then stopped at the known
 dependency audit before DB effects. ADR-0008 patch 35dbf73e / PR244 awaits
 owner acceptance; no advisory ignored and no dependency upgrade assumed.
+Integrated c84c14a7 at 759b0628. First production WAE exposed a constant
+false/true comparison in HumanAuthority's ordinary provider (no behavior
+grant). Bind constant-deny branches at compile time for Ordinary/Unavailable;
+dynamic provider callbacks still reject non-true results and exceptions.
+After correction, prod/test/dev WAE all rc0 (2026-10-31T08:20Z).
 
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
