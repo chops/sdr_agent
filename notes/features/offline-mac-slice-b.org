@@ -816,6 +816,18 @@ only through the prototype gate) extends to claude_cli transport :remote.
 6. Later, a separate approval: one remaining import slot plus one assign
    as the live check. Pick: decide after the slices land.
 
+* S-B5 UI reviewer amendment T1 (2026-10-31T17:09Z)
+Claude source review19d83e22 PASS with doc nit N1, envelope
+m_179346648445368_2e18ddbc (review75e1c65c). UI Phase4b GO conditioned on
+T1, envelope m_1793466484463878_9a1c20a0 (review3bb490cb).
+T1 adds owner-on-run-A forged transcript request for same-tenant run-B call:
+no display, flash error, zero accesses. Test-only RED verified in leased run
+x2-20261031T170921Z-83244:0/10, all intended missing-behavior assertions,
+no setup/runtime errors, skipped0/excluded0, owned database pair dropped.
+Existing nine RED tests unchanged except shared setup adds a second run
+only for T1. No production behavior changed for this checkpoint. Conditional
+independent GO permits the previously approved minimal UI GREEN next.
+
 * S-B5 enrollment and human boundary checkpoint (2026-10-31)
 
 Source-only synthetic implementation in codex/offline-hosted-owner-green,

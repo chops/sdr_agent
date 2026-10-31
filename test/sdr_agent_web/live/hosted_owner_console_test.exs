@@ -46,7 +46,11 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
         assert F.kind(F.complete(token, nonce, launch.call_id, launch.request_sha256, @bytes)) ==
                  :accepted
 
-        %{run: run, call_id: launch.call_id}
+        %{
+          run: run,
+          call_id: launch.call_id,
+          other_run: if(tags[:foreign_transcript], do: G.run!(fx))
+        }
       else
         %{}
       end
@@ -157,6 +161,25 @@ defmodule SdrAgentWeb.HostedOwnerConsoleTest do
     send(view.pid, :live_refresh)
     refute render(view) =~ "PRIVATE_UI_TRANSCRIPT"
     assert accesses() == [[1]]
+  end
+
+  @tag :transcript
+  @tag :foreign_transcript
+  test "owner cannot request a transcript from another run in the same tenant", ctx do
+    assert function_exported?(Scope, :hosted_owner?, 1), "missing owner presentation boundary"
+    assert ctx.other_run.id != ctx.run.id
+    assert ctx.other_run.tenant_id == ctx.run.tenant_id
+
+    {:ok, view, html} =
+      ctx.conn |> signed_conn(ctx.token) |> live("/runs/#{ctx.other_run.id}")
+
+    refute html =~ "PRIVATE_UI_TRANSCRIPT"
+    refute has_element?(view, "#show-remote-transcript-#{ctx.call_id}")
+    assert accesses() == [[0]]
+    render_click(view, "show_remote_transcript", %{"id" => ctx.call_id})
+    refute render(view) =~ "PRIVATE_UI_TRANSCRIPT"
+    assert has_element?(view, "#flash-error")
+    assert accesses() == [[0]]
   end
 
   @tag :transcript
