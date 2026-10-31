@@ -124,3 +124,16 @@ heartbeat), and revoking it takes effect at the next request.
   - Each slice follows RED, then a Codex GO, then GREEN.
 - The existing hosted synthetic service, AgentBuilder and the retained
   5542 cluster stay untouched until an approved cutover.
+
+## Implementation limitation (2026-10-31, proposed)
+
+**Status: proposed.** This note leaves the decision above and its acceptance (D-270) unchanged.
+
+The S-B1 implementation refuses every `aborted` once `fenced` is recorded (Codex reviews 85b05b45 and
+bbb5c558, entity PASS r3b). The approved end state is an abort that is safe across the forked copies. It needs
+verified evidence that the destination was disabled, and that evidence cannot come from the source's own
+history. That part is slice S-B1b: incomplete, owned by Claude, and pending its own entity/contract review and
+owner approval.
+
+Until S-B1b lands, a source fenced by a failed move stays fenced. That is fail-closed: availability is lost,
+safety is not. Whether a milestone may ship with this reduced availability is the owner's decision.

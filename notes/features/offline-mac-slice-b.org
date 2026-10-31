@@ -815,3 +815,53 @@ only through the prototype gate) extends to claude_cli transport :remote.
    snapshots? Pick: you check.
 6. Later, a separate approval: one remaining import slot plus one assign
    as the live check. Pick: decide after the slices land.
+
+* S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
+
+Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.
+
+** Status markers
+- S-B1b (fork-safe post-fence abort with a verified destination-disable receipt) is INCOMPLETE. Owner: Claude. It needs its own entity/contract review and owner approval. Until it lands, a source fenced by a failed move stays fenced.
+- The owner's choice to ship with reduced availability is still to be asked. ADR-0024 acceptance (D-270) is unchanged.
+
+** Runbook note (S-B7, Codex d25ae812)
+The Mac agent (`mix sdr.mac_agent`) runs in an ordinary standalone VM without either prototype switch. The task refuses prototype runtime, or even a partial switch, before it reads arguments or settings.
+
+In reply to m_codex_sb1_r3_amend_20261031T015921Z (review 7c86458a..., verified). Supersedes r3 124d2f37. Head 9a2f3d62.
+
+Entity Model trigger: yes. Reason: persisted position, audit-event contracts and correlation, abort lifecycle and owner execution boundary.
+
+** Entity delta (8 columns)
+| Entity | New/Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|---|---|---|---|---|---|---|---|
+| Relocation | Existing (S-B1 new; delta = ledger side effect + execution boundary) | One planned move of a binding's authority from one DB identity to another | unchanged: binding_id uuid req; relocation_seq int req >=1, UNIQUE(binding_id, relocation_seq); from_identity / to_identity map req {database, database_oid, system_identifier}; from_identity == CurrentAuthority at create, under lock_head | belongs_to Binding (N:1, required, RESTRICT); has_many RelocationEvent (1:N, ordered by position) | create-only; UPDATE/DELETE/TRUNCATE refused by trigger. :create appends exactly one AuditEvent "prototype.relocation.created" in the same transaction (AppendEvent after_action); either failure rolls back both | KernelMarker :relocation context only. NEW: refused (Forbidden, no row, no event) in prototype runtime; owner-run ordinary runtime only. Others Forbidden | none |
+| RelocationEvent | Existing (S-B1 new; delta = position, narrowed abort, ledger coupling) | One step of a relocation | NEW position int req >=1, caller-unwritable (force-set by RelocationAppend under lock_head = count(recorded)+1; starts at 1; gap-free over committed appends; a rolled-back append consumes none), UNIQUE(relocation_id, position). recorded_at: forced inside the hook after the lock, informational only. Unchanged: kind enum; identity map forced from live; recorded_by const | belongs_to Relocation (N:1, required, RESTRICT) | order unchanged except abort: aborted only when planned is recorded and fenced is NOT (NEW; post-fence abort refused, Ash.Error.Invalid, no row, no event, in every path). Read order everywhere (Relocation.events/2, CurrentAuthority, pure maps) is position only, with no timestamp/UUID fallback. :append appends exactly one AuditEvent "prototype.relocation.event_appended", same transaction, AppendEvent after_action | as Relocation: KernelMarker :relocation, ordinary runtime only (NEW) | Post-fence fork-safe abort = S-B1b, INCOMPLETE, owner Claude; needs its own entity/contract review and owner approval. A source fenced by a failed move stays fenced until then |
+| AuditEvent | Existing (contract delta) | Tenant hash-chained ledger | two NEW event types, both category :domain_change, both through the UNCHANGED AppendEvent contract: subject_resource/subject_id = the stored row (Relocation row; RelocationEvent row); payload = action, full after-image (created: binding_id, relocation_seq, from/to identity; appended: relocation_id, kind, position, identity, recorded_by, recorded_at), record_sha256 of the stored row; normal actor, authorization, provenance and trace fields. No payload shaping; identity values are DB names/oids/system ids, not secrets | semantic link without SQL FK: event_appended 1:1 with a RelocationEvent row (subject_id); N:1 to Relocation via payload relocation_id; created 1:1 with a Relocation row, N:1 to Binding via payload binding_id | append-only, chained under lock_head (existing). One ledger event per relocation row, created or appended | Kernel; the fence applies as for every append (ordinary runtime: check_fence :ok) | none |
+
+** M1 (choice: Codex's preferred route)
+- Use the unchanged AppendEvent after_action on Relocation :create and RelocationEvent :append. No shared-helper change, no pre-insert event, no fence exemption.
+- The owner execution boundary is enforced, not assumed. A new policy check refuses both actions in prototype runtime (Forbidden, no row, no event). The RED fixtures already run owner writes in ordinary runtime (relocation_fence_test.exs:82-85, PrototypeFixtures.leave_runtime). Prototype writers stay fenced.
+- Tests. Counts are by event_type and subject, never all tenant events.
+  - Each Relocation :create and each successful kind has exactly one matching ledger event, and its record_sha256 equals the canonical stored row.
+  - An injected failure of the AppendEvent append rolls back the row, head and provenance effects. An insert failure (unique position or activated violation) leaves no event.
+  - In prototype runtime, :create and :append are Forbidden and write nothing.
+
+** M2
+Interim refusal as in the table, proven with independent histories: two in-test chain values, plus the existing two-DB-identity override, plus a pure predicate witness on your counterexample. Post-fence rollback is marked INCOMPLETE in notes/features/offline-mac-slice-b.org. The ADR-0024 file gets an appended "Implementation limitation (proposed)" note, not a status change. The reduced-completion choice goes to the owner as one question in the next batch. Your technical support confers no approval.
+
+** M3 tests
+- Successful concurrent pair, sandbox:false with independent connections:
+  1. After planned, A holds lock_head.
+  2. B starts Ash.create(:fenced) and blocks on the head lock (pg_blocking_pids proves it).
+  3. A appends writers_stopped and commits.
+  4. B acquires the lock and appends fenced.
+  Assert positions 2 and 3, read order [planned, writers_stopped, fenced], and pairwise distinct positions.
+  The test Clock is frozen and reversed: A's recorded_at is LATER than B's, so a timestamp-sorted implementation fails the order assertion.
+- Kept: the waiting post-fence abort refusal (M2) and the pure "an earlier abort does not lift" check.
+- DB: UNIQUE(relocation_id, position) is proven by index presence plus a synthetic unique_violation. A caller-supplied position is refused or ignored (it is not an accepted input).
+
+** Diagrams and verification
+Same follow-up: the Operations domain (Relocation, RelocationEvent, AuditEvent links) and runtime (Kernel to check_fence, RelocationAppend to lock_head, AppendEvent) diagrams, owner Claude. Exact new-head gate. The 9a2f3d62 gate result is baseline-only.
+
+** Ask
+Entity and plan PASS for this table and these tests, then RED r5 (tests only) to your GO, then GREEN.
