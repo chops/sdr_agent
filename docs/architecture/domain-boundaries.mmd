@@ -189,6 +189,8 @@ graph TB
     %% Project shape: single
     %% Layering (ADR-0009): Audit <- Accounts <- Operations <- Agents <- Sales <- Research <- Outreach
     User -- "lower-owned role and scoped-write policy checks" --> HumanAuthority
+    Tenant -- "lower-owned human freshness and hosted identity; owner row by tenant id" --> HumanAuthority
+    ProvenanceSnapshot -- "lower-owned human freshness; global snapshot" --> HumanAuthority
     HumanAuthority -. "ordinary build" .-> OrdinaryAuthority
     HumanAuthority -. "authority-compiled build; explicit compile-time provider" .-> HostedOwnerPolicy
     HostedOwnerPolicy -- "fresh identity; any owner history precedence" --> HostedOwner

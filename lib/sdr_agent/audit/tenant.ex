@@ -74,13 +74,13 @@ defmodule SdrAgent.Audit.Tenant do
 
     # S-B5: independent human identity restriction; actor_present below
     # retains its existing system/delegation behavior, never a human bypass.
-    policy [action_type(:read), SdrAgent.Prototype.Checks.HumanActor] do
+    policy [action_type(:read), Checks.HumanActor] do
       access_type :strict
-      forbid_unless SdrAgent.Prototype.Checks.HumanRead
+      forbid_unless Checks.HumanRead
       authorize_if always()
     end
 
-    policy [action_type(:read), SdrAgent.Operations.Checks.HostedOwnerAccess] do
+    policy [action_type(:read), Checks.HostedOwnerAccess] do
       authorize_if expr(id == ^actor(:tenant_id))
     end
 

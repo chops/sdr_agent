@@ -865,6 +865,24 @@ grant). Bind constant-deny branches at compile time for Ordinary/Unavailable;
 dynamic provider callbacks still reject non-true results and exceptions.
 After correction, prod/test/dev WAE all rc0 (2026-10-31T08:20Z).
 
+R1 source review a829a41d found remaining lower metadata edges through upper
+HumanRead/HostedOwnerAccess. Plan daac0fd5 PASS+RED GO
+m_1793435028000000000_3a926ebc; RED x2-20261031T082907Z-976:
+4 intended assertion failures; GREEN GO m_1793435441000000000_657f8e9c.
+HumanAuthority now owns human_read?/1 and hosted_owner?/1 callbacks too;
+Audit-owned pure HumanActor and delegated HumanRead/HostedOwnerAccess checks
+remove all Operations/Prototype.Checks names from Audit source. Exact Tenant
+id filter and global provenance semantics are unchanged. Ordinary accepts
+only User metadata and no hosted owner; Unavailable denies both. A synchronous
+test temporarily compiles the unavailable provider into the interface for
+actual resource reads, restoring the original BEAM in after. GREEN
+x2-20261031T083432Z-26116:23/23 including the4 new metadata checks,5 original
+interface checks and14 worker/race checks, no skips/exclusions, DBs dropped.
+Prod/test/dev WAE rc0; format/plainCredo/codegen rc0. Source review required.
+Generic diagram preview sb5-diagrams-o4oGMz was reviewed; inaccurate generic
+counts and missing runtime conditions were not substituted for maintained
+diagrams. Lower metadata edges are explicitly maintained instead.
+
 ** Remaining controls: worker RED
 
 Entity48dfc516 PASS with W1-W4 (Claude051bc596,

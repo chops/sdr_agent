@@ -12,5 +12,5 @@ defmodule SdrAgent.Prototype.Checks.HumanRead do
 
   @impl true
   def match?(actor, _authorizer, _opts),
-    do: SdrAgent.Operations.HostedOwners.human_read?(actor)
+    do: SdrAgent.Audit.HumanAuthority.human_read?(actor)
 end

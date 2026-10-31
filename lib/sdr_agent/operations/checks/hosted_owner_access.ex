@@ -11,5 +11,5 @@ defmodule SdrAgent.Operations.Checks.HostedOwnerAccess do
 
   @impl true
   def match?(actor, _authorizer, _opts),
-    do: SdrAgent.Operations.HostedOwners.active?(actor)
+    do: SdrAgent.Audit.HumanAuthority.hosted_owner?(actor)
 end

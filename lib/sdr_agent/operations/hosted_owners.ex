@@ -182,6 +182,9 @@ defmodule SdrAgent.Operations.HostedOwners do
 
     def active?(_actor), do: false
 
+    @impl true
+    def hosted_owner?(actor), do: active?(actor)
+
     @doc """
     Validates the retained legacy prototype human path against persisted
     identity. ANY owner association, including disabled history, takes
@@ -211,6 +214,7 @@ defmodule SdrAgent.Operations.HostedOwners do
     def role_allowed?(_actor), do: false
 
     @doc "Fresh hosted or validated legacy human metadata access; ordinary runtime is unchanged."
+    @impl true
     def human_read?(%User{} = actor) do
       Prototype.runtime() == :ordinary or active?(actor) or legacy_human?(actor)
     end
@@ -492,11 +496,14 @@ defmodule SdrAgent.Operations.HostedOwners do
     def disable(_id, _opts), do: {:error, :not_prototype_runtime}
     @doc "No hosted authority in an ordinary production build."
     def active?(_actor), do: false
+    @impl true
+    def hosted_owner?(_actor), do: false
     @doc "No prototype legacy-human resolver in an ordinary production build."
     def legacy_human?(_actor), do: false
     @impl true
     def role_allowed?(_actor), do: false
     @doc "Ordinary human metadata semantics are unchanged."
+    @impl true
     def human_read?(%SdrAgent.Accounts.User{}), do: true
     def human_read?(_actor), do: false
     @doc "Ordinary browser authentication remains available."

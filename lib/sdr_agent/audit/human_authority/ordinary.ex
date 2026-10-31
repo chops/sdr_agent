@@ -12,4 +12,11 @@ defmodule SdrAgent.Audit.HumanAuthority.Ordinary do
 
   @impl true
   def valid_write_scope?(_actor, _subject), do: false
+
+  @impl true
+  def human_read?(%SdrAgent.Accounts.User{}), do: true
+  def human_read?(_actor), do: false
+
+  @impl true
+  def hosted_owner?(_actor), do: false
 end

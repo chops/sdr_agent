@@ -1,7 +1,8 @@
 defmodule SdrAgent.Audit.HumanAuthority do
   @moduledoc """
-  Lower-owned interface for human role eligibility and the narrow hosted
-  User write scope (ADR-0009 layering). It confers no role by itself:
+  Lower-owned interface for human role eligibility, metadata freshness,
+  hosted-owner identity and the narrow User write scope (ADR-0009 layering).
+  It confers no role by itself:
   ActorRole still checks the requested role list, and scoped actions still
   enforce their own resource policies.
 
@@ -15,6 +16,8 @@ defmodule SdrAgent.Audit.HumanAuthority do
 
   @callback role_allowed?(term()) :: boolean()
   @callback valid_write_scope?(term(), term()) :: boolean()
+  @callback human_read?(term()) :: boolean()
+  @callback hosted_owner?(term()) :: boolean()
 
   @default_provider if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false),
                       do: __MODULE__.Unavailable,
@@ -42,6 +45,32 @@ defmodule SdrAgent.Audit.HumanAuthority do
   else
     def valid_write_scope?(actor, subject) do
       @provider.valid_write_scope?(actor, subject) == true
+    rescue
+      _error -> false
+    catch
+      _kind, _reason -> false
+    end
+  end
+
+  @doc "Fresh human metadata eligibility; the resource still decides its row and action grants."
+  if @provider == __MODULE__.Unavailable do
+    def human_read?(_actor), do: false
+  else
+    def human_read?(actor) do
+      @provider.human_read?(actor) == true
+    rescue
+      _error -> false
+    catch
+      _kind, _reason -> false
+    end
+  end
+
+  @doc "Whether the User is the currently live hosted owner; ordinary builds always refuse."
+  if @provider in [__MODULE__.Ordinary, __MODULE__.Unavailable] do
+    def hosted_owner?(_actor), do: false
+  else
+    def hosted_owner?(actor) do
+      @provider.hosted_owner?(actor) == true
     rescue
       _error -> false
     catch
