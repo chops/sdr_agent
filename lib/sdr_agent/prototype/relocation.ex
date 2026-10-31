@@ -49,7 +49,9 @@ defmodule SdrAgent.Prototype.Relocation do
 
   @authority_compiled Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
   @test_seams Application.compile_env(:sdr_agent, :prototype_test_seams, false)
-  @chain_seams @authority_compiled == true and @test_seams == true
+  # Enum.all?/2 reads both attributes; `and` would leave @test_seams unread
+  # (an unused-attribute warning) when the authority is not compiled.
+  @chain_seams Enum.all?([@authority_compiled, @test_seams], &(&1 == true))
 
   @identity_constraints [
     fields: [
