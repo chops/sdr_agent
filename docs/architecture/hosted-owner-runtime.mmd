@@ -22,6 +22,8 @@ flowchart LR
     TranscriptScope[Private named-action read scope<br/>process + transaction + actor + call]
     Transcript[(RemoteCallResult<br/>immutable sensitive bytes)]
     Diagnostic[Explicit diagnostic result after commit<br/>not released business output]
+    OwnerUI[Existing console LiveViews<br/>fresh owner presentation, not inherited roles]
+    RunMetadata[Run-scoped remote call metadata<br/>no transcript bytes]
 
     Console -- marked enrollment / disable --> Operations
     Operations --> Scope
@@ -50,6 +52,11 @@ flowchart LR
     WebPrincipal[Hosted website admission<br/>live owner or exact persisted bound auditor]
     Authority --> WebPrincipal
     WebPrincipal -- login / mount / connected revalidation --> Session
+    Session -- connected owner only --> OwnerUI
+    OwnerUI -- explicit enrollment / pause / resume / disable --> WorkerControl
+    OwnerUI -- current run metadata only --> RunMetadata
+    OwnerUI -- explicit click, fresh current-run membership --> TranscriptReader
+    Diagnostic -- escaped text; cleared on refresh or refusal --> OwnerUI
     Boot --> Owner
     Boot --> Accounts
     Boot --> Tokens
@@ -63,5 +70,8 @@ flowchart LR
 
     %% Source-only implementation, not a deployment or real-data approval.
     %% Owner schema and POST verified on synthetic disposable databases.
-    %% Worker controls and transcript reader are source implemented; claim revocation and owner UI remain pending.
+    %% Owner UI uses existing public domain APIs; ungranted Failure/Operation/Webhook/AuditEvent panels say unavailable.
+    %% Enrollment token displayed once, retained across successful owner metadata reloads until dismissed.
+    %% Refusal/failed reload/new mount clears token; never persisted or logged; browser no-store/no-referrer.
+    %% Claim-time owner revocation remains pending; this is not end-to-end completion.
     %% Ordinary production builds without prototype authority cannot enroll or exchange.

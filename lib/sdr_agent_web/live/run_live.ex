@@ -25,6 +25,12 @@ defmodule SdrAgentWeb.RunLive do
   version; an older run is labelled "not enforced for this run", so the
   registry never implies retroactive enforcement. The run's
   `research_caps` Decision (in the Decisions list) is what was applied.
+
+  Hosted owners see remote-call metadata for this run and can explicitly
+  request an audited diagnostic transcript. Every request rechecks current
+  run membership before the domain reader, and renders escaped text only.
+  Reload/refusal clears content; ungranted audit-signal records are labelled
+  unavailable. Diagnostic disclosure never implies business-output release.
   """
   use SdrAgentWeb, :live_view
 
@@ -68,7 +74,10 @@ defmodule SdrAgentWeb.RunLive do
        loaded?: false,
        withheld: nil,
        not_found?: false,
-       run_id: nil
+       run_id: nil,
+       remote_calls: [],
+       remote_transcript: nil,
+       owner_diagnostics?: false
      )
      |> LiveRefresh.attach(&refresh/1)}
   end
@@ -82,6 +91,7 @@ defmodule SdrAgentWeb.RunLive do
   defp refresh(socket), do: load(socket, socket.assigns.run_id)
 
   defp load(socket, id) do
+    socket = assign(socket, remote_transcript: nil, remote_calls: [])
     scope = socket.assigns.current_scope
     opts = [actor: scope.user]
 
@@ -89,9 +99,10 @@ defmodule SdrAgentWeb.RunLive do
          {:ok, decisions} <- Agents.list_decisions(run.id, opts),
          {:ok, invocations} <- Agents.list_model_invocations(run.id, opts),
          {:ok, tools} <- Agents.list_tool_invocations(run.id, opts),
-         {:ok, events} <- Audit.list_events(opts),
+         {:ok, events} <- run_events(scope, opts),
          {:ok, contact} <- run_contact(run, opts),
          {:ok, runs} <- Agents.list_runs(opts),
+         {:ok, remote_calls} <- remote_calls(scope, run.id, opts),
          :ok <- AuditedView.record(scope, "SdrAgent.Agents.AgentRun", run.id, "agent run view") do
       assign(socket,
         loaded?: true,
@@ -99,11 +110,17 @@ defmodule SdrAgentWeb.RunLive do
         not_found?: false,
         page_title: "Run · #{ConsoleData.contact_name(contact)}",
         run: run,
+        owner_diagnostics?: Scope.hosted_owner?(scope),
+        remote_calls: remote_calls,
         contact: contact,
         decisions: decisions,
         invocations: invocations,
         tools: tools,
-        signals: Enum.filter(events, &(&1.agent_run_id == run.id and &1.category == :signal)),
+        signals:
+          if(is_list(events),
+            do: Enum.filter(events, &(&1.agent_run_id == run.id and &1.category == :signal)),
+            else: :unavailable
+          ),
         budget: budget(run.budget),
         settings: settings_summary(run, scope),
         caps_declared: caps_declared?(run, opts),
@@ -121,6 +138,23 @@ defmodule SdrAgentWeb.RunLive do
   end
 
   @impl true
+  def handle_event("show_remote_transcript", params, socket) do
+    socket = assign(socket, remote_transcript: nil)
+    scope = socket.assigns.current_scope
+    opts = [actor: scope.user]
+    id = Map.get(params, "id")
+
+    with true <- socket.assigns.loaded? and Scope.hosted_owner?(scope),
+         {:ok, calls} <- Agents.list_remote_calls(socket.assigns.run_id, opts),
+         true <- Enum.any?(calls, &(&1.id == id)),
+         {:ok, result} <- Agents.read_remote_transcript(id, opts) do
+      {:noreply, assign(socket, remote_transcript: result.transcript)}
+    else
+      _refused ->
+        {:noreply, put_flash(socket, :error, "This diagnostic transcript is unavailable.")}
+    end
+  end
+
   def handle_event("retry_run", _params, socket) do
     case SDR.retry_run(socket.assigns.run.id, actor: socket.assigns.current_scope.user) do
       {:ok, %{run: run}} ->
@@ -132,6 +166,14 @@ defmodule SdrAgentWeb.RunLive do
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, AuditedView.error_message(reason))}
     end
+  end
+
+  defp remote_calls(scope, run_id, opts) do
+    if Scope.hosted_owner?(scope), do: Agents.list_remote_calls(run_id, opts), else: {:ok, []}
+  end
+
+  defp run_events(scope, opts) do
+    if Scope.hosted_owner?(scope), do: {:ok, :unavailable}, else: Audit.list_events(opts)
   end
 
   defp fetch_run(id, opts) do
@@ -382,6 +424,30 @@ defmodule SdrAgentWeb.RunLive do
           caps_declared={@caps_declared}
         />
 
+        <.card :if={@owner_diagnostics?} id="remote-calls" title="Remote model diagnostics">
+          <:subtitle>
+            Transcripts are sensitive diagnostics, not validated or released business output.
+            Each explicit content read records an audit access.
+          </:subtitle>
+          <ul class="divide-y divide-zinc-100">
+            <li :for={call <- @remote_calls} class="flex flex-wrap items-center gap-3 py-3">
+              <span class="font-mono text-xs">{call.id}</span>
+              <.badge status={call.state} />
+              <.ui_button
+                id={"show-remote-transcript-#{call.id}"}
+                phx-click="show_remote_transcript"
+                phx-value-id={call.id}
+                size="sm"
+              >View diagnostic transcript</.ui_button>
+            </li>
+          </ul>
+          <pre
+            :if={@remote_transcript}
+            id="remote-transcript-content"
+            class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-zinc-950 p-4 text-xs text-zinc-100"
+          >{@remote_transcript}</pre>
+        </.card>
+
         <.card id="decisions" title="Decisions">
           <:subtitle>
             What the agent decided and why, in order (deterministic rules and LLM judgements).
@@ -484,7 +550,15 @@ defmodule SdrAgentWeb.RunLive do
           </.card>
         </div>
 
-        <.card id="signals" title="Signals">
+        <.empty
+          :if={@signals == :unavailable}
+          id="signals-unavailable"
+          icon="hero-lock-closed"
+          title="Unavailable"
+        >
+          Audit-event signal records are not granted to this hosted owner.
+        </.empty>
+        <.card :if={@signals != :unavailable} id="signals" title="Signals">
           <:subtitle>The run's signal events from the audit ledger.</:subtitle>
           <ol class="-my-1 divide-y divide-zinc-100">
             <li

@@ -256,7 +256,7 @@ defmodule SdrAgentWeb.LeadLive.Show do
           </:subtitle>
           <:actions>
             <.ui_button
-              :if={Scope.reviewer?(@current_scope) and @lead.status == :new}
+              :if={Scope.assigner?(@current_scope) and @lead.status == :new}
               id="assign-lead"
               variant="primary"
               phx-click="assign"

@@ -4,6 +4,8 @@ defmodule SdrAgent.Agents.RemoteTranscripts do
   Metadata lists contain no bytes. A content read rechecks the live owner
   after the audit head lock, reads through an exact private Ash scope, and
   records AuditAccess with the actual User before its transaction commits.
+  The access record's `target_ref` is the remote call ID supplied to this
+  reader API, rather than a value taken from the result's `id` attribute.
   No business output is released or validated by this diagnostic path.
 
   Direct named-action reads cannot bypass access recording: only this
