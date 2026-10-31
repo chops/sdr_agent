@@ -131,3 +131,93 @@ before S-B2 merge; GREEN migration expects the S-B2 binding composite identity
 - Authority.hosted_owner?(user) revalidates live persisted authority, no impersonation.
 These are public domain wrappers around the reviewed Ash action paths;
 no external endpoint authentication substitutes for policies.
+
+* Implementation progress (2026-10-31, source-only)
+- Domain RED committed/pushed e17ca25c. Final canonical RED
+  x1-20261031T061817Z-17829: 29/29 intended assertion failures, zero
+  passes/skips/exclusions; owner DBs disposed. Independent Claude RED GO
+  1886814e603e6fdfc2035e4b0c416f62395b0bb7c8f0c5f54ea2279ade54e089,
+  carried to the exact FK oracle and helper-only race extraction by
+  m_1793427565000000000_7887b5c7.
+- Domain source is written and compiles test/dev WAE; plain Credo and
+  format checks pass. NOT domain GREEN: no owner migration generated or
+  applied. Binding UNIQUE(id,tenant_id) belongs to Claude S-B2 d270_03;
+  peer m_1793428154000000000_9edff9e0 keeps schema execution held until
+  its pushed GREEN head. Do not duplicate its identity/index migration.
+- Web RED committed/pushed 2a3bcfa8. Canonical x1-20261031T063304Z-832:
+  9/9 missing-route assertion failures. Node v22.22.0: 6/6 missing-module
+  assertion failures. Separate RED GO m_1793428472000000000_b6fcc817,
+  review sha256 7e3ed69955a2193342a3c6b3c8485694ba40e11baa8623bce6e082b2c4ec2351.
+- Guard-only test split approved m_1793428723000000000_b3cfe987 and
+  confirmed m_1793428909000000000_8eb425db. No behavior assertion changed.
+  Route prerequisites now apply per case, so inert GET/presenter can run
+  before the held POST and schema.
+- Browser landing committed/pushed 24723d48eeefa071667d43a5880591402eec9274:
+  inert GET, dedicated no-inline root, bundled fragment-to-form handoff,
+  console-only URL presenter. Scoped source PASS
+  T/claude-sb5-inert-source-review-20261031.org sha256
+  77f256fbd21445a8426916736cb4bb370f5af26b73d9916d6c5b7389651fda83.
+  Canonical inert/presenter x1-20261031T063942Z-67451: 2 passed, 7 line-
+  excluded, zero failures/skips. Full controller x1-20261031T064001Z-70971:
+  2 passed/7 failed, no exclusions/skips: all six POST cases stop on
+  missing POST, one GET stops on the absent owner table prerequisite.
+  Both runs disposed owned DBs; this is not a full GREEN claim.
+- At 24723d48, node v22.22.0, command
+  node --test test/browser/hosted_enrollment_test.mjs: rc0, 6/6 pass.
+  T/codex-sb5-node-green-24723d48.log sha256
+  6fbae2fc7c6da610e758894b53f1dc3c00c4954cccbddddb94ede8e3daa9b521.
+  This receipt is explicit, NOT CI-enforced. Claude owns CI wiring in the
+  integration queue. Sobelow is unavailable (Mix task not found), not PASS.
+  Asset build passes. No deployment, real-data transfer, model call or
+  outreach is authorized or performed by these slices.
+- Architecture trigger: new Operations resource and browser flow. Generated
+  diagrams inspected in a temporary preview, then maintained boundaries
+  amended narrowly. Detailed hosted-owner runtime diagram marks POST and
+  schema integration pending, not deployed. Domain diagrams await the
+  domain source review/commit.
+- Remaining: S-B2 dependency, d270_10 migration/snapshots and exact pins,
+  domain GREEN and independent source review, POST implementation/checks,
+  actual worker/transcript API integration, owner-safe LiveViews and
+  stale-socket denial, full gate. No test assertions may be relaxed without
+  returning to the peer reviewer first.
+
+* Inherited human-role boundary reconciliation (2026-10-31)
+Entity Model trigger: yes.
+Reason: a HostedOwner reviewer otherwise inherits ordinary role grants
+before the narrow OperatorAction branch. Actor-present metadata also skips
+the live-owner check. Correction source is NOT written yet.
+Capabilities ai_pair=true, codex_review=true. Reviewer Claude, entity PASS
+m_1793430417000000000_b556e564; review sha256
+219ae9a454a54e3d6e7771c1aa423f0175f6aa1d69e4be82a93380503ffceb08.
+This supersedes the proposed blanket prototype admin/reviewer suppression,
+which would alter deliberate pre-existing prototype human approval controls.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+--------------|
+| HostedOwner User | Existing policy delta | Prevent inherited reviewer powers | No fields | ANY HostedOwner row by user_id, including disabled history; unique_user identity | Associated identities never use legacy human role fallback; only fresh current owner has review_read/assign and accepted worker controls | Compare fresh persisted User id/tenant/role/status, not caller struct alone | Owner-backed batch pending dependency |
+| Legacy nonowner User | Existing validation tightening | Preserve deliberate old human contracts | No fields | Fresh stored User and absence of ANY owner row | Ordinary runtime unchanged; prototype fallback requires persisted active matching identity/role/status; random and role-forged ids denied | Original nonowner rights remain only in synthetic/domain contexts; real boot rejects additional/unbound Users | K1 hosted web reachability must also deny |
+| Eight human actor-present reads | Existing policy delta | Stop stale/forged human metadata reads | No fields | Existing six Agents resources and Audit Tenant/ProvenanceSnapshot | Human-kind-conditioned policy preserves original actor_present lines, worker denial and delegated/system metadata behavior; owner rows tenant filtered, global provenance freshness only | Fresh live owner, validated legacy nonowner, explicit actual auditor control; roleless User denied | All-eight owner-backed positives/denials pending |
+| Hosted web principal | Existing authorization delta | Prevent legacy domain fallback from reaching hosted UI | No fields | Existing signed/stored User session | In prototype, password success, operator mount and each event/navigation revalidate require live owner or exact bound auditor; ordinary web unchanged | Accounts.current_operator historical contract retained; web calls domain predicate, not a new auth strategy | Tests written; source held |
+
+K1-K4 conditions: run existing real-boot extra-User refusals and actual
+hosted-web nonowner denial; disabled owner history takes precedence over a
+valid persisted reviewer; stored-row identity/role/status validation;
+disclose retained legacy nonowner rights in the integration plan/summary.
+No new ADR: enforces accepted ADR-0024 P2's bound identity without removing
+unrelated legacy behavior. No existing R1/R2/R3 assertions changed.
+
+Step1 RED: canonical x1-20261031T071030Z-58174, 46 total, 32 intended
+failures and 14 positive controls, zero skips/exclusions, owned DB pair
+dropped. Exact attribution: 21 actual resource-policy denials; 6 metadata
+denials including roleless User at one site per domain; 1 actual already-
+assigned SDR denial; 1 actual Failure resolve denial; 3 web session denials.
+14 controls preserve actual nonowner prototype rights, bound-auditor
+metadata and ordinary browser sign-in. Initial run had two setup defects;
+final run repairs only socket lifecycle/grant setup, no behavior assertion.
+Receipt T/codex-sb5-human-step1-red-20261031.org sha256
+0954454f4c4b1e593334ff5b013dcbe9c9ff4ec6c6859e6babb7a40c74ee0e3e.
+Independent scoped RED GO m_1793430723000000000_e5ca037c.
+GREEN starts only after pushed S-B2 dependency. Trailing no-write assertions
+must execute in GREEN; RED fails earlier at the intended missing denial.
+Step2 owner-history/current-activation/actual owner assignment and all-eight
+metadata checks require the schema and their own independent RED gate.
