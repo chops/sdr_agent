@@ -289,7 +289,9 @@ amendment grants no extra model calls and does not reset prior usage.
 
 ## Amendment 4 (2026-10-31): owner's initial-delivery backup exception
 
-**Status: ACCEPTED** by Charles in the subsequent delivery instruction:
+**Status: PROPOSED** formal ADR wording, pending owner acceptance under
+D-157. The underlying owner exception is already operative for this
+delivery, from Charles's subsequent instruction:
 
 > let's make an exception just to get a working product.
 
