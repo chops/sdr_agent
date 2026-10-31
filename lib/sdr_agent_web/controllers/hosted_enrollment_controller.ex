@@ -33,10 +33,20 @@ defmodule SdrAgentWeb.HostedEnrollmentController do
         |> redirect(to: ~p"/")
 
       {:error, _refusal} ->
-        conn
-        |> put_flash(:error, "Enrollment link is not valid.")
-        |> redirect(to: ~p"/hosted-enrollment")
+        refused(conn)
     end
+  end
+
+  @doc """
+  The one closed rejection answer, also given to an attempt refused by
+  `SdrAgentWeb.AuthRequestLimit` before any link is read or consumed.
+  """
+  @spec refused(Plug.Conn.t()) :: Plug.Conn.t()
+  def refused(conn) do
+    conn
+    |> private_headers()
+    |> put_flash(:error, "Enrollment link is not valid.")
+    |> redirect(to: ~p"/hosted-enrollment")
   end
 
   defp private_headers(conn) do

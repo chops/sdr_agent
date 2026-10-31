@@ -20,6 +20,15 @@ defmodule SdrAgentWeb.Router do
     plug :load_from_session
   end
 
+  # Credential-bearing routes (hosted auth hardening plan r1): every route
+  # in the scope is tagged whatever its path (the endpoint also classifies
+  # these paths before parsing), and sign-in and enrollment attempts are
+  # bounded before their action runs.
+  pipeline :auth_edge do
+    plug SdrAgentWeb.SensitiveAuth, :always
+    plug SdrAgentWeb.AuthRequestLimit
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
     plug :load_from_bearer
@@ -54,7 +63,7 @@ defmodule SdrAgentWeb.Router do
   end
 
   scope "/", SdrAgentWeb do
-    pipe_through :browser
+    pipe_through [:browser, :auth_edge]
 
     get "/hosted-enrollment", HostedEnrollmentController, :new
     post "/hosted-enrollment", HostedEnrollmentController, :create
@@ -67,6 +76,7 @@ defmodule SdrAgentWeb.Router do
     # Password sign-in only: registration, reset, confirmation and magic
     # links are not offered (S2 User: operators are created by an admin).
     sign_in_route auth_routes_prefix: "/auth",
+                  on_mount_prepend: [SdrAgentWeb.SensitiveAuth],
                   on_mount: [{SdrAgentWeb.LiveUserAuth, :live_no_user}],
                   overrides: [
                     SdrAgentWeb.AuthOverrides,

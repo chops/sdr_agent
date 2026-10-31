@@ -16,6 +16,12 @@ defmodule SdrAgent.Application do
     # root refuses to boot, before anything starts or reads (ADR-0005).
     Witness.check_configured_root!()
     SdrAgent.Telemetry.setup()
+    # Primary logger filters, in this order (each attach prepends, so the
+    # final run order is: exception filter, credential redaction, Elixir's
+    # report translator). Every event loses credential-bearing data
+    # (conns, stack arguments, token/cookie/session values) before any
+    # report is formatted into text (hosted auth hardening plan r1, S2).
+    :ok = SdrAgent.Logger.CredentialRedaction.attach()
     # ADR-0005 C4 amendment: crash reports and error logs never carry raw
     # database or Ash error values.
     :ok = SdrAgent.Logger.ExceptionFilter.attach()
@@ -47,6 +53,9 @@ defmodule SdrAgent.Application do
         {Phoenix.PubSub, name: SdrAgent.PubSub},
         # Relays committed audit events to live operator views (ADR-0012).
         SdrAgent.LiveEvents.Relay,
+        # Sign-in and enrollment attempt counters (fixed windows in ETS),
+        # before the endpoint.
+        SdrAgent.RateLimiter,
         # Start to serve requests, typically the last entry
         SdrAgentWeb.Endpoint,
         {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}

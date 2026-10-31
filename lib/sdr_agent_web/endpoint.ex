@@ -30,14 +30,37 @@ defmodule SdrAgentWeb.Endpoint do
 
     socket "/live", Phoenix.LiveView.Socket,
       websocket: [connect_info: [session: {__MODULE__, :session_options, []}]],
-      longpoll: [connect_info: [session: {__MODULE__, :session_options, []}]]
+      longpoll: false
   else
     @doc "The session options in effect."
     def session_options, do: @session_options
 
     socket "/live", Phoenix.LiveView.Socket,
       websocket: [connect_info: [session: @session_options]],
-      longpoll: [connect_info: [session: @session_options]]
+      longpoll: false
+  end
+
+  # Long polling is off (hosted auth hardening plan r1): its server process
+  # holds the decoded session and receives every posted event, beyond the
+  # reach of the request classification below. The client uses the
+  # WebSocket only.
+
+  @doc """
+  Classifies the request (`SdrAgentWeb.SensitiveAuth`) before anything
+  else, then runs the endpoint: Phoenix dispatches the LiveView socket
+  ahead of every declared plug, so a declared first plug would run after
+  the WebSocket transport. A credential-bearing request (an auth, sign-in,
+  sign-out, hosted-enrollment or `/live` path, as the router decodes it,
+  or any request carrying a cookie or authorization header) tags its
+  process before anything parses, routes, upgrades or reports it, so its
+  error reports are withheld through the outer HTTP error boundary and,
+  for the socket, for the transport's lifetime.
+  """
+  @impl Plug
+  def call(conn, opts) do
+    conn
+    |> SdrAgentWeb.SensitiveAuth.call(SdrAgentWeb.SensitiveAuth.init([]))
+    |> super(opts)
   end
 
   # Serve at "/" the static files from "priv/static" directory.
