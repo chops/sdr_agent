@@ -227,3 +227,47 @@ hosted authority build and preserves ordinary-prod refusal; no expression,
 config value, policy, test or behavior change. Other stale implementation
 stage prose is not broadened into this follow-up. Reviewed source commit
 remains 802e7783; this later commit adds documentation/evidence only.
+
+* Hosted seam-pin correction (2026-10-31)
+Peer GO: seam-pin (b), relayed in the user message. Correlated approval:
+m_claude_seam_pin_b_go_20261031, replying to
+m_codex_hosted_seam_pin_choose_b_20261031.
+
+Entity Model trigger: no
+Reason: test-only correction of a source/configuration pin; no changed
+resource, attribute, policy, action, ownership or backend contract.
+No ADR required: preserves the accepted hosted build and explicit false
+setting. Architecture unchanged — no diagram update needed.
+
+Affected test: test/sdr_agent/ai/claude_cli_pinned_executable_test.exs.
+Plan: retain key-absence checks on every other non-test config and the
+test.exs true pin. For hosted_prototype.exs only, use Config.Reader to
+require the evaluated :sdr_agent/:claude_cli_test_seams value exactly false.
+A true, non-boolean, missing or differently nested value must not pass;
+comments and raw text are not the authority. No production config edits.
+
+Measured RED: integrated a9e0cd70 gate c3-20261031T200124Z-89280 has
+6085/6104 passing, 19 failures, 1 skipped and 42 excluded; the new failure
+is this pin rejecting the explicit false key. UserTest is fixed; the
+other 18 failures remain inherited and are not waived. Gate receipt
+sha256 374a051ee354e7bd5c6bfb08716ed63442937a147a12dea979cba3a7ec681cb4.
+GREEN is test-only, within the correlated peer GO above.
+
+Verification plan: focused pinned-executable and hosted-config tests,
+format and warnings-as-errors compile, independent diff/evidence review,
+then exact clean-head full gate (including mix precommit). Record actual
+results below; neither a focused PASS nor inherited failures are full-gate
+PASS. This work grants no live model calls or deployment/data authority.
+
+GREEN evidence: x2-20261031T203009Z-3284, focused 53/53, no skipped or
+excluded tests, both owned databases dropped, MANIFEST.sha256 verified.
+Exact test sha256 a05998e1114e4538146b6fec5e42d99b449beb1f9b0ef2c82fdab9c43b02a9bd.
+Test-env warnings-as-errors compile, repository-wide format check and
+configured Credo pass (1096 files, no issues). The Nix shell entry still
+prints its inherited Hex banner EPIPE; the actual three verification
+commands complete with exit 0. git diff --check passes. Independent
+source PASS: m_claude_seam_pin_source_pass_20261031; review sha256
+ad90b031d63f2b8156da4a936c070013df15859646f58821100e1f492b90fefc.
+Accepted non-blocking N1: describe the correlated approval as peer GO
+rather than owner approval. GO commit/push and clean-head full gate;
+the full-gate result remains pending.
