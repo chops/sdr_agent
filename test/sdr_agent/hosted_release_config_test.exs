@@ -105,7 +105,7 @@ defmodule SdrAgent.HostedReleaseConfigTest do
     assert endpoint[:url] == [host: "sdr.example.test", port: 443, scheme: "https"]
     assert endpoint[:http][:port] == 4199
     assert endpoint[:http][:ip] == {127, 0, 0, 1}
-    assert endpoint[:check_origin] != false
+    assert endpoint[:check_origin] == ["https://sdr.example.test"]
     assert endpoint[:secret_key_base] == @fixture["SECRET_KEY_BASE"]
     assert config[:sdr_agent][:token_signing_secret] == @fixture["TOKEN_SIGNING_SECRET"]
     assert config[:sdr_agent][:webhook_hmac][:source] == {:env, "SDR_WEBHOOK_HMAC_KEY"}
@@ -283,4 +283,3 @@ defmodule SdrAgent.HostedReleaseConfigTest do
   defp put_environment(key, nil), do: System.delete_env(key)
   defp put_environment(key, value), do: System.put_env(key, value)
 end
-

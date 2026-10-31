@@ -1,5 +1,65 @@
 import Config
 
+hosted? = config_env() == :hosted_prototype
+
+# ADR-0024: hosted startup must be explicit and remote-only. Refusals carry
+# fixed codes, never operator-supplied values or secrets. This is config
+# admission, not binding activation, model-call permission or a boot-check
+# bypass. Ordinary dev/test/prod keep their existing branches below.
+if hosted? do
+  refuse = fn code -> raise "hosted_configuration_refused(#{code})" end
+  policy = System.get_env("SDR_PROTOTYPE")
+  instance = System.get_env("SDR_PROTOTYPE_INSTANCE")
+  uuid = ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  cond do
+    is_nil(policy) and is_nil(instance) ->
+      refuse.(:switch_required)
+
+    policy != "d237-prototype/1" or not is_binary(instance) or
+        not Regex.match?(uuid, instance) ->
+      refuse.(:switch_invalid)
+
+    true ->
+      :ok
+  end
+
+  for key <- ~w(DATABASE_URL SECRET_KEY_BASE TOKEN_SIGNING_SECRET PHX_HOST PORT) do
+    if System.get_env(key) in [nil, ""], do: refuse.(:required_environment)
+  end
+
+  host = System.fetch_env!("PHX_HOST")
+
+  valid_host? =
+    byte_size(host) <= 253 and
+      Enum.all?(String.split(host, "."), fn label ->
+        byte_size(label) in 1..63 and
+          Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, label)
+      end)
+
+  valid_port? =
+    case Integer.parse(System.fetch_env!("PORT")) do
+      {port, ""} when port in 1..65_535 -> true
+      _invalid -> false
+    end
+
+  unless valid_host? and valid_port?, do: refuse.(:endpoint_invalid)
+  if System.get_env("SDR_MODEL_PROVIDER") != nil, do: refuse.(:provider_override)
+
+  if System.get_env("SDR_MODEL_TRANSPORT") not in [nil, "remote"],
+    do: refuse.(:transport_override)
+
+  if System.get_env("SDR_CLAUDE_CLI_BIN") != nil, do: refuse.(:local_executable)
+  if System.get_env("SDR_WITNESS_STORE_ROOT") != nil, do: refuse.(:witness_store)
+
+  config :sdr_agent, SdrAgent.Prototype, switch: %{policy_id: policy, instance_id: instance}
+
+  config :sdr_agent,
+    model_transport: :remote,
+    model_provider: SdrAgent.AI.ModelProvider.ClaudeCLI,
+    otel_capture_content: false
+end
+
 # D-237 prototype switch (interfaces r6 IF-2; amendment item 2 "The switch").
 # SDR_PROTOTYPE and SDR_PROTOTYPE_INSTANCE: both or neither; accepted in dev
 # only, and only with the compiled policy id and a canonical instance UUID.
@@ -14,6 +74,10 @@ case {System.get_env("SDR_PROTOTYPE"), System.get_env("SDR_PROTOTYPE_INSTANCE")}
     uuid = ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
     cond do
+      hosted? ->
+        # Validated above; never select the Mac's 5542 database on the host.
+        :ok
+
       config_env() != :dev ->
         raise "SDR_PROTOTYPE switch refused outside dev (switch_outside_dev)"
 
@@ -211,7 +275,7 @@ if config_env() in [:dev, :prod] do
   config :sdr_agent, anchor_sinks: sinks
 end
 
-if config_env() == :prod do
+if config_env() in [:prod, :hosted_prototype] do
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """
@@ -258,9 +322,13 @@ if config_env() == :prod do
       # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
       # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
       # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
+      ip: if(hosted?, do: {127, 0, 0, 1}, else: {0, 0, 0, 0, 0, 0, 0, 0})
     ],
     secret_key_base: secret_key_base
+
+  if hosted? do
+    config :sdr_agent, SdrAgentWeb.Endpoint, check_origin: ["https://#{host}"]
+  end
 
   config :sdr_agent,
     token_signing_secret:

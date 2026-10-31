@@ -1,6 +1,6 @@
 #+TITLE: Hosted prototype build/configuration slice under ADR-0024
 #+DATE: 2026-10-31
-#+STATUS: entity PASS; module/RED plan ready; no production edits
+#+STATUS: source GREEN; independent source review and integration checks pending
 
 * Summary and authority
 Make the accepted hosted_prototype build/release configuration explicit,
@@ -154,4 +154,55 @@ constant-nil type warnings in the test harness; fixed before this measured
 RED, without production edits or weakened assertions. r2 was 36/33; r3
 adds the final two plan-review conditions. Nix enterShell has an inherited
 Hex-output EPIPE from its piped banner; the ExUnit tests compile/run clean.
-Separate GREEN GO pending. No full-gate or release-readiness claim.
+At that RED checkpoint separate GREEN GO was pending (received below).
+No full-gate or release-readiness claim.
+
+* Source GREEN receipt (2026-10-31 19:07Z)
+Claude RED PASS + GREEN GO:
+m_claude_hosted_config_green_go_cfc14224_20261031, 18:55:46Z;
+review e33799ea68952e3a54fe2597f61996e17cb3f8b6be102a470da851d1ad63485f.
+Implemented only config/hosted_prototype.exs, config/runtime.exs and
+mix.exs. Test diff is formatting plus a stronger exact HTTPS origin check
+(review n1). No dependency pin, endpoint, route, filter, resource, policy,
+binding, live data, activation or service change.
+
+- Pure ExUnit: 38/38 pass. Final log codex-hosted-config-green-r3-20261031.log
+  sha256 ba3e300c77d19143297c20ccd62929f6cd8cd21ae51365ed521f1a77e69406d5.
+- Hosted compile --warnings-as-errors: PASS. Log
+  codex-hosted-config-hosted-compile-20261031.log sha256
+  72c0fa325e8ea9064520ab02570cb098b2620bdd76b82552eb1d67afd55c83fd.
+- Ordinary prod compile --warnings-as-errors after edits: PASS. Log
+  codex-hosted-config-prod-compile-20261031.log sha256
+  66b940e1a4385afc71a8ada34508904d911404d8e50c0cc4c5ec994968fa1d18.
+- Test-environment WAE compile started after those checks; result pending
+  at this receipt. No Repo/application start by that compile.
+- Full mix format --check-formatted: PASS; configured mix credo: PASS
+  (1088 files, no issues). An initial prod-env formatter attempt refused
+  because Spark's formatter needs dev/test-only sourceror; retried in the
+  correct dev tooling environment, without adding a hosted dependency.
+- Hosted assets.deploy and mix release sdr_agent: PASS. Read-only packaged
+  sys.config/.app/.rel checks confirm authority/HostedOwners, remote-only
+  selection, disabled seams, absent dev/test-only apps and Unix entrypoints.
+  Checker and log codex-hosted-config-release-check-20261031.{exs,log};
+  log sha256 19a2fc80a738b6bd31dc76f559e650499dcc7019b00d7a6f08037e4ba840b823.
+  This is local aarch64-Darwin packaging proof, NOT a Linux deployment
+  artifact or any successful application boot. Runtime/S-B4 is not yet
+  integrated on this branch; never activate this intermediate release.
+- Seven new untracked static digests produced by phx.digest were moved,
+  not deleted, into handoff tmp/hosted-digested-static-20261031.u8dch3
+  after packaging. The packaged release retains its own asset copies.
+  Ignored asset/cache files stay local; no generated assets staged.
+
+Architecture evaluation: no new domain/resource, application module,
+supervision child, endpoint or public runtime flow implemented here.
+This selects the already accepted build/config contract. Claude owns the
+S-B4 runtime/transport diagrams at integration; no speculative topology
+diagram is generated for an unintegrated flow. Existing adjacent comments
+that describe authority builds as only dev/test need a bounded documentation
+follow-up (Codex owns), without expanding ordinary prod authority.
+
+Independent source review requested next. Full canonical integration gate
+and actual /worker route/remote-child checks remain pending; the earlier
+b8d2d03e gate is FAIL (18 inherited failures plus one stale User action pin,
+owned by S-B5 and separately assigned for test-only correction). Do not
+present this source/build receipt as deployed live LLM/companies/contacts.

@@ -7,7 +7,8 @@ defmodule SdrAgent.MixProject do
       version: "0.1.0",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
-      start_permanent: Mix.env() == :prod,
+      start_permanent: Mix.env() in [:prod, :hosted_prototype],
+      releases: releases(Mix.env()),
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
@@ -36,6 +37,11 @@ defmodule SdrAgent.MixProject do
   # Specifies which paths to compile per environment.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
+
+  # ADR-0024: hosted uses the accepted authority build without development
+  # or test support. Packaging never runs setup, seeds, migrations or calls.
+  defp releases(:hosted_prototype), do: [sdr_agent: [include_executables_for: [:unix]]]
+  defp releases(_env), do: []
 
   # Specifies your project dependencies.
   #
