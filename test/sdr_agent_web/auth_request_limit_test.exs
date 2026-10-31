@@ -90,6 +90,28 @@ defmodule SdrAgentWeb.AuthRequestLimitTest do
       assert signed_in?(sign_in(ctx.email, test_password()))
     end
 
+    test "the global bucket is checked first: a refused attempt charges no email bucket",
+         ctx do
+      limiter_loaded!()
+      for _ <- 1..30, do: sign_in(unknown(), "x")
+
+      refute signed_in?(sign_in(ctx.email, "wrong-password-0"))
+
+      hash = :crypto.hash(:sha256, String.downcase(String.trim(ctx.email)))
+      rows = inspect(:ets.tab2list(SdrAgent.RateLimiter), limit: :infinity)
+      refute rows =~ inspect(hash, limit: :infinity)
+      refute rows =~ Base.encode16(hash, case: :lower)
+      refute rows =~ Base.encode16(hash)
+
+      # After the global window rolls over the email has its full five.
+      Clock.freeze(DateTime.add(ctx.t0, 1, :minute))
+      before = length(events_of_type(ctx.tenant, "auth.sign_in.failed"))
+      for n <- 1..5, do: refute(signed_in?(sign_in(ctx.email, "wrong-password-#{n}")))
+      assert length(events_of_type(ctx.tenant, "auth.sign_in.failed")) == before + 5
+      refute signed_in?(sign_in(ctx.email, test_password()))
+      assert length(events_of_type(ctx.tenant, "auth.sign_in.failed")) == before + 5
+    end
+
     test "missing, malformed and nested emails count globally only", ctx do
       limiter_loaded!()
 

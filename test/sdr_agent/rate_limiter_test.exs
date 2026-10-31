@@ -89,7 +89,8 @@ defmodule SdrAgent.RateLimiterTest do
 
   test "at most max_keys live keys are held; a new key beyond them is refused" do
     max = limiter(:max_keys, [])
-    assert is_integer(max) and max > 0
+    # The reviewed model bound (entity delta r1 RateLimitBucket).
+    assert max == 10_000
 
     for n <- 1..max, do: assert(:ok = limiter(:hit, [{:fill, n}, 1, @window, @t0]))
 
