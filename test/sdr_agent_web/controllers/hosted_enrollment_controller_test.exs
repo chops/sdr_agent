@@ -14,18 +14,15 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
 
   @path "/hosted-enrollment"
 
-  setup do
+  defp require_route!(verb) do
     routes = Phoenix.Router.routes(SdrAgentWeb.Router)
 
-    for verb <- [:get, :post] do
-      assert Enum.any?(routes, &(&1.path == @path and &1.verb == verb)),
-             "missing #{verb} #{@path} enrollment route"
-    end
-
-    :ok
+    assert Enum.any?(routes, &(&1.path == @path and &1.verb == verb)),
+           "missing #{verb} #{@path} enrollment route"
   end
 
   test "GET is an inert no-store no-referrer form with only bundled scripts", %{conn: conn} do
+    require_route!(:get)
     conn = get(conn, @path)
     html = html_response(conn, 200)
     document = LazyHTML.from_document(html)
@@ -57,6 +54,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "GET neither consumes the link nor places it in response or debug logs", %{conn: conn} do
+    require_route!(:get)
     ctx = H.activated!()
     %{enrollment_token: link} = H.enrol!(ctx)
 
@@ -87,6 +85,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "POST exchanges a link, clears old session state and renews the session", %{conn: conn} do
+    require_route!(:post)
     ctx = H.activated!()
     %{enrollment_token: link, user: user} = H.enrol!(ctx)
 
@@ -108,6 +107,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "POST filters the JWT from debug request logs", %{conn: conn} do
+    require_route!(:post)
     ctx = H.activated!()
     %{enrollment_token: link} = H.enrol!(ctx)
 
@@ -121,6 +121,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "malformed and missing links return the same closed failure without a session" do
+    require_route!(:post)
     for params <- [%{}, %{enrollment_token: "not-a-token"}] do
       conn = post(build_conn(), @path, params)
       assert redirected_to(conn) == @path
@@ -130,6 +131,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "a replay cannot create a second browser session", %{conn: conn} do
+    require_route!(:post)
     ctx = H.activated!()
     %{enrollment_token: link} = H.enrol!(ctx)
     first = post(conn, @path, %{enrollment_token: link})
@@ -140,6 +142,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "a disabled owner cannot exchange an unused link", %{conn: conn} do
+    require_route!(:post)
     ctx = H.activated!()
     %{enrollment_token: link, owner: owner} = H.enrol!(ctx)
     assert {:ok, _} = H.disable(ctx, owner.id)
@@ -149,6 +152,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
   end
 
   test "POST with CSRF protection enabled rejects an absent CSRF token", %{conn: conn} do
+    require_route!(:post)
     assert_raise Plug.CSRFProtection.InvalidCSRFTokenError, fn ->
       conn
       |> put_private(:plug_skip_csrf_protection, false)

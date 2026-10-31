@@ -51,6 +51,8 @@ defmodule SdrAgentWeb.Router do
   scope "/", SdrAgentWeb do
     pipe_through :browser
 
+    get "/hosted-enrollment", HostedEnrollmentController, :new
+
     auth_routes AuthController, SdrAgent.Accounts.User, path: "/auth"
 
     sign_out_route AuthController, "/sign-out",
