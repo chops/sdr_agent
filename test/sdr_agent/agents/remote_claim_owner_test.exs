@@ -103,6 +103,37 @@ defmodule SdrAgent.Agents.RemoteClaimOwnerTest do
     assert launch.call_id == F.load(F.call_of(ctx.invocation.id)["id"])
   end
 
+  # W2 supplemental (Codex m_codex_w2_red_go_77f8af2f_20261031 choice 4): a
+  # launch-producing replay of a call claimed before the disable rechecks
+  # the owner; the claim, nonce, charge and deadlines are kept as they are.
+  test "control: a live owner's replay of the claimed nonce returns the same launch", ctx do
+    _enrolled = H.enrol!(ctx)
+    ctx = prototype_call!(ctx)
+    nonce = F.nonce()
+    launch = F.claim!(ctx.token, nonce)
+    assert F.claim!(ctx.token, nonce) == launch
+  end
+
+  test "after owner disable, a claimed call's replay emits no launch input and keeps its state",
+       ctx do
+    enrolled = H.enrol!(ctx)
+    ctx = prototype_call!(ctx)
+    nonce = F.nonce()
+    launch = F.claim!(ctx.token, nonce)
+    disable_owner!(ctx, enrolled.owner)
+    H.enter!(ctx)
+    before = F.call_row(launch.call_id)
+    events = F.event_count(ctx.fx)
+
+    result = F.claim(ctx.token, nonce)
+    assert result == {:error, :owner_unavailable}
+    refute inspect(result) =~ F.prompt_marker(), "launch input emitted: #{inspect(result)}"
+    assert F.call_row(launch.call_id) == before
+    assert F.invocation(ctx.invocation.id).status == :sent
+    assert F.count(F.nonce_resource(), "worker_id = $1", [F.dump(ctx.worker.id)]) == 1
+    assert F.event_count(ctx.fx) == events
+  end
+
   test "ordinary runtime is unchanged: a disabled hosted owner does not gate the claim", ctx do
     enrolled = H.enrol!(ctx)
     AdmissionFixtures.admit_tuples!()
