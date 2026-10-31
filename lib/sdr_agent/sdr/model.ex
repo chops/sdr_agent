@@ -29,6 +29,13 @@ defmodule SdrAgent.SDR.Model do
   `:result_not_released`: no output, and the run is left running for run
   recovery (`SdrAgent.SDR.StaleRunSweeper`), never a success or a crash.
 
+  **Remote calls (S-B4).** Under the `:remote` transport the facade returns
+  `%{remote: invocation}` with no output. The output is then only the result
+  gate's own read of the released invocation; an ungated invocation halts
+  `:result_not_released`, a withheld one with the gate's stop, and a wait
+  past the bound fails the run `:provider_error` (`remote_wait_timeout`).
+  A late result is settled once by the RemoteSettler, never used by the run.
+
   Every request is built with `content_capture: :off` (B1-04/B1-05, C4-R12):
   SDR inputs may carry run settings text, which then reaches only the model
   request Payload, never a GenAI content event.
@@ -154,6 +161,14 @@ defmodule SdrAgent.SDR.Model do
       else: {:ok, output, invocation}
   end
 
+  # S-B4: a remote call carries no output. The business output is only the
+  # result gate's own read (`ReleasedOutput.fetch/2` in both gate branches).
+  defp settle({:ok, %{remote: invocation}}, _ctx, run) do
+    if ReleasedOutput.gated?(invocation),
+      do: remote_gate(invocation, run),
+      else: {:error, {:halt, :result_not_released}}
+  end
+
   defp settle({:error, {:budget_exhausted, :daily}}, ctx, run),
     do: halt_budget(ctx, run, :daily_budget)
 
@@ -175,6 +190,14 @@ defmodule SdrAgent.SDR.Model do
   defp gate(invocation, output, run) do
     case ResultGate.gate(invocation, %{run_id: run.id, operation_id: run.operation_id}) do
       {:released, _release, _read} -> {:ok, output, invocation}
+      {:withheld, release, stopped} -> {:error, {:halt, stopped.status_reason || release.reason}}
+      {:error, _reason} -> {:error, {:halt, :result_not_released}}
+    end
+  end
+
+  defp remote_gate(invocation, run) do
+    case ResultGate.gate(invocation, %{run_id: run.id, operation_id: run.operation_id}) do
+      {:released, _release, read} -> {:ok, read, invocation}
       {:withheld, release, stopped} -> {:error, {:halt, stopped.status_reason || release.reason}}
       {:error, _reason} -> {:error, {:halt, :result_not_released}}
     end

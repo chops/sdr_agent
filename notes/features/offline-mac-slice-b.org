@@ -1109,3 +1109,22 @@ Same follow-up: the Operations domain (Relocation, RelocationEvent, AuditEvent l
 
 ** Ask
 Entity and plan PASS for this table and these tests, then RED r5 (tests only) to your GO, then GREEN.
+
+* S-B4 remote transport, hosted side (source PASS 2026-10-31T19:56Z)
+Branch claude/sb4-remote-transport. Heads: RED 650a8585, RED r2 1b9e5c2c, GREEN partial ca2c350b, terminal-settle RED c420aacb, GREEN 1d8ffbe9. Codex source PASS m_codex_sb4_source_pass_1d8ffbe9_20261031 (review 46c75cb3), canonical c4-20261031T195324Z-59087 381/381. Plan r2 + addendum 77dcda1e (launch bound) + terminal-settle addendum r2 77284f60 (entity PASS f25f89c8). Diagram: docs/architecture/remote-model-transport.md.
+
+** What is implemented
+- Runtime under trusted =:model_transport :remote=: no local ClaudeCLI tree (=children/0= is =[]=); =resolve/1= gives =ClaudeCLI.Remote= with no local server check; =status/0= reports the singleton tenant's worker view (presence, intake, last seen, enrolled profile/model; no digest or token).
+- =ClaudeCLI.Remote.prepare/2= refuses before any reservation: no worker (=:provider_not_running=), paused (=:provider_held=), pins not exactly one compiled real profile (=:worker_pins_incompatible=), or a launch over 1048576 bytes worst case (=:remote_launch_too_large=). =complete/2= returns =:remote_dispatched=; the facade accepts it only from that module and only for an invocation that has a RemoteModelCall.
+- The facade waits without a transaction, lock or connection: monotonic bound =:remote_wait_ms= (default 840000, clamped), 5 s poll or an audit event, unsubscribe and flush on exit. Outcomes completed / failed / unknown / =:remote_wait_timeout=.
+- SDR.Model returns output only through the result gate's own read; withheld or ungated halts.
+- Reservation (=check_request/1=) refuses a body whose worst-case launch exceeds the bound; a claim whose launch is undeliverable rolls back (=:launch_undeliverable=, 500, never idle 200).
+- Worker HTTP (=/worker/heartbeat|claim|complete=): =WorkerIntake= (POST + JSON object only, 13 MiB pre-parser cap) and =WorkerController= (bearer 32-byte base64url; fixed error codes; paused/no-owner claim is 200 =call:null=; logs carry codes only). =filter_parameters= adds prompt, schema, transcript, claim_nonce.
+- Terminal-run settlement: a late result, an expiry to unknown, or an invalid/drift result for an invocation whose run is already terminal is finished ledger-only by the RemoteSettler. The run, its Operation and counters are not written; the charge stays one; no release. Authority is a private, scope-bound capability minted only around the settler's single finish (restored on every exit). Every other terminal settle is still refused by BudgetCounter.
+- Production build (no prototype authority): =prepare/2= refuses =:provider_not_running=, the worker view is absent, no terminal-settle clause, no settler.
+
+** Qualifications (keep)
+- =Runtime.status/0= is observational: present + open reports =effective: Remote= before prepare's pin-compatibility check. It is never admission evidence.
+- Late results are fail-closed: recorded, never released into or resuming the failed run.
+- Process-dictionary capabilities share the trust level of the existing scope markers; they are not a defence against arbitrary code in the VM.
+- Source and focused evidence only: not the full gate, hosted integration, Linux artifact, deployment or live model. Inherited full-gate failures stay outstanding until resolved or dispositioned.

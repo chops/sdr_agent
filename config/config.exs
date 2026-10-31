@@ -266,7 +266,11 @@ config :phoenix, :filter_parameters, [
   "password",
   "settings_content",
   "resolution_confirmation",
-  "enrollment_token"
+  "enrollment_token",
+  "prompt",
+  "schema",
+  "transcript",
+  "claim_nonce"
 ]
 
 # D-237 (interfaces r6 IF-2): the prototype switch is off unless

@@ -55,7 +55,11 @@ defmodule SdrAgent.Agents.RemoteCalls do
       after the head lock and fence) is refused writing nothing,
       `{:error, :owner_unavailable}` (W2); a candidate lost to a concurrent claim returns
       `{:ok, :none}` with no write; no candidate at all spends the nonce
-      with a null call.
+      with a null call. A fresh or replayed launch whose `{"call": launch}`
+      response would be over 1048576 bytes (`SdrAgent.Agents.RemoteLaunch`)
+      is `{:error, :launch_undeliverable}` and rolls back whole: the call,
+      invocation, nonce and audit are unchanged (S-B4; new reservations
+      cannot reach it).
     * `complete(token, nonce, call_id, request_digest, transcript)` — the
       size cap (2097152 bytes) first; then the worker (any status) `FOR
       SHARE`, the nonce of this worker (unknown or spent with no call:
@@ -122,6 +126,7 @@ defmodule SdrAgent.Agents.RemoteCalls do
   alias SdrAgent.Agents.ModelInvocation
   alias SdrAgent.Agents.RemoteCallReceipt
   alias SdrAgent.Agents.RemoteCallResult
+  alias SdrAgent.Agents.RemoteLaunch
   alias SdrAgent.Agents.RemoteModelCall
   alias SdrAgent.Audit.Kernel
   alias SdrAgent.Operations.MacWorker
@@ -206,7 +211,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
   @doc """
   The remote launch input caps of a stored request body: a string `prompt`
   of at most 262144 bytes and a map `schema` whose JSON encoding is at most
-  262144 bytes. `:ok` or `{:error, message}`.
+  262144 bytes, whose worst-case launch response
+  (`SdrAgent.Agents.RemoteLaunch.worst_case_bytes/2`) is at most 1048576
+  bytes (S-B4). `:ok` or `{:error, message}`.
   """
   @spec check_request(term()) :: :ok | {:error, String.t()}
   def check_request(request) when is_binary(request) do
@@ -219,6 +226,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
           byte_size(Jason.encode!(schema)) > @field_cap ->
             {:error, "schema is over #{@field_cap} bytes"}
+
+          RemoteLaunch.worst_case_bytes(prompt, schema) > RemoteLaunch.max_bytes() ->
+            {:error, "launch response would be over #{RemoteLaunch.max_bytes()} bytes"}
 
           true ->
             :ok
@@ -421,6 +431,9 @@ defmodule SdrAgent.Agents.RemoteCalls do
 
   # The domain launch: the frozen input of the call, its unrendered prompt
   # and schema read back from the stored request (an audited kernel read).
+  # S-B4: a launch whose `{"call": launch}` response is over
+  # `RemoteLaunch.max_bytes/0` is `{:error, :launch_undeliverable}`, so the
+  # claim or replay transaction rolls back whole (state, nonce and audit).
   defp launch(call, agent) do
     with {:ok, body} <- Kernel.read_content(call.request_sha256, @launch_purpose, agent),
          {:ok, %{"prompt" => prompt, "schema" => schema}} <- Jason.decode(body) do
@@ -434,10 +447,15 @@ defmodule SdrAgent.Agents.RemoteCalls do
          schema: schema,
          result_deadline: call.result_deadline
        }}
+      |> deliverable()
     else
       {:error, error} -> {:error, error}
       _malformed -> {:error, :request_unreadable}
     end
+  end
+
+  defp deliverable({:ok, launch}) do
+    if RemoteLaunch.deliverable?(launch), do: {:ok, launch}, else: {:error, :launch_undeliverable}
   end
 
   ## Complete
@@ -640,6 +658,8 @@ defmodule SdrAgent.Agents.RemoteCalls do
   # :remote_settler marker, so its settle_due/1 refuses every caller.
 
   if @prototype_authority do
+    @terminal_key {__MODULE__, :terminal_settlement}
+
     alias Ash.Error.Forbidden
     alias SdrAgent.Agents
     alias SdrAgent.AI.ModelProfiles
@@ -795,7 +815,8 @@ defmodule SdrAgent.Agents.RemoteCalls do
         agent = Actor.system(:agent_runtime, call.tenant_id)
 
         with {:ok, _expired} <- transition(call, :expire_unknown, agent, scope),
-             {:ok, _unknown} <- unknown_sent(invocation, agent),
+             {:ok, _unknown} <-
+               terminal_unknown(scope, call, invocation, agent),
              do: {:ok, :expired_unknown}
       else
         {:ok, :skipped}
@@ -806,17 +827,23 @@ defmodule SdrAgent.Agents.RemoteCalls do
            %{state: :expired_unknown} = call,
            %{status: :sent} = invocation,
            _now,
-           _scope
+           scope
          ) do
       agent = Actor.system(:agent_runtime, call.tenant_id)
-      with {:ok, _unknown} <- unknown_sent(invocation, agent), do: {:ok, :unknown}
+
+      with {:ok, _unknown} <-
+             terminal_unknown(scope, call, invocation, agent),
+           do: {:ok, :unknown}
     end
 
     defp settle_call(%{state: :completed} = call, %{status: :sent} = invocation, _now, scope) do
       agent = Actor.system(:agent_runtime, call.tenant_id)
 
       with {:ok, decision} <- decide(call, invocation, scope),
-           do: apply_decision(decision, invocation, agent)
+           do:
+             with_terminal(scope, call, invocation, fn ->
+               apply_decision(decision, invocation, agent)
+             end)
     end
 
     defp settle_call(_call, _invocation, _now, _scope), do: {:ok, :skipped}
@@ -837,6 +864,10 @@ defmodule SdrAgent.Agents.RemoteCalls do
       do: Agents.mark_model_invocation_unknown(invocation, actor: agent)
 
     defp unknown_sent(_invocation, _agent), do: {:ok, :none}
+
+    # sent → unknown under the terminal-settlement capability.
+    defp terminal_unknown(scope, call, invocation, agent),
+      do: with_terminal(scope, call, invocation, fn -> unknown_sent(invocation, agent) end)
 
     # The decision for a completed call: `{:complete, attrs}`, `{:invalid,
     # attrs}` (validation failed) or `{:failure, reason, latency}`.
@@ -993,6 +1024,86 @@ defmodule SdrAgent.Agents.RemoteCalls do
              ),
            {:ok, _attention} <- ModelProvider.attention(failed, reason, agent),
            do: {:ok, :failed}
+    end
+
+    @doc false
+    # S-B4 terminal settlement (addendum r2, Codex PASS f25f89c8): whether
+    # this process holds the settler's terminal-settlement capability for
+    # exactly `invocation`. True only inside `with_terminal/4` (reached only
+    # from `settle_due/1`): the capability's reference is the open
+    # RemoteCalls scope of this process inside its transaction, the
+    # transport is `:remote`, the invocation is a real ClaudeCLI one of the
+    # capability's tenant, and a fresh scoped read of the bound call finds
+    # it settled (completed or expired_unknown) for this invocation. The
+    # process dictionary is reachable by same-VM code; this is the same
+    # trust level as the scope and settlement markers, not a defence
+    # against arbitrary code in the VM.
+    @spec terminal_settlement?(term()) :: boolean()
+    def terminal_settlement?(%ModelInvocation{} = invocation) do
+      case Process.get(@terminal_key) do
+        {ref, tenant_id, invocation_id, call_id} when is_reference(ref) ->
+          scope = %{@scope_key => ref}
+
+          scoped?(scope) and remote?() and tenant_id == invocation.tenant_id and
+            invocation_id == invocation.id and invocation.provider == :claude_cli and
+            real_claude_cli?(invocation.profile_id) and
+            settled_call?(call_id, invocation, scope)
+
+        _absent_or_unscoped ->
+          false
+      end
+    end
+
+    def terminal_settlement?(_invocation), do: false
+
+    defp real_claude_cli?(profile_id) do
+      match?(
+        {:ok, %ModelProfiles.Profile{adapter: ClaudeCLI}},
+        ModelProfiles.fetch_real(profile_id)
+      )
+    end
+
+    defp settled_call?(call_id, invocation, scope) do
+      case call(call_id, invocation.tenant_id, nil, scope) do
+        {:ok, %RemoteModelCall{model_invocation_id: id, state: state}}
+        when state in [:completed, :expired_unknown] ->
+          id == invocation.id
+
+        _other ->
+          false
+      end
+    end
+
+    # Mints the terminal-settlement capability for `call`'s invocation for
+    # `fun` only (one invocation finish), restoring the previous value on
+    # every exit, including an error or a raise.
+    defp with_terminal(%{@scope_key => ref}, call, invocation, fun) when is_reference(ref) do
+      previous = Process.get(@terminal_key)
+      Process.put(@terminal_key, {ref, call.tenant_id, invocation.id, call.id})
+
+      try do
+        fun.()
+      after
+        if is_nil(previous),
+          do: Process.delete(@terminal_key),
+          else: Process.put(@terminal_key, previous)
+      end
+    end
+
+    if @test_seams do
+      @doc """
+      Test-seam build only (cleanup coverage, Codex e59e7c47): runs `fun`
+      under `with_terminal/4` for the call `call_id` of `invocation` inside
+      a fresh RemoteCalls scope, and returns fun's value. A raise inside
+      `fun` propagates.
+      """
+      def __with_terminal_for_test__(call_id, %ModelInvocation{} = invocation, fun)
+          when is_function(fun, 0) do
+        with_scope(fn scope ->
+          {:ok,
+           with_terminal(scope, %{tenant_id: invocation.tenant_id, id: call_id}, invocation, fun)}
+        end)
+      end
     end
 
     # Registers the settlement marker against `scope`'s reference for `fun`
