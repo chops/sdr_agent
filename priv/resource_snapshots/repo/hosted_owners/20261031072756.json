@@ -1,0 +1,288 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"gen_random_uuid()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"active\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "enrolled_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "disabled_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "hosted_owners_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "hosted_owners_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "hosted_owners_binding_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_database_bindings"
+      },
+      "scale": null,
+      "size": null,
+      "source": "binding_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "binding_id": "binding_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "hosted_owners_relocation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_relocations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "relocation_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('active', 'disabled')",
+      "name": "hosted_owners_status"
+    },
+    {
+      "attribute": [
+        "disabled_at"
+      ],
+      "base_filter": null,
+      "check": "(status = 'disabled') = (disabled_at IS NOT NULL)",
+      "name": "hosted_owners_disable_instant"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "binding_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "binding_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "hosted_owners_one_active",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "status = 'active'"
+    }
+  ],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION hosted_owners_guard()",
+      "global?": false,
+      "name": "hosted_owners_guard_function",
+      "up": "CREATE FUNCTION hosted_owners_guard() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF TG_OP <> 'UPDATE' THEN\n    RAISE EXCEPTION 'hosted owner history cannot be removed' USING ERRCODE = 'restrict_violation';\n  END IF;\n  IF OLD.status <> 'active' OR NEW.status <> 'disabled'\n     OR NEW.disabled_at IS NULL\n     OR (to_jsonb(NEW) - 'status' - 'disabled_at') IS DISTINCT FROM\n        (to_jsonb(OLD) - 'status' - 'disabled_at') THEN\n    RAISE EXCEPTION 'hosted owner permits terminal disable only' USING ERRCODE = 'restrict_violation';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER hosted_owners_guard_row ON hosted_owners",
+      "global?": false,
+      "name": "hosted_owners_guard_row",
+      "up": "CREATE TRIGGER hosted_owners_guard_row BEFORE UPDATE OR DELETE ON hosted_owners FOR EACH ROW EXECUTE FUNCTION hosted_owners_guard()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER hosted_owners_guard_truncate ON hosted_owners",
+      "global?": false,
+      "name": "hosted_owners_guard_truncate",
+      "up": "CREATE TRIGGER hosted_owners_guard_truncate BEFORE TRUNCATE ON hosted_owners FOR EACH STATEMENT EXECUTE FUNCTION hosted_owners_guard()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "D6124F7DB2559A0003046CF484D4FB4F967C66B2155BEAB4811F1C236854F550",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "hosted_owners_unique_user_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "user_id"
+        }
+      ],
+      "name": "unique_user",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "hosted_owners",
+  "temporal": null
+}

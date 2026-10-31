@@ -26,6 +26,7 @@ defmodule SdrAgentWeb.HostedNonownerSessionTest do
       router: SdrAgentWeb.Router,
       assigns: %{__changed__: %{}, current_user: user, flash: %{}},
       private: %{
+        live_temp: %{},
         lifecycle: %Phoenix.LiveView.Lifecycle{},
         operator_session: %{"user_token" => token}
       }
@@ -78,5 +79,19 @@ defmodule SdrAgentWeb.HostedNonownerSessionTest do
 
     assert redirected_to(conn) == "/"
     assert is_binary(get_session(conn, "user_token"))
+  end
+
+  test "a rejected hosted principal can stay on sign-in without a redirect loop", ctx do
+    assert :ok = PrototypeFixtures.enter_runtime(ctx.fx.snapshot)
+
+    assert {:cont, signed_out} =
+             LiveUserAuth.on_mount(
+               :live_no_user,
+               %{},
+               %{"user_token" => ctx.token},
+               socket(ctx.reviewer, ctx.token)
+             )
+
+    assert signed_out.assigns.current_user == nil
   end
 end

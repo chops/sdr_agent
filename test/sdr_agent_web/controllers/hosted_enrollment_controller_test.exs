@@ -122,6 +122,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
 
   test "malformed and missing links return the same closed failure without a session" do
     require_route!(:post)
+
     for params <- [%{}, %{enrollment_token: "not-a-token"}] do
       conn = post(build_conn(), @path, params)
       assert redirected_to(conn) == @path
@@ -153,6 +154,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
 
   test "POST with CSRF protection enabled rejects an absent CSRF token", %{conn: conn} do
     require_route!(:post)
+
     assert_raise Plug.CSRFProtection.InvalidCSRFTokenError, fn ->
       conn
       |> put_private(:plug_skip_csrf_protection, false)

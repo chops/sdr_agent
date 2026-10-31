@@ -213,15 +213,18 @@ defmodule SdrAgent.Prototype.BootCheck do
             )
         ])
 
-      case SdrAgent.Repo.query(
-             "SELECT id::text, role, status, hashed_password IS NULL FROM users WHERE tenant_id = $1",
-             [Ecto.UUID.dump!(row.tenant_id)]
-           ) do
-        {:ok, %{rows: rows}} ->
-          expect(Enum.sort(Enum.map(rows, &List.to_tuple/1)) == expected, :users_not_exact)
-
-        {:error, _error} ->
-          {:error, :users_not_exact}
+      with {:ok, hosted_rows} <- SdrAgent.Operations.HostedOwners.boot_user_rows(row),
+           {:ok, %{rows: rows}} <-
+             SdrAgent.Repo.query(
+               "SELECT id::text, role, status, hashed_password IS NULL FROM users WHERE tenant_id = $1",
+               [Ecto.UUID.dump!(row.tenant_id)]
+             ) do
+        expect(
+          Enum.sort(Enum.map(rows, &List.to_tuple/1)) == Enum.sort(expected ++ hosted_rows),
+          :users_not_exact
+        )
+      else
+        _refused -> {:error, :users_not_exact}
       end
     rescue
       _error -> {:error, :users_not_exact}

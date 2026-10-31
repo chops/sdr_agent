@@ -8,6 +8,17 @@ defmodule SdrAgentWeb.AuthController do
   use AshAuthentication.Phoenix.Controller
 
   def success(conn, activity, user, _token) do
+    if SdrAgent.Operations.hosted_web_principal?(user) do
+      admitted_success(conn, activity, user)
+    else
+      conn
+      |> clear_session(:sdr_agent)
+      |> put_flash(:error, "This account is not available on the hosted console.")
+      |> redirect(to: ~p"/sign-in")
+    end
+  end
+
+  defp admitted_success(conn, activity, user) do
     return_to = get_session(conn, :return_to) || ~p"/"
 
     message =

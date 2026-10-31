@@ -139,6 +139,7 @@ defmodule SdrAgent.Prototype.Relocation do
 
   identities do
     identity :unique_binding_seq, [:binding_id, :relocation_seq]
+    identity :unique_id_binding, [:id, :binding_id]
   end
 
   @doc """

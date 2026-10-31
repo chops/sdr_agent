@@ -1,0 +1,173 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "relocation_seq",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "from_identity",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "to_identity",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_relocations_binding_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_database_bindings"
+      },
+      "scale": null,
+      "size": null,
+      "source": "binding_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "relocation_seq"
+      ],
+      "base_filter": null,
+      "check": "relocation_seq > 0",
+      "name": "prototype_relocations_seq_positive"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION prototype_relocations_append_only()",
+      "global?": false,
+      "name": "prototype_relocations_guard_function",
+      "up": "CREATE FUNCTION prototype_relocations_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_relocations_guard_row ON prototype_relocations",
+      "global?": false,
+      "name": "prototype_relocations_guard_row",
+      "up": "CREATE TRIGGER prototype_relocations_guard_row BEFORE UPDATE OR DELETE ON prototype_relocations FOR EACH ROW EXECUTE FUNCTION prototype_relocations_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_relocations_guard_truncate ON prototype_relocations",
+      "global?": false,
+      "name": "prototype_relocations_guard_truncate",
+      "up": "CREATE TRIGGER prototype_relocations_guard_truncate BEFORE TRUNCATE ON prototype_relocations FOR EACH STATEMENT EXECUTE FUNCTION prototype_relocations_append_only()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "A64CC1328515EEC2B42E5FAC49F39186DBA784C17BEF2A6EF9C450E87148E393",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_relocations_unique_binding_seq_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "binding_id"
+        },
+        {
+          "type": "atom",
+          "value": "relocation_seq"
+        }
+      ],
+      "name": "unique_binding_seq",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_relocations_unique_id_binding_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "binding_id"
+        }
+      ],
+      "name": "unique_id_binding",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "prototype_relocations",
+  "temporal": null
+}

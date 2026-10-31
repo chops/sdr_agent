@@ -260,7 +260,12 @@ config :phoenix, :json_library, Jason
 # 3.6's settings form params, which live under `settings_content`; and
 # R0-05's typed resolution confirmation
 # (`docs/product/r0/r0-05-interface.md` section 5).
-config :phoenix, :filter_parameters, ["password", "settings_content", "resolution_confirmation"]
+config :phoenix, :filter_parameters, [
+  "password",
+  "settings_content",
+  "resolution_confirmation",
+  "enrollment_token"
+]
 
 # D-237 (interfaces r6 IF-2): the prototype switch is off unless
 # config/runtime.exs accepts SDR_PROTOTYPE and SDR_PROTOTYPE_INSTANCE (dev only).

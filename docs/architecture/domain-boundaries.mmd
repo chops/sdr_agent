@@ -50,6 +50,7 @@ graph TB
         PrototypeDatabaseBinding[PrototypeDatabaseBinding]
         Relocation[Relocation]
         RelocationEvent[RelocationEvent<br/>position under head lock]
+        HostedOwner[HostedOwner<br/>reviewer bound to activated relocation]
     end
     subgraph Accounts["Accounts Domain"]
         User[User]
@@ -136,6 +137,10 @@ graph TB
     Operations == "AppendEvent (operations.*)" ==> Kernel
     PrototypeDatabaseBinding --> Relocation
     Relocation --> RelocationEvent
+    HostedOwner -. "(user_id, tenant_id) FK" .-> User
+    HostedOwner -. "(binding_id, tenant_id) FK" .-> PrototypeDatabaseBinding
+    HostedOwner -. "(relocation_id, binding_id) FK" .-> Relocation
+    HostedOwner == "AppendEvent (operations.hosted_owner.*)" ==> Kernel
     Relocation == "AppendEvent (prototype.relocation.created); ordinary runtime only" ==> Kernel
     RelocationEvent == "AppendEvent (prototype.relocation.event_appended); ordinary runtime only" ==> Kernel
     Kernel -. "check_fence after every lock_head; refuses only in prototype runtime when fenced (ordinary runtime :ok)" .-> RelocationEvent

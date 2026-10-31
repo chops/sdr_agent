@@ -81,7 +81,11 @@ defmodule SdrAgent.Prototype.HostedOwnerTest do
                User
                |> Ash.Changeset.for_create(
                  :create_hosted_owner,
-                 %{email: "direct@example.test", display_name: "Direct"},
+                 %{
+                   email: "direct@example.test",
+                   display_name: "Direct",
+                   password: String.duplicate("X", 32)
+                 },
                  opts
                )
                |> Ash.create()
@@ -116,7 +120,7 @@ defmodule SdrAgent.Prototype.HostedOwnerTest do
     assert {:ok, %{status: :disabled, disabled_at: %DateTime{}}} = H.disable(ctx, owner.id)
     assert :error = Accounts.current_operator(token)
     assert {:error, _} = H.consume(link)
-    fresh = Accounts.get_user(user.id, H.kernel(ctx)) |> elem(1)
+    fresh = Ash.get!(User, user.id, H.kernel(ctx))
     assert fresh.status == :disabled
   end
 

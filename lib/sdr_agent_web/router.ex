@@ -52,6 +52,7 @@ defmodule SdrAgentWeb.Router do
     pipe_through :browser
 
     get "/hosted-enrollment", HostedEnrollmentController, :new
+    post "/hosted-enrollment", HostedEnrollmentController, :create
 
     auth_routes AuthController, SdrAgent.Accounts.User, path: "/auth"
 

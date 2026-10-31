@@ -86,6 +86,14 @@ defmodule SdrAgent.Audit.ProvenanceSnapshot do
       forbid_if always()
     end
 
+    # S-B5: independent human identity restriction; actor_present below
+    # retains its existing system/delegation behavior, never a human bypass.
+    policy [action_type(:read), SdrAgent.Prototype.Checks.HumanActor] do
+      access_type :strict
+      forbid_unless SdrAgent.Prototype.Checks.HumanRead
+      authorize_if always()
+    end
+
     policy action_type(:read) do
       authorize_if actor_present()
     end

@@ -79,12 +79,19 @@ defmodule SdrAgent.SDR do
   defp committed({:error, error}), do: Repo.rollback(error)
 
   defp authorize(
-         %User{role: role, status: :active, tenant_id: tenant_id},
+         %User{role: role, status: :active, tenant_id: tenant_id} = actor,
          %{tenant_id: tenant_id},
-         _opts
+         opts
        )
-       when role in [:admin, :reviewer] and is_binary(tenant_id),
-       do: :ok
+       when role in [:admin, :reviewer] and is_binary(tenant_id) do
+    allowed =
+      SdrAgent.Prototype.runtime() == :ordinary or
+        SdrAgent.Operations.HostedOwners.legacy_human?(actor) or
+        (not Keyword.has_key?(opts, :owner_user_id) and
+           SdrAgent.Operations.HostedOwners.active?(actor))
+
+    if allowed, do: :ok, else: {:error, Ash.Error.Forbidden.exception([])}
+  end
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # D-237 (supplement 2 r2 section 2, Q1): the live resolved prototype
@@ -111,6 +118,7 @@ defmodule SdrAgent.SDR do
     correlation_id = Ecto.UUID.generate()
 
     with {:ok, lead} <- lock_lead(lead.id, actor),
+         :ok <- authorize(actor, lead, opts),
          :ok <- no_active_run(lead, agent),
          {:ok, _campaign} <- Sales.fetch(Sales.Campaign, campaign_id, actor: actor),
          :ok <- Agents.settings_complete(:assignment, actor: agent),

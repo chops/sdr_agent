@@ -1,0 +1,45 @@
+flowchart LR
+    Console[Owner console<br/>ordinary authority-compiled runtime]
+    Browser[Browser<br/>fragment-only bearer]
+    GET[Inert enrollment GET<br/>no-store, no-referrer, bundled JS]
+    Form[CSRF form<br/>history scrub before token fill]
+    POST[Enrollment POST<br/>one-use exchange and session renewal]
+    Operations[Operations.HostedOwners<br/>current activation rechecked under locks]
+    Scope[Private exact write scope<br/>registered process + transaction + action + row]
+    Owner[(Operations.HostedOwner<br/>one active per binding)]
+    Accounts[Accounts.User narrow scoped actions<br/>reviewer only, terminal disable]
+    Tokens[Existing JWT and Token actions<br/>15-minute enrollment purpose, one-use revoke]
+    Session[Normal stored user-purpose session]
+    Authority[Live owner resolver<br/>fresh user + owner + binding + activation]
+    Boot[Boot exact user set<br/>disabled history has zero unexpired unrevoked tokens]
+    Audit[(Audit ledger<br/>same transaction, no password/token bytes)]
+
+    Console -- marked enrollment / disable --> Operations
+    Operations --> Scope
+    Scope --> Owner
+    Scope --> Accounts
+    Operations --> Tokens
+    Tokens -- enrollment token returned to console only --> Console
+    Console -- URL presenter adds secret in fragment only --> Browser
+    Browser -- HTTP receives no fragment --> GET
+    GET -- bundled handoff, no automatic submit --> Form
+    Form -- explicit POST --> POST
+    POST -- same transaction: consume link then mint session --> Operations
+    Tokens -- exchange on current active owner only --> Session
+    Owner --> Authority
+    Accounts --> Authority
+    Authority -- review_read / assign only --> Review[Prototype review and assignment policies]
+    Authority -- exact live self disable --> Operations
+    WebPrincipal[Hosted website admission<br/>live owner or exact persisted bound auditor]
+    Authority --> WebPrincipal
+    WebPrincipal -- login / mount / connected revalidation --> Session
+    Boot --> Owner
+    Boot --> Accounts
+    Boot --> Tokens
+    Owner --> Audit
+    Accounts --> Audit
+
+    %% Source-only implementation, not a deployment or real-data approval.
+    %% Owner schema and POST verified on synthetic disposable databases.
+    %% Worker control, transcript scope and owner UI remain separate pending work.
+    %% Ordinary production builds without prototype authority cannot enroll or exchange.

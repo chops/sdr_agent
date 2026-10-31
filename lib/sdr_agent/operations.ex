@@ -12,14 +12,19 @@ defmodule SdrAgent.Operations do
   append-only relocation chain (`SdrAgent.Prototype.Relocation`,
   `SdrAgent.Prototype.RelocationEvent`; ADR-0024 decision 1), are
   kernel-only resources here, as is S-B2's `SdrAgent.Operations.MacWorker`
-  (an off-host executor; owner-run enrolment and control). Operations sits above Audit and Accounts (FKs to tenants and users)
+  (an off-host executor; owner-run enrolment and control).
+  `HostedOwner` (S-B5) binds a reviewer User to
+  the current activated relocation; this domain orchestrates enrollment,
+  single-use link exchange and terminal disable via narrow scoped Accounts
+  actions, never an Accounts dependency on Operations persistence.
+  Operations sits above Audit and Accounts (FKs to tenants and users)
   and below Agents, Sales, Research and Outreach, which open Failures here in
   the same transaction as the state change that causes them (S2 "Operator
   attention"): AgentRun failed / budget exhausted / system-cancelled, Lead
   blocked, Operation failed or discarded, a drifted model-provider
   attestation.
 
-  Public API (every function takes `actor:`; writes run through
+  Public API (operator functions take `actor:`; writes run through
   `SdrAgent.Audit.Guard`, so refused auditor mutations are audited):
 
     * operations — `create_operation/2`, `start_operation/2`,
@@ -34,7 +39,11 @@ defmodule SdrAgent.Operations do
       `open` or `acknowledged`, newest first (Dashboard and Operations views;
       ADM, REV, AUR, AUD);
     * `list_failed_webhooks/1` — `failed` WebhookEvents, newest first (the
-      operator webhook retry, S13b: `SdrAgent.Outreach.retry_webhook/2`).
+      operator webhook retry, S13b: `SdrAgent.Outreach.retry_webhook/2`);
+    * `enrol_hosted_owner/2` — owner console, marked ordinary-runtime
+      kernel only; `consume_hosted_owner_link/1` — signed stored enrollment
+      token, no actor impersonation; `disable_hosted_owner/2` — console or
+      exact live owner self, revoking every token in the same transaction.
   """
   use Ash.Domain,
     otp_app: :sdr_agent
@@ -59,6 +68,36 @@ defmodule SdrAgent.Operations do
     resource SdrAgent.Prototype.RelocationEvent
     # S-B2: the off-host executor of remote ClaudeCLI calls.
     resource SdrAgent.Operations.MacWorker
+    resource SdrAgent.Operations.HostedOwner
+  end
+
+  @doc "Console-only enrollment of one reviewer bound to the live activated relocation."
+  def enrol_hosted_owner(attrs, opts) do
+    Guard.run(
+      %{resource: SdrAgent.Operations.HostedOwner, action: :enrol, guarded?: true},
+      Keyword.get(opts, :actor),
+      fn -> SdrAgent.Operations.HostedOwners.enrol(attrs, opts) end
+    )
+  end
+
+  @doc "Exchange one signed, stored, 15-minute enrollment link for a normal user session."
+  def consume_hosted_owner_link(token), do: SdrAgent.Operations.HostedOwners.consume_link(token)
+
+  @doc "Whether the User is admissible to this runtime's website, with fresh hosted authority."
+  def hosted_web_principal?(user), do: SdrAgent.Operations.HostedOwners.web_principal?(user)
+
+  @doc "Terminal owner disable, coupled to disabling the reviewer and revoking every token."
+  def disable_hosted_owner(id, opts) do
+    Guard.run(
+      %{
+        resource: SdrAgent.Operations.HostedOwner,
+        action: :disable,
+        subject_id: id,
+        guarded?: true
+      },
+      Keyword.get(opts, :actor),
+      fn -> SdrAgent.Operations.HostedOwners.disable(id, opts) end
+    )
   end
 
   ## Operations
