@@ -421,6 +421,18 @@ defmodule SdrAgent.Agents.RemoteSettlerTest do
     end
   end
 
+  # Codex R1 (review ba7a3851): a result before the init must not be padding
+  # that a later init and result make acceptable.
+  test "item 14: a result before init then a valid init and result is unprocessable",
+       %{fx: fx} do
+    c = settled_completed!(fx, S.stream([S.result_event(), S.init_event(), S.result_event()]))
+
+    assert_unprocessable!(fx, c.row, "result_init_result")
+
+    assert is_nil(c.row["parsed_output"]),
+           "parsed output kept: #{inspect(c.row["parsed_output"])}"
+  end
+
   ## Item 15
 
   describe "item 15: schema drift fails remote_result_unprocessable" do
