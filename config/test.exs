@@ -80,8 +80,8 @@ config :sdr_agent, seeding_allowed?: true
 config :sdr_agent, SdrAgentWeb.LiveRefresh, debounce_ms: 0
 
 # D-237 (ADR-0005 D-237 amendment item 2 "Development build only"): compiles
-# the prototype authority. Only this file and config/dev.exs set it; the
-# production build holds the refusal stubs of SdrAgent.Prototype only.
+# the test prototype authority. The accepted ADR-0024 hosted_prototype
+# build also compiles it; ordinary prod retains only the refusal stubs.
 config :sdr_agent, prototype_authority_compiled: true
 
 config :sdr_agent, human_authority_provider: SdrAgent.Operations.HostedOwners
