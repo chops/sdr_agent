@@ -10,14 +10,18 @@ defmodule SdrAgent.Prototype.RelocationChainTest do
     `from_identity` and `to_identity` (each an identity
     `%{database:, database_oid:, system_identifier:}`, read back with those
     atom keys); `(binding_id, relocation_seq)` is unique and the seq is the
-    chain's next one (1 first, then the highest plus one);
+    chain's next one (1 first, then the highest plus one); `from_identity`
+    equals the chain's current authority under the head lock (the original
+    with no activation, else the latest activated destination); any other
+    from_identity (stale or third) is `Ash.Error.Invalid` with no row;
   - `RelocationEvent :append` accepts `relocation_id` and `kind`, one of
     planned, writers_stopped, fenced, restored, activated,
     destination_disabled, aborted; it records `identity` as the live
     database identity at the write (never caller-supplied), and
     `recorded_at`;
   - order: planned → writers_stopped → fenced → restored → activated; one
-    event of each kind per relocation; `aborted` only before `activated`
+    event of each kind per relocation; planned is always first (so
+    `aborted` on an empty event chain is refused); `aborted` only before `activated`
     and, when `restored` exists, only after `destination_disabled`;
     `destination_disabled` only after `restored` and before `activated`;
     nothing after `aborted` or `activated`; `activated` never after
@@ -293,6 +297,53 @@ defmodule SdrAgent.Prototype.RelocationChainTest do
     end
   end
 
+  ## from_identity (Codex hold review 004447Z Pick3)
+
+  describe "from_identity is the current authority under the head lock" do
+    defp refused_create!(ctx, seq, from, to) do
+      before = count(@relocation)
+      result = create_relocation(ctx.fx, seq, from, to, owner(ctx.fx))
+
+      assert match?({:error, %Ash.Error.Invalid{}}, result),
+             "from_identity #{inspect(from)}: expected Invalid, got #{inspect(result)}"
+
+      assert count(@relocation) == before, "the refused create wrote a row"
+    end
+
+    test "with no activation, the original source identity succeeds", ctx do
+      relocation = relocation!(ctx)
+      assert ident(relocation.from_identity) == ctx.original
+      assert count(@relocation) == 1
+    end
+
+    test "with no activation, the destination or a third identity is refused", ctx do
+      stranger = %{ctx.original | database_oid: ctx.original.database_oid + 2_000}
+      refused_create!(ctx, 1, ctx.destination, ctx.original)
+      refused_create!(ctx, 1, stranger, ctx.destination)
+    end
+
+    test "after an activation, the stale source or a third identity is refused", ctx do
+      first = relocation!(ctx, 1)
+      chain!(ctx, first, [:planned, :writers_stopped, :fenced, :restored, :activated])
+      stranger = %{ctx.original | database_oid: ctx.original.database_oid + 2_000}
+      refused_create!(ctx, 2, ctx.original, ctx.destination)
+      refused_create!(ctx, 2, stranger, ctx.original)
+    end
+
+    test "after an activation, seq + 1 from the activated destination succeeds", ctx do
+      first = relocation!(ctx, 1)
+      chain!(ctx, first, [:planned, :writers_stopped, :fenced, :restored, :activated])
+      result = create_relocation(ctx.fx, 2, ctx.destination, ctx.original, owner(ctx.fx))
+      assert match?({:ok, %{relocation_seq: 2}}, result), "return relocation: #{inspect(result)}"
+      {:ok, back} = result
+
+      assert {ident(back.from_identity), ident(back.to_identity)} ==
+               {ctx.destination, ctx.original}
+
+      assert count(@relocation) == 2
+    end
+  end
+
   ## Event identity
 
   describe "each event is refused at the wrong database identity" do
@@ -389,6 +440,14 @@ defmodule SdrAgent.Prototype.RelocationChainTest do
   end
 
   describe "the abort branch" do
+    # Codex hold review 004447Z Pick2: planned-first is the lifecycle, so
+    # `aborted` on an empty event chain is refused.
+    test "aborted on an empty event chain is refused, writing no row", ctx do
+      relocation = relocation!(ctx)
+      refused_invalid!(ctx, relocation, :aborted)
+      assert count(@event) == 0
+    end
+
     test "abort is allowed straight after planned", ctx do
       relocation = relocation!(ctx)
       chain!(ctx, relocation, [:planned, :aborted])
@@ -480,6 +539,7 @@ defmodule SdrAgent.Prototype.RelocationChainTest do
     end
 
     defp activated_only?(nil), do: false
+
     defp activated_only?(predicate),
       do: predicate =~ ~r/^\(\(?kind\)?(::[a-z ]+)? = 'activated'::[a-z ]+\)$/
 

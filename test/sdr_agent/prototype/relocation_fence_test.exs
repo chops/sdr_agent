@@ -14,6 +14,14 @@ defmodule SdrAgent.Prototype.RelocationFenceTest do
     writing no invocation, no audit event and no status change; the check
     runs after `Kernel.lock_head`, so a reservation made before the fence
     committed is refused at admission;
+  - every other audit-appending writer re-checks the same fence after
+    `Kernel.lock_head`, refusing with `{:error, :relocation_fenced}` and
+    writing no event, run, Operation or job: assign
+    (`SdrAgent.SDR.assign_lead/2`), job-start
+    (`SdrAgent.Operations.start_operation/2`, `SdrAgent.Agents.start_run/2`),
+    settlement (`SdrAgent.Agents.complete_model_invocation/3`) and a stale
+    non-model writer that started before the fence
+    (`SdrAgent.Agents.set_run_phase/3` on a run started before it);
   - an `aborted` after the fence lifts it on the source;
   - the copied fence names the source identity: the destination (a
     different live identity) with an activation admits a reservation;
@@ -188,6 +196,124 @@ defmodule SdrAgent.Prototype.RelocationFenceTest do
       owner_run!(ctx, ctx.original, fn -> append!(ctx, relocation, [:aborted]) end)
       result = G.reserve(ctx.fx, ctx.run)
       assert match?({:ok, %ModelInvocation{}}, result), "reserve after abort: #{inspect(result)}"
+    end
+  end
+
+  ## Every audit-appending writer (Codex hold review 004447Z must_fix; plan
+  ## R2 "Final fence serialization": reserve, admit, assign, settlement and
+  ## job-start writes re-check the fence after Kernel.lock_head).
+
+  describe "non-model audit-appending writers on a fenced source" do
+    defp tenant_count(table, fx) do
+      %{rows: [[n]]} =
+        Repo.query!(~s[SELECT count(*) FROM "#{table}" WHERE tenant_id = $1], [
+          Ecto.UUID.dump!(fx.tenant.id)
+        ])
+
+      n
+    end
+
+    defp writes(ctx) do
+      %{rows: [[jobs]]} = Repo.query!("SELECT count(*) FROM oban_jobs", [])
+
+      {length(events(ctx.fx.tenant)), tenant_count("agent_runs", ctx.fx),
+       tenant_count("operations", ctx.fx), jobs, G.invocations(ctx.fx)}
+    end
+
+    defp refused_fenced!(ctx, label, fun) do
+      before = writes(ctx)
+      result = fun.()
+
+      assert result == {:error, :relocation_fenced},
+             "#{label} on a fenced source: #{inspect(result)}"
+
+      assert writes(ctx) == before, "the refused #{label} wrote an event, run, operation or job"
+    end
+
+    # A synthetic lead assigned through `SdrAgent.SDR.assign_lead/2` (the
+    # bound admin), its run and Operation queued, before any fence.
+    defp assigned_queued!(ctx) do
+      campaign = SdrAgent.SalesFixtures.active_campaign!(ctx.fx.tenant)
+      lead = SdrAgent.SalesFixtures.lead!(ctx.fx.tenant)
+      assigned = SdrAgent.SDR.assign_lead(lead, campaign_id: campaign.id, actor: ctx.fx.admin)
+      assert match?({:ok, %{run: _, operation: _, job: _}}, assigned), "prerequisite: assign"
+      {:ok, queued} = assigned
+      queued
+    end
+
+    test "assign: SDR.assign_lead/2 is refused", ctx do
+      campaign = SdrAgent.SalesFixtures.active_campaign!(ctx.fx.tenant)
+      lead = SdrAgent.SalesFixtures.lead!(ctx.fx.tenant)
+      _relocation = fenced!(ctx)
+      before = lead_row(lead)
+
+      refused_fenced!(ctx, "assign", fn ->
+        SdrAgent.SDR.assign_lead(lead, campaign_id: campaign.id, actor: ctx.fx.admin)
+      end)
+
+      assert lead_row(lead) == before,
+             "the refused assign changed the lead's status/assigned_at"
+    end
+
+    defp lead_row(lead) do
+      %{rows: [row]} =
+        Repo.query!("SELECT status::text, assigned_at FROM leads WHERE id = $1", [
+          Ecto.UUID.dump!(lead.id)
+        ])
+
+      row
+    end
+
+    test "job-start: the assigned Operation's and run's starts are refused", ctx do
+      queued = assigned_queued!(ctx)
+      _relocation = fenced!(ctx)
+
+      refused_fenced!(ctx, "operation start", fn ->
+        SdrAgent.Operations.start_operation(queued.operation, actor: ctx.fx.agent)
+      end)
+
+      refused_fenced!(ctx, "run start", fn ->
+        SdrAgent.Agents.start_run(queued.run, actor: ctx.fx.agent)
+      end)
+
+      assert Ash.get!(SdrAgent.Operations.Operation, queued.operation.id, authorize?: false).status ==
+               queued.operation.status
+
+      assert Ash.get!(SdrAgent.Agents.AgentRun, queued.run.id, authorize?: false).status ==
+               queued.run.status
+    end
+
+    test "settlement: completing a call sent before the fence is refused, still sent", ctx do
+      reserved = G.reserve(ctx.fx, ctx.run)
+      assert match?({:ok, %ModelInvocation{}}, reserved), "prerequisite: reserve"
+      {:ok, reserved} = reserved
+      sent = G.launch(ctx.fx, reserved)
+      assert match?({:ok, %ModelInvocation{status: :sent}}, sent), "prerequisite: launch"
+      {:ok, sent} = sent
+      _relocation = fenced!(ctx)
+
+      refused_fenced!(ctx, "settlement", fn ->
+        SdrAgent.Agents.complete_model_invocation(
+          sent,
+          SdrAgent.AgentsFixtures.completion(),
+          actor: ctx.fx.agent
+        )
+      end)
+
+      assert status(sent) == :sent
+    end
+
+    test "a stale non-model writer: a run started before the fence cannot change phase", ctx do
+      run = ctx.run
+      assert run.status == :running, "prerequisite: a running run"
+      _relocation = fenced!(ctx)
+      next = if run.phase == :qualify, do: :plan, else: :qualify
+
+      refused_fenced!(ctx, "stale set_run_phase", fn ->
+        SdrAgent.Agents.set_run_phase(run, next, actor: ctx.fx.agent)
+      end)
+
+      assert Ash.get!(SdrAgent.Agents.AgentRun, run.id, authorize?: false).phase == run.phase
     end
   end
 

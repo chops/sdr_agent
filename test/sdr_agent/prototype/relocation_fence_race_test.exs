@@ -193,6 +193,7 @@ defmodule SdrAgent.Prototype.RelocationFenceRaceTest do
 
     # (b) A writer that starts after the fence commit is refused.
     before = effects(ctx)
+
     writer_b =
       participant(ctx, :writer_b, fn ->
         as_writer!(ctx)
@@ -224,7 +225,7 @@ defmodule SdrAgent.Prototype.RelocationFenceRaceTest do
             scalar(
               "SELECT count(*) FROM audit_events WHERE subject_id = $1 " <>
                 "AND event_type = 'model.invocation.reserved'",
-              [id]
+              [invocation.id]
             ),
           fenced:
             scalar(
