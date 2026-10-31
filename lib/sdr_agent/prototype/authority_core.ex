@@ -1021,6 +1021,9 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     def operator?(_actor), do: false
 
+    @doc "True only for the live persisted reviewer of the current hosted activation."
+    def hosted_owner?(actor), do: SdrAgent.Operations.HostedOwners.active?(actor)
+
     # IF-2 phase 0: the one Repo target, sorted by key.
     @repo_target [database: @database, port: 5542, socket_dir: "/private/tmp/d237-pg-5542"]
     # Every Repo option that selects a PostgreSQL target (Postgrex/Ecto).
@@ -1144,7 +1147,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_028_052_425, "d237_07_dossier"},
       {20_261_031_001_212, "d270_01_relocation_chain"},
       {20_261_031_022_459, "d270_02_relocation_event_position"},
-      {20_261_031_064_445, "d270_03_remote_calls"}
+      {20_261_031_064_445, "d270_03_remote_calls"},
+      {20_261_031_072_755, "d270_10_hosted_owner"}
     ]
 
     # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
@@ -1158,7 +1162,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       audit_accesses audit_anchors audit_chain_heads audit_events audit_exports
       audit_signing_keys campaign_enrollments campaigns claim_nonces contacts decisions
       delivery_operations delivery_receipts dossier_entries dossier_sources
-      draft_revisions drafts evidence_claims failures icp_definitions leads
+      draft_revisions drafts evidence_claims failures hosted_owners icp_definitions leads
       mac_workers model_call_allocations model_call_grants model_invocations
       model_profile_settings model_profile_switches model_result_releases
       model_server_counters model_server_starts oban_jobs oban_peers operations

@@ -3,11 +3,15 @@ defmodule SdrAgent.Prototype.Checks.OperatorAction do
   Policy check for the D-237 prototype operator (interfaces r6 IF-3):
   `authorize_if {SdrAgent.Prototype.Checks.OperatorAction, action: atom}`.
 
-  It passes only when `action` is one of the closed operator atoms
+  For a delegated operator it passes only when `action` is one of the closed operator atoms
   (`actions/0`), the runtime is prototype, and the authoritative resolver
   `SdrAgent.Prototype.operator_actor/1`, re-run on `actor.id`, returns
   exactly that actor (type, id and tenant). An `SdrAgent.Actor` struct, its
   type or its fields are never proof by themselves.
+
+  A hosted User has a separate, fresh-owner-only namespace: review_read,
+  assign, mac_worker_control and transcript_read. The latter two are never
+  added to actions/0 and cannot grant a delegated operator new powers.
 
   It is compiled only with the prototype authority
   (`:prototype_authority_compiled`); the production build refuses every
@@ -42,6 +46,11 @@ defmodule SdrAgent.Prototype.Checks.OperatorAction do
     def match?(%SdrAgent.Actor{type: :prototype_operator, id: id} = actor, _authorizer, opts)
         when is_binary(id) do
       Keyword.get(opts, :action) in @actions and SdrAgent.Prototype.Authority.operator?(actor)
+    end
+
+    def match?(%SdrAgent.Accounts.User{} = actor, _authorizer, opts) do
+      Keyword.get(opts, :action) in [:review_read, :assign, :mac_worker_control, :transcript_read] and
+        SdrAgent.Prototype.Authority.hosted_owner?(actor)
     end
 
     def match?(_actor, _authorizer, _opts), do: false

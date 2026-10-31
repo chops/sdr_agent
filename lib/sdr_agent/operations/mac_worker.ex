@@ -20,22 +20,27 @@ defmodule SdrAgent.Operations.MacWorker do
 
   Actions:
 
-    * `:enrol`, `:disable`, `:set_intake` — owner-run in ordinary runtime
-      only: a kernel request carrying the
+    * `:enrol`, `:disable`, `:set_intake` — the ordinary console uses a
+      kernel request carrying the
       `SdrAgent.Prototype.Checks.KernelMarker` `:mac_worker` marker;
-      prototype runtime refuses them for every actor
-      (`SdrAgent.Prototype.Checks.PrototypeRuntime`). `:enrol` generates the
+      prototype runtime requires the fresh hosted owner and the exact
+      current tenant/binding. Updates lock and reread the worker, then
+      revalidate after the audit head lock shared with owner disable.
+      No owner/User/run/call locks are introduced. `:enrol` generates the
       32 random token bytes, stores only their SHA-256 and returns the token
       once as the created record's `:token` metadata. `:set_intake` and
       `:disable` require an active worker. Each appends one AuditEvent
       (`mac_worker.enrolled`, `mac_worker.intake_set`,
       `mac_worker.disabled`; category `:domain_change`) through
-      `SdrAgent.Audit.Changes.AppendEvent`. S-B5 moves them to the hosted
-      owner with the same names and arguments.
+      `SdrAgent.Audit.Changes.AppendEvent`. The partial unique index refuses
+      a second active worker, without silent replacement. Pause closes new
+      intake only, leaving an already-claimed call's completion/expiry path.
     * `:touch_last_seen` — internal: only inside the RemoteCalls scope
       (`SdrAgent.Agents.Checks.RemoteCallsScope`; the heartbeat), writes
       `last_seen_at` only.
-    * reads — the audit kernel or the RemoteCalls scope.
+    * default reads — the audit kernel or the RemoteCalls scope. The
+      explicit `:owner_read` action additionally permits the current hosted
+      owner's tenant/binding rows, without any one-time enrollment token.
 
   A trigger refuses DELETE, TRUNCATE, any update of a disabled row and any
   update of a column other than `status`, `intake`, `disabled_at` and
@@ -52,8 +57,10 @@ defmodule SdrAgent.Operations.MacWorker do
   alias SdrAgent.Audit.Changes.Stamp
   alias SdrAgent.Audit.Changes.Transition
   alias SdrAgent.Audit.Checks
-  alias SdrAgent.Prototype.Checks.KernelMarker
-  alias SdrAgent.Prototype.Checks.PrototypeRuntime
+  alias SdrAgent.Operations.Changes.RecheckMacWorkerControl
+  alias SdrAgent.Operations.Checks.MacWorkerControl
+  alias SdrAgent.Operations.Checks.OwnerWorkerBinding
+  alias SdrAgent.Prototype.Checks.OperatorAction
 
   @pin_keys ~w(profile_id model_id cli_version executable_sha256)
   @transitions [{:disable, [:active], :disabled}]
@@ -105,12 +112,17 @@ defmodule SdrAgent.Operations.MacWorker do
   actions do
     defaults [:read]
 
+    read :owner_read do
+      description "Current hosted owner's worker metadata, exact tenant and binding only."
+    end
+
     create :enrol do
       description "S-B2: owner-run enrolment; returns the one-time token as metadata."
       accept [:binding_id, :profile_pins]
       validate {SdrAgent.Operations.MacWorker.ValidatePins, keys: @pin_keys}
       change SdrAgent.Operations.MacWorker.IssueToken
       change SdrAgent.Audit.Changes.SetTenant
+      change RecheckMacWorkerControl
 
       change {AppendEvent, event_type: "mac_worker.enrolled", category: :domain_change}
     end
@@ -118,7 +130,9 @@ defmodule SdrAgent.Operations.MacWorker do
     update :disable do
       description "S-B2: owner-run; active → disabled (terminal)."
       require_atomic? false
-      change {Transition, from: [:active], to: :disabled}
+      change get_and_lock_for_update()
+      change RecheckMacWorkerControl
+      change {Transition, from: [:active], to: :disabled, locked?: true}
       change {Stamp, fields: [:disabled_at]}
 
       change {AppendEvent,
@@ -129,7 +143,9 @@ defmodule SdrAgent.Operations.MacWorker do
       description "S-B2: owner-run; opens or pauses an active worker's intake."
       require_atomic? false
       accept [:intake]
-      validate attribute_equals(:status, :active)
+      change get_and_lock_for_update()
+      change RecheckMacWorkerControl
+      validate attribute_equals(:status, :active), before_action?: true
 
       change {AppendEvent,
               event_type: "mac_worker.intake_set", category: :domain_change, previous: [:intake]}
@@ -143,14 +159,22 @@ defmodule SdrAgent.Operations.MacWorker do
   end
 
   policies do
-    policy action_type(:read) do
+    policy action(:read) do
       authorize_if Checks.KernelContext
       authorize_if RemoteCallsScope
     end
 
+    policy action(:owner_read) do
+      access_type :strict
+      authorize_if {OperatorAction, action: :mac_worker_control}
+    end
+
+    policy action(:owner_read) do
+      authorize_if OwnerWorkerBinding
+    end
+
     policy action([:enrol, :disable, :set_intake]) do
-      forbid_if PrototypeRuntime
-      authorize_if {KernelMarker, marker: :mac_worker}
+      authorize_if MacWorkerControl
     end
 
     policy action(:touch_last_seen) do

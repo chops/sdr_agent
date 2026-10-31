@@ -99,6 +99,10 @@ config :sdr_agent, seeding_allowed?: true
 # production build holds the refusal stubs of SdrAgent.Prototype only.
 config :sdr_agent, prototype_authority_compiled: true
 
+# Lower-owned policy interface; only authority-compiled builds select the
+# upper implementation. Runtime/request config cannot replace this binding.
+config :sdr_agent, human_authority_provider: SdrAgent.Operations.HostedOwners
+
 # <!-- >>> workflow-factory:workflow-project-config >>> -->
 config :sdr_agent, SdrAgent.Repo,
   database: "sdr_agent_dev",

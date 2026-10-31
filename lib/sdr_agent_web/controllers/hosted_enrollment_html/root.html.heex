@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <meta name="referrer" content="no-referrer" />
+    <title>Owner enrollment · SDR Console</title>
+    <link rel="stylesheet" href={~p"/assets/css/app.css"} />
+    <script defer type="text/javascript" src={~p"/assets/js/app.js"}>
+    </script>
+  </head>
+  <body>
+    <Layouts.prototype_banner />
+    {@inner_content}
+  </body>
+</html>

@@ -84,18 +84,19 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert call(@authority, :check_resumable, []) == {:error, :database_not_resumable}
     end
 
-    test "the pinned migration set ends with the seven d237 migrations, then S-B1's two d270 and S-B2's d270_03" do
+    test "the pinned migration set ends with the seven d237 migrations, then S-B1, S-B2 and S-B5 migrations" do
       versions = call(@authority, :pinned_migrations, [])
       assert is_list(versions), "pinned_migrations/0 returned #{inspect(versions)}"
       names = Enum.map(versions, fn {_version, name} -> name end)
 
-      assert Enum.take(names, -3) == [
+      assert Enum.take(names, -4) == [
                "d270_01_relocation_chain",
                "d270_02_relocation_event_position",
-               "d270_03_remote_calls"
+               "d270_03_remote_calls",
+               "d270_10_hosted_owner"
              ]
 
-      assert Enum.slice(names, -10, 7) == [
+      assert Enum.slice(names, -11, 7) == [
                "d237_01_users",
                "d237_02_actor_types",
                "d237_03_prototype_database_bindings",
@@ -347,7 +348,7 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert is_list(pinned), "pinned_migrations/0 returned #{inspect(pinned)}"
       assert pinned == migration_files()
       assert pinned == Enum.sort(pinned)
-      assert length(pinned) == 37
+      assert length(pinned) == 38
 
       %{rows: rows} =
         Repo.query!("SELECT version FROM schema_migrations ORDER BY version", [])

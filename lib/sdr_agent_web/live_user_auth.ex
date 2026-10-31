@@ -44,16 +44,24 @@ defmodule SdrAgentWeb.LiveUserAuth do
   def on_mount(:operator, _params, session, socket) do
     case socket.assigns[:current_user] do
       %SdrAgent.Accounts.User{} = user ->
-        {:cont,
-         socket
-         |> assign(:current_scope, SdrAgentWeb.Scope.for_user(user))
-         |> Phoenix.LiveView.put_private(:operator_session, Map.take(session, [@token_key]))
-         |> Phoenix.LiveView.attach_hook(:operator_revalidate, :handle_event, &revalidate_event/3)
-         |> Phoenix.LiveView.attach_hook(
-           :operator_revalidate,
-           :handle_params,
-           &revalidate_params/3
-         )}
+        if SdrAgent.Operations.hosted_web_principal?(user) do
+          {:cont,
+           socket
+           |> assign(:current_scope, SdrAgentWeb.Scope.for_user(user))
+           |> Phoenix.LiveView.put_private(:operator_session, Map.take(session, [@token_key]))
+           |> Phoenix.LiveView.attach_hook(
+             :operator_revalidate,
+             :handle_event,
+             &revalidate_event/3
+           )
+           |> Phoenix.LiveView.attach_hook(
+             :operator_revalidate,
+             :handle_params,
+             &revalidate_params/3
+           )}
+        else
+          {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
+        end
 
       _ ->
         {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/sign-in")}
@@ -81,7 +89,7 @@ defmodule SdrAgentWeb.LiveUserAuth do
   end
 
   def on_mount(:live_no_user, _params, _session, socket) do
-    if socket.assigns[:current_user] do
+    if SdrAgent.Operations.hosted_web_principal?(socket.assigns[:current_user]) do
       {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/")}
     else
       {:cont, assign(socket, :current_user, nil)}
@@ -128,7 +136,12 @@ defmodule SdrAgentWeb.LiveUserAuth do
   end
 
   defp current_operator(session) do
-    SdrAgent.Accounts.current_operator(Map.get(session, @token_key))
+    with {:ok, user} <- SdrAgent.Accounts.current_operator(Map.get(session, @token_key)),
+         true <- SdrAgent.Operations.hosted_web_principal?(user) do
+      {:ok, user}
+    else
+      _refused -> :error
+    end
   end
 
   defp check_role(socket) do

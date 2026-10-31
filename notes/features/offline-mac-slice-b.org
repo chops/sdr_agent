@@ -829,6 +829,127 @@ only through the prototype gate) extends to claude_cli transport :remote.
 6. Later, a separate approval: one remaining import slot plus one assign
    as the live check. Pick: decide after the slices land.
 
+* S-B5 enrollment and human boundary checkpoint (2026-10-31)
+
+Source-only synthetic implementation in codex/offline-hosted-owner-green,
+based on S-B2 5293ee1f. Enrollment, single-use link exchange, terminal disable,
+exact boot membership, independent human metadata checks, assignment refusal
+and hosted web admission have focused coverage (119/119 at canonical run
+x2-20261031T074611Z-12665). This is not a full-feature or deployment PASS;
+worker controls, transcript read scope and owner-safe LiveViews remain.
+
+** Reconciled residual human contract (K4, independently accepted)
+
+Persisted nonowner prototype humans retain preexisting domain rights, only
+after fresh persisted id/tenant/role/status comparison. ANY HostedOwner row
+associated with the User, including disabled history, prevents that fallback.
+This deliberately preserves existing nonowner approval/revoke and binding-drift
+refusal contracts rather than changing them as an incidental owner feature.
+Real boot still refuses extra/unbound Users; the hosted website admits only a
+live owner or exact bound persisted auditor, not those legacy nonowners.
+Ordinary runtime semantics are unchanged. This residual must appear in the
+integration handback. Entity/plan review: Claude 219ae9a4; step2 RED GO
+m_1793432505000000000_641f4b2c; fixture GO m_1793432724000000000_ee5f1019.
+
+** Source-review M1: preserve domain layering through a lower interface
+
+f0d46454 source review d089b8b0 found ActorRole directly depending on upper
+owner persistence. Correction plan 77522295 was independently accepted by
+Claude (m_1793433855000000000_28b4f318), with no ADR-0009 exception.
+Audit owns HumanAuthority role/write-scope callbacks. Prototype dev/test
+builds explicitly bind the Operations implementation at compile time;
+ordinary builds keep a lower constant implementation; missing prototype
+selection fails closed. User and ActorRole know no upper implementation.
+The conditional callback implementation still performs the same fresh
+owner/history lookups, explicitly shown in maintained diagrams. Runtime
+config cannot replace the provider. No caching changes were introduced.
+M1 RED: x2-20261031T080537Z-97708, 5 intended assertion failures; GREEN GO
+m_1793433997000000000_a2f0305d. GREEN x2-20261031T080930Z-14721:
+124/124, no skips/exclusions. Expanded x2-20261031T081137Z-24471:
+235/251, the same 16 inherited failure names as the prior 246-test run;
+no new/removed failure names, skips or exclusions. Owned DBs dropped.
+Source review remains required. Full gate at f0d46454 passed workflow,
+format, compile, codegen and plain Credo, then stopped at the known
+dependency audit before DB effects. ADR-0008 patch 35dbf73e / PR244 awaits
+owner acceptance; no advisory ignored and no dependency upgrade assumed.
+Integrated c84c14a7 at 759b0628. First production WAE exposed a constant
+false/true comparison in HumanAuthority's ordinary provider (no behavior
+grant). Bind constant-deny branches at compile time for Ordinary/Unavailable;
+dynamic provider callbacks still reject non-true results and exceptions.
+After correction, prod/test/dev WAE all rc0 (2026-10-31T08:20Z).
+
+R1 source review a829a41d found remaining lower metadata edges through upper
+HumanRead/HostedOwnerAccess. Plan daac0fd5 PASS+RED GO
+m_1793435028000000000_3a926ebc; RED x2-20261031T082907Z-976:
+4 intended assertion failures; GREEN GO m_1793435441000000000_657f8e9c.
+HumanAuthority now owns human_read?/1 and hosted_owner?/1 callbacks too;
+Audit-owned pure HumanActor and delegated HumanRead/HostedOwnerAccess checks
+remove all Operations/Prototype.Checks names from Audit source. Exact Tenant
+id filter and global provenance semantics are unchanged. Ordinary accepts
+only User metadata and no hosted owner; Unavailable denies both. A synchronous
+test temporarily compiles the unavailable provider into the interface for
+actual resource reads, restoring the original BEAM in after. GREEN
+x2-20261031T083432Z-26116:23/23 including the4 new metadata checks,5 original
+interface checks and14 worker/race checks, no skips/exclusions, DBs dropped.
+Prod/test/dev WAE rc0; format/plainCredo/codegen rc0. Source review required.
+Generic diagram preview sb5-diagrams-o4oGMz was reviewed; inaccurate generic
+counts and missing runtime conditions were not substituted for maintained
+diagrams. Lower metadata edges are explicitly maintained instead.
+
+** Remaining controls: worker RED
+
+Entity48dfc516 PASS with W1-W4 (Claude051bc596,
+m_1793433568000000000_ed26ea34); concrete steps in
+codex-sb5-controls-implementation-plan-20261031.org. W1 refuses a second
+active worker; W2 chosen claim-time live-owner check after retained head
+lock, separate transport RED; W3 access/read in one transaction; W4 pause
+closes new intake, never completion/expiry. Worker tests only:
+x2-20261031T082102Z-65315, 2 existing PASS + 11 intended new assertion
+failures, no skips/exclusions, owned DBs dropped. Includes independent
+head-wait owner-disable race. Receipt codex-sb5-worker-red-receipt-20261031.org.
+Worker GREEN GO m_1793434954000000000_c5339fd0 with T1/T2 amendments:
+head-wait race requires Forbidden; foreign persisted worker updates leave
+row/events unchanged. A second fixture world cannot coexist with singleton
+tenant/binding, so the existing isolated replica fault helper plants foreign
+worker rows; this is setup only. Final tests sha ad03655d (controls),
+2a5c837a (race). First GREEN12/14 exposed two oracle mistakes: absent required
+binding is Invalid.Required before policy evaluation; unchanged private
+read may return an empty filtered list. Corrected these exact assertions,
+retaining every actual actor/binding Forbidden oracle and no-row/event
+checks. Repeated stale disable then exposed a genuine transition issue;
+the existing Transition locked?:true helper now checks the reread row.
+Final x2-20261031T083432Z-26116:23/23 (worker/race14 plus lower authority9),
+no skips/exclusions, DBs dropped. W2 remains Claude-owned, not implemented
+by this slice. Transcript RED8/8 at x2-20261031T082447Z-80827; GREEN GO
+m_1793435316000000000_74781a10 requires stronger denials, reader-scope
+forgery and head-wait revocation tests. Transcript/UI GREEN not started.
+
+** Explicit transcript domain reader checkpoint
+
+Transcript T1-T3 amended RED x2-20261031T084126Z-51033:3 existing pass,
+10 intended assertions; tests af07fe44 (transcript),2c93a623 (race).
+Source adds explicit owner metadata and private owner_transcript actions;
+the latter's row and transcript-field checks require exact registered
+process/transaction/actor/call scope. No public constructor/test seam.
+Read takes the audit head, rechecks the current owner, reads and appends
+fixed-purpose User-attributed AuditAccess in one transaction, then returns
+after commit. Caller transactions are refused; error text/bytes never log.
+Default/integrity and future settlement reads remain separate. Optional
+read arguments ensure unauthorized missing-argument requests still hit the
+strict refusal rather than exposing schema-validation oracles; the public
+API and private scope require a canonical id. Ordinary production compiles
+only refusal stubs (no unreachable true-vs-false WAE branches).
+GREEN x2-20261031T084426Z-61913:13/13. Combined worker/lower authority/
+S-B2 transport/S-B7 agent x2-20261031T084721Z-72240:142/142, no skips or
+exclusions, owned DBs dropped. Format, test compile, plainCredo and codegen
+rc0; prod/dev WAE rc0 before final behavior-preserving list/callback
+extraction for Credo. Full gate remains blocked by owner-pending ADR-0008
+dependency amendment. Source review required. No UI implementation yet.
+
+Worker source PASS9f61decc is now backed by broad251/267 with exact same16
+inherited failure names (new0 removed0), plus S-B2/S-B7 120/120 at
+x1-20261031T084156Z-53247. Reviewed S-B7 d25ae812 integrated at f28fb03e.
+
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
 Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.

@@ -1,0 +1,40 @@
+<Layouts.app flash={@flash} current_scope={@current_scope}>
+  <section class="mx-auto flex min-h-[65vh] max-w-lg items-center px-4 py-12">
+    <div class="w-full rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
+      <div class="mb-6 grid size-12 place-items-center rounded-xl bg-teal-50 text-teal-700">
+        <.icon name="hero-key" class="size-6" />
+      </div>
+      <p class="text-xs font-semibold uppercase tracking-[0.16em] text-teal-700">Owner access</p>
+      <h1 class="mt-2 text-2xl font-semibold tracking-tight text-zinc-950">
+        Open your SDR workspace
+      </h1>
+      <p class="mt-3 text-sm leading-6 text-zinc-600">
+        Use the one-time link from your server console. It is valid for 15 minutes
+        and grants reviewer access to this activation only.
+      </p>
+      <.form
+        for={%{}}
+        id="hosted-enrollment-form"
+        action={~p"/hosted-enrollment"}
+        method="post"
+        class="mt-8"
+      >
+        <.input type="hidden" name="enrollment_token" value="" />
+        <button
+          type="submit"
+          disabled
+          class="flex w-full items-center justify-center gap-2 rounded-lg bg-zinc-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-teal-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500"
+        >
+          Enter workspace <.icon name="hero-arrow-right" class="size-4" />
+        </button>
+      </.form>
+      <p class="mt-4 text-xs leading-5 text-zinc-500">
+        If the button stays unavailable, request a fresh link from the console.
+        This page never consumes a link until you choose to continue.
+      </p>
+      <noscript>
+        <p class="mt-4 text-sm text-amber-800">JavaScript is required for secure enrollment.</p>
+      </noscript>
+    </div>
+  </section>
+</Layouts.app>

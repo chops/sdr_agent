@@ -34,6 +34,12 @@ defmodule SdrAgent.Accounts.User do
       kernel request carrying the prototype `:setup` marker
       (`SdrAgent.Prototype.Checks.KernelMarker`), which no production build
       matches;
+    * `:create_hosted_owner` and `:disable_hosted_owner_user` — only the
+      exact process/transaction-bound Operations enrollment/disable scope;
+      a hosted identity is an ordinary reviewer with an unknown generated
+      password, never an admin or anchor. Creation records `user.created`;
+      terminal disable records `user.status_changed` and revokes all tokens.
+      These are not public registration or an authentication strategy;
     * `:change_role`, `:change_status` — ADM (guarded); the last active
       admin can be neither demoted nor disabled; disabling revokes all of the
       user's tokens;
@@ -270,6 +276,33 @@ defmodule SdrAgent.Accounts.User do
       change {AppendEvent, event_type: "user.created", category: :domain_change}
     end
 
+    create :create_hosted_owner do
+      description "Operations enrollment only: a reviewer with an unknown generated password."
+      accept [:email, :display_name]
+
+      argument :password, :string,
+        allow_nil?: false,
+        sensitive?: true,
+        constraints: [min_length: 32]
+
+      change set_attribute(:role, :reviewer)
+      change set_attribute(:status, :active)
+      change {Password.HashPasswordChange, strategy_name: :password}
+      change SdrAgent.Audit.Changes.SetTenant
+      change {AppendEvent, event_type: "user.created", category: :domain_change}
+    end
+
+    update :disable_hosted_owner_user do
+      description "Operations owner-disable scope only: terminal disable and token revocation."
+      require_atomic? false
+      accept []
+      change set_attribute(:status, :disabled)
+      change AshAuthentication.AddOn.LogOutEverywhere.OnPasswordChange
+
+      change {AppendEvent,
+              event_type: "user.status_changed", category: :domain_change, previous: [:status]}
+    end
+
     update :change_role do
       description "ADM: change a user's role; the last active admin keeps the admin role."
       require_atomic? false
@@ -350,6 +383,14 @@ defmodule SdrAgent.Accounts.User do
     # passes and every policy below still applies.
     policy action([:create_user, :seed, :change_role, :change_status, :set_password]) do
       forbid_if SdrAgent.Prototype.Checks.PrototypeRuntime
+      authorize_if always()
+    end
+
+    # This boundary precedes the auth-library bypass, like the prototype
+    # administration refusal above: no direct auth interaction can create
+    # or disable a hosted identity outside the Operations transaction scope.
+    policy action([:create_hosted_owner, :disable_hosted_owner_user]) do
+      forbid_unless Checks.HostedOwnerWriteScope
       authorize_if always()
     end
 
