@@ -921,12 +921,15 @@ Trigger: no. This changes a development-only dependency version. No application 
 relationship, policy, action or contract changes. There is no architecture-diagram trigger: no app boundary,
 supervision tree, endpoint plug or integration changes.
 
-## Amendment (2026-10-31, proposed): EEF-CVE-2026-117656, -117645 and -117666
+## Amendment (2026-10-31, accepted): EEF-CVE-2026-117656, -117645 and -117666
 
-**Status: proposed** by Claude on 2026-10-31. Every earlier amendment and addendum above is unchanged byte for
-byte. It overrides a dependency's declared requirement, so acceptance belongs to the owner (D-157). It is
-recorded in a separate decision row that pins the commit and the full-file hash, after Codex's independent
-exact-text PASS. This draft alone accepts nothing.
+**Status: accepted** by Charles on 2026-10-31 (D-271). Every earlier amendment and addendum above is unchanged
+byte for byte. Owner words: "i grant you dependency amendment approval, approve the hosted-data/backup
+decisions in advance, and give you deployment authorization". This accepts the exact proposal at commit
+`35dbf73e4ad33c4d4cf78a438e7316093e193bba`, full-file SHA256
+`e26b66cac3cbf363e9a24aac515ed30235057839145753e70250bd2a61ff408a`, after Codex's exact-text/source PASS
+`codex-deps-oct31-static-review-20261031T012507Z.org`. It authorizes applying the reviewed patch; it is not a
+full-gate or OAuth-compatibility waiver. D-271 records the approval and its unchanged restrictions.
 
 ### Advisories
 
@@ -963,7 +966,7 @@ separate, owner-approved rule-2 exception. This amendment does not propose one.
 - `ssl_verify_fun` is transitive (required `>= 0.0.0` and `~> 1.1`) and does take part in TLS host
   verification. `phoenix_html` renders every page.
 
-### Decision (proposed)
+### Decision (accepted)
 
 - `mix.exs`: add `{:assent, "== 0.3.2", override: true}` beside the `ash_authentication` pin, with a comment
   naming this amendment, and raise `{:phoenix_html, "~> 4.1"}` to `"~> 4.4"`. `ssl_verify_fun` stays

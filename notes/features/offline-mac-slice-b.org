@@ -1,12 +1,25 @@
 #+title: Offline-Mac Slice B: accepted entity model and implementation plan
 #+date: 2026-10-30
-#+status: plan approved for source-only synthetic implementation (D-270, ADR-0024)
+#+status: source implementation approved (D-270); hosted-data policy and deployment authorized (D-271), readiness pending
 
 This file collects the reviewed artifacts verbatim, each with its sha256. Later rounds amend earlier ones; the latest round wins where they conflict.
 
 Entity Model: trigger yes. Capabilities ai_pair=true, codex_review=true. Reviewer Codex. Verdict PASS (m_codex_sdr_offline_mac_entity_pass_b_r4a_20261030T184311Z, 2026-10-30T18:43:11Z, review sha256 17141844457e49386cc3bb8bfd6c335451afa97da8a5f42fcc2d5e19ba542cd3).
 Plan: Codex PASS (m_codex_sdr_offline_mac_plan_pass_r2_20261030T185010Z, review sha256 e70bf2cb8a532f061f3decc3c6c892f46413c084f9b7b2348ed1739f709f43e6).
 Owner acceptance: m_codex_owner_source_approval_20261030T225619Z.
+
+Owner follow-up acceptance (2026-10-31, D-271): "i grant you dependency
+amendment approval, approve the hosted-data/backup decisions in advance,
+and give you deployment authorization". ADR-0008's exact35dbf73e proposal
+(file e26b66ca) and the latest ADR-0014 Amendment3 terms below are accepted;
+the reviewed SDR-only deployment/initial relocation is authorized once
+integration/gates/host preflight pass. Backup approval is policy acceptance,
+not proof that Cloud backups are off or snapshots absent. Verify actual
+state before real-data transfer; do not delete snapshots or disrupt other
+applications. No extra model allowance, outreach, unreviewed implementation,
+new live import/assign slot or general database deletion is authorized.
+The historical draft/decision-request text below remains as provenance;
+operative acceptance is installed in ADR-0008, ADR-0014 and ADR-0024.
 
 Ownership: Claude owns S-B1..S-B6 (branch claude/offline-mac-b). Codex owns S-B7, the Mac agent (branch codex/offline-mac-agent).
 

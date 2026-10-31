@@ -23,12 +23,19 @@ Basis:
 Decision D-270. The plan is recorded in
 `notes/features/offline-mac-slice-b.org`.
 
-This acceptance authorizes **source-only implementation with synthetic
-fixtures**. It does not authorize:
+The initial D-270 acceptance authorized **source-only implementation with
+synthetic fixtures**. It did not authorize:
 - real-data storage on the host (ADR-0014 Amendment 3, still proposed);
 - any data transfer, deploy or relocation step;
 - any model call, research, import or assign;
 - any backup-secret access.
+
+Subsequent owner authorization D-271 (2026-10-31) accepts ADR-0014 Amendment 3
+and the reviewed dependency amendment, and authorizes the reviewed SDR-only
+deployment sequence. See the installed Amendment 3 for the accepted backup,
+data placement and restore terms. Approval does not establish backup state,
+software readiness or grant additional model attempts. Existing verification,
+single-authority relocation, secret-handling and no-outreach controls remain.
 
 ## Context
 
