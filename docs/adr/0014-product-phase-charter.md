@@ -213,3 +213,76 @@ only (1): real data never means a real message is sent.
   they just don't get shared outside of my machine". The owner accepted
   this wording on 2026-10-12 ("accept PR #129") after Codex's independent
   approval of 83649ff.
+
+## Amendment 3 (2026-10-31): hosted processing of real prospect data
+
+**Status: ACCEPTED** by Charles on 2026-10-31 (D-271). This installs the
+reviewed Slice B r4/r4a/r2 approval-package text, including its corrected
+backup and restore terms, from `notes/features/offline-mac-slice-b.org`.
+The earlier source-only authorization (D-270) did not accept this amendment.
+The owner's subsequent words are:
+
+> i grant you dependency amendment approval, approve the hosted-data/backup decisions in advance, and give you deployment authorization
+
+### Constraint 7, as additionally amended
+
+Real prospect data imported through the existing research → spot-check →
+import pipeline may be stored and processed in one dedicated PostgreSQL 18
+database on `ch-web-prod`, served only through `sdr.a-z.bot`. This is not
+authorization for autonomous discovery or additional hosting destinations.
+Amendment 2's synthetic tests/public artifacts, minimal fields, provider
+terms, telemetry, suppression and accepted deletion limitations still apply.
+
+### Accepted rules and consequences
+
+1. **Access.** The SDR app uses an isolated database role with no access to
+   other application databases. Human access is the owner through HostedOwner
+   plus the existing bound auditor. Host root and the cluster superuser can
+   read the data; this limitation is accepted, not technically prevented.
+2. **Logging.** No prospect content in app, edge, proxy or system logs, and
+   no enrollment link, bearer credential or authentication header in logs
+   or public evidence. Privacy checks remain release prerequisites.
+3. **Backups.** SDR paths and dumps must remain outside Borg backup sources
+   (`/var/lib/caddy` and `/var/backups/postgresql` at the earlier V4 check).
+   Hetzner whole-server Cloud backups must stay off and no server snapshots
+   may contain SDR data. Their actual current state must be verified before
+   real data is copied; approval does not establish that fact. If the state
+   differs, stop and resolve it without silently deleting snapshots or
+   weakening another application's backups. Enabling whole-server backups
+   later requires reopening this amendment. Losing the host can lose all
+   hosted records made since the initial archive; that risk is accepted.
+4. **Initial restore.** Use only the fenced 5542 archive, following the
+   accepted relocation chain and its single-current-authority checks. Dumps
+   use a 0700 directory and 0600 files and are removed after verified restore.
+   D-271 authorizes the reviewed SDR deployment/initial-relocation workflow;
+   it does not permit bypassing fencing, readiness or exact-target checks.
+5. **Disaster restore.** A restore after activation is read-only and
+   non-spendable. Hosted records made after activation are absent from the
+   original archive. This is not authority to re-mint a model allowance.
+6. **Mac storage.** Per-call temporary prompt files are 0600 and removed
+   after each call. The launch journal contains identifiers only. The fenced
+   5542 archive contains full content and is retained on the Mac for 30 days;
+   the owner then decides and performs its removal. No automatic database,
+   witness or archive wipe is authorized here.
+7. **Retention.** Hosted data remains until the owner deletes it. The MVP
+   has no per-person deletion; whole-database deletion remains an explicit
+   owner operation, not an unattended deployment step.
+8. **Models and transport.** Only the owner's subscription Claude CLI on
+   the owner's Mac; no direct Anthropic API. Prompts and transcripts transit
+   the authenticated hosted ↔ Mac HTTPS channel. Assurance remains
+   UNVERIFIED/released_unverified under the accepted ADR-0005 amendment;
+   digest correlation is not independent provider evidence. Existing
+   attempt limits and launcher controls remain unchanged.
+9. **Delivery.** No outreach. Delivery remains capture-only. Deployment
+   authorization is not authority to contact prospects or publish private
+   content. Tests, CI, screenshots and public evidence stay synthetic.
+
+### Execution boundary
+
+The owner has authorized deployment, not asserted that the software or host
+is ready. Required integration reviews, verification gates, backup-state
+checks, isolated target selection and co-tenant protection still apply.
+No generic second deployment approval is needed for the approved sequence;
+material departures or destructive operations outside it require direction.
+New live imports/assignments retain their separately scoped controls; this
+amendment grants no extra model calls and does not reset prior usage.

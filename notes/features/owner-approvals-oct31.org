@@ -1,0 +1,56 @@
+#+title: D-271 owner dependency, hosted-data/backup and deployment approval
+#+date: 2026-10-31
+#+status: approved scope; execution readiness pending
+
+* Authority
+Direct owner words: "i grant you dependency amendment approval, approve the
+hosted-data/backup decisions in advance, and give you deployment authorization".
+Relay m_codex_owner_deploy_approval_20261031. This follows the status that
+named ADR-0008/PR244, hosted-data/backup decisions and deployment as pending.
+No additional alternatives are chosen beyond the previously reviewed plan.
+
+* Entity Model
+Entity Model trigger: no additional delta. This records owner acceptance of
+the already independently reviewed dependency and Slice B authorization/data
+placement plan; no new resource, schema, policy or backend contract is added.
+Runtime implementation remains subject to its existing entity/source reviews.
+
+* Approved artifacts
+- Dependency source35dbf73e4ad33c4d4cf78a438e7316093e193bba, ADR0008 full
+  proposal SHA256 e26b66cac3cbf363e9a24aac515ed30235057839145753e70250bd2a61ff408a.
+  Exact-text/source PASS codex-deps-oct31-static-review-20261031T012507Z.org;
+  focused invariant/password suite20/20 at c4-20261031T012151Z-87558.
+- Latest ADR0014 Am3 in offline-mac-slice-b.org: reviewed r4/r4a/r2 terms,
+  Borg excludes SDR, Cloud backups off/no snapshots verified before transfer,
+  fenced5542 archive30days, post-activation disaster restore non-spendable.
+- ADR0024/ADR0005 technical decisions remain accepted under D270.
+
+* Minimal execution steps
+1. Apply reviewed dependency patch on isolated branch; install acceptance
+   text and D271 record, preserving UI WIP and peer-owned source.
+2. Peer confirms exact approval scope/doc installation; merge patch into
+   active integration only without losing concurrent R1/W2 changes.
+3. Refresh dependencies/usage guidance in the owning environment; run focused
+   invariant/auth checks, security audit and integrated full gate. Retain
+   exact failing evidence; no ignored advisories or weakened tests.
+4. Finish/review remote transport, owner UI and offline queue; obtain a
+   reviewed exact-target deployment runbook with rollback/data-preservation.
+5. Verify backup/snapshot state and role/process/port isolation with read-only
+   checks. Execute only the approved SDR deployment/initial-relocation steps
+   after readiness. Keep a-z.bot/AgentBuilder and other databases untouched.
+6. Verify hosted availability with Mac offline, and handle any separately
+   scoped live verification under existing allowance/launcher controls.
+
+* Required verification / risks
+No new behavior in acceptance docs. Reviewed dependency delta remains exactly
+assent0.3.2, phoenix_html4.4.0, ssl_verify_fun1.1.8, no ignore list.
+Password-only invariant, authentication regression, audit, compile dev/test/
+prod, format, codegen, Credo and full precommit remain required on integration.
+Prior20/20 evidence is not a new integrated/full-gate PASS.
+Backup facts, incomplete source, co-tenant impact and destructive operations
+are not waived by advance approval. No credentials/content in artifacts.
+
+* Architecture evaluation
+No new architecture decision: records acceptance of the existing reviewed
+ADRs. No boundary/schema/runtime-flow change in this documentation slice;
+existing Slice B diagrams must reflect its final reviewed implementation.

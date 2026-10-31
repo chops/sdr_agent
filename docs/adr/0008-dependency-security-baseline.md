@@ -920,3 +920,102 @@ MEDIUM ignore still needs the absence of an acceptable fix, a reviewed reason an
 Trigger: no. This changes a development-only dependency version. No application entity, attribute,
 relationship, policy, action or contract changes. There is no architecture-diagram trigger: no app boundary,
 supervision tree, endpoint plug or integration changes.
+
+## Amendment (2026-10-31, accepted): EEF-CVE-2026-117656, -117645 and -117666
+
+**Status: accepted** by Charles on 2026-10-31 (D-271). Every earlier amendment and addendum above is unchanged
+byte for byte. Owner words: "i grant you dependency amendment approval, approve the hosted-data/backup
+decisions in advance, and give you deployment authorization". This accepts the exact proposal at commit
+`35dbf73e4ad33c4d4cf78a438e7316093e193bba`, full-file SHA256
+`e26b66cac3cbf363e9a24aac515ed30235057839145753e70250bd2a61ff408a`, after Codex's exact-text/source PASS
+`codex-deps-oct31-static-review-20261031T012507Z.org`. It authorizes applying the reviewed patch; it is not a
+full-gate or OAuth-compatibility waiver. D-271 records the approval and its unchanged restrictions.
+
+### Advisories
+
+Read from OSV `v1/vulns/<id>` on 2026-10-31. First seen in the standing lane runner's gate
+`x1-20261031T011146Z-77214` (`audit.log`) at main `67792160`'s lock, so the audit fails on main and on every
+branch, as rule 4 intends.
+
+| Package | Locked | Advisory | Severity | Published (OSV) | Fixed |
+|---|---|---|---|---|---|
+| `assent` | 0.2.13 | EEF-CVE-2026-117656 (GHSA-9fr5-g44g-9526): an unverified Sign in with Apple callback parameter can override verified ID-token claims | CRITICAL | 2026-10-30T23:55Z | 0.3.2 |
+| `phoenix_html` | 4.3.0 | EEF-CVE-2026-117645: attribute injection through unvalidated attribute names in `attributes_escape/1` | MEDIUM | 2026-10-30T20:25Z | 4.4.0 (and 3.3.5) |
+| `ssl_verify_fun` | 1.1.7 | EEF-CVE-2026-117666 (GHSA-7gw2-hphm-c5px): a partial-label wildcard certificate matches host names across a label boundary | CRITICAL | 2026-10-30T20:22Z | 1.1.8 |
+
+### The `assent` constraint
+
+Every stable `ash_authentication` release, 4.13.6 through the pinned 4.15.0, requires `assent` `> 0.2.0 and
+< 0.3.0` (Hex API, 2026-10-31). Only the 5.0.0-rc line accepts `~> 0.3.0`, and `ash_authentication_phoenix`
+2.17.4 requires `ash_authentication ~> 4.15`, so the RC is not a route. No fixed `assent` is reachable without
+overriding that cap.
+
+Rule 2 forbids ignoring a CRITICAL finding, so keeping 0.2.13 under an ignore is not available without a
+separate, owner-approved rule-2 exception. This amendment does not propose one.
+
+### Exposure in this project
+
+- `SdrAgent.Accounts.User` declares one strategy, `password :password` (`lib/sdr_agent/accounts/user.ex`), and
+  one add-on, `log_out_everywhere`. No OAuth2, OIDC, Apple, Google, GitHub, Slack or Auth0 strategy exists, and
+  `lib/` references no `Assent` module.
+- Inside `ash_authentication` 4.15.0, every `Assent` reference is in the OAuth2-family strategies, their DSLs
+  and the OAuth2 plug. The top-level module mentions it only in documentation. Its application starts
+  `Finch`, not Assent, and `assent` declares no application callback. The vulnerable Apple callback path, and
+  the 0.3 behaviour changes upstream reports for OAuth providers (ash_authentication issue 1097: Google login),
+  are unreachable in this build.
+- `ssl_verify_fun` is transitive (required `>= 0.0.0` and `~> 1.1`) and does take part in TLS host
+  verification. `phoenix_html` renders every page.
+
+### Decision (accepted)
+
+- `mix.exs`: add `{:assent, "== 0.3.2", override: true}` beside the `ash_authentication` pin, with a comment
+  naming this amendment, and raise `{:phoenix_html, "~> 4.1"}` to `"~> 4.4"`. `ssl_verify_fun` stays
+  transitive, and the lock pins it.
+- The minimal bump is `mix deps.unlock assent phoenix_html ssl_verify_fun` followed by `mix deps.get`.
+  `mix.lock` changes exactly three entries. It has 131 lines before and after, and every other line is
+  byte-identical.
+
+| Entry | Before | After | Requirement change |
+|---|---|---|---|
+| `assent` | 0.2.13 (inner `11226365d2d8661d…`, outer `bf9f351b01dd6bce…`) | 0.3.2 (inner `7dc5c551da30cd6d…`, outer `e21b10e82a86cb50…`) | drops the optional `mint ~> 1.0`; keeps `certifi`, `finch`, `jose`, `req` and `ssl_verify_fun` |
+| `phoenix_html` | 4.3.0 (`d3577a5df4b6954c…` / `3eaa290a78bab0f0…`) | 4.4.0 (`d4007bc52fee85af…` / `94832038da7ab8f8…`) | none (no requirements) |
+| `ssl_verify_fun` | 1.1.7 (`354c321cf377240c…` / `fe4c190e8f37401d…`) | 1.1.8 (`5a1f8141a8042629…` / `004014f4927a8e46…`) | none (no requirements) |
+
+- File hashes: `mix.exs` `0b24b6e6…` → `df2b3685…`, `mix.lock` `186bf0d2…` → `afb0f48e…`.
+- No new direct or transitive package and no `ignore_advisories` entry. ADR-0003's compatibility set (Zoi
+  0.18.10, the Git-pinned Jido stack) and the Bandit pin are untouched.
+
+### Executable invariant
+
+`test/sdr_agent/accounts/password_only_strategy_test.exs` pins the User strategies to exactly
+`{Password, :password}`, and the add-ons to exactly `{LogOutEverywhere, :log_out_everywhere}`. Adding any
+Assent-backed strategy fails that test and must come back to this ADR. The override is safe only while the
+test holds.
+
+### Verification
+
+- The lock delta was reviewed entry by entry (above) before compile.
+- `mix compile --warnings-as-errors`: rc 0 for `MIX_ENV=dev`, `test` and `prod`. Every `warning:` line is a
+  dependency's own output. A forced `mix deps.compile ash_authentication` against `assent` 0.3.2 reports no
+  undefined `Assent` module or function.
+- `mix hex.audit`: "No retired or security advisory packages found".
+- Focused lane run `c4-20261031T012151Z-87558`: 20/20, which covers the invariant test and
+  `test/sdr_agent/accounts/user_test.exs`.
+- The full gate runs at this branch's final head through the standing lane runner (D-221/D-222). Hosted CI and
+  Codex's exact-head review follow. This text does not record them.
+
+### Revisit trigger
+
+- any new strategy or add-on on `SdrAgent.Accounts.User` (the invariant test fails);
+- a stable `ash_authentication` release that accepts `assent` `~> 0.3`: then drop the override;
+- any new advisory against `assent`, `phoenix_html` or `ssl_verify_fun`.
+
+### Policy
+
+Unchanged: the audit stays blocking, there is no ignore list, and CRITICAL and HIGH are never ignored. The
+override is a fix route under rule 2, not an exception to it.
+
+### Entity model
+
+Trigger: no. Dependency versions only. No entity, attribute, relationship, policy, action or contract changes,
+and there is no architecture-diagram trigger.
