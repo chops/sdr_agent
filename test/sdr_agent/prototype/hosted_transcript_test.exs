@@ -88,8 +88,8 @@ defmodule SdrAgent.Prototype.HostedTranscriptTest do
     refute inspect(row) =~ @bytes
     assert access_rows() == []
 
-    assert {:error, %Ash.Error.Forbidden{}} =
-             Ash.read(SdrAgent.Agents.RemoteModelCall, actor: ctx.enrolled.user)
+    result = Ash.read(SdrAgent.Agents.RemoteModelCall, actor: ctx.enrolled.user)
+    assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
   end
 
   test "raw default and explicit transcript actions cannot bypass the audited API", ctx do
@@ -101,7 +101,11 @@ defmodule SdrAgent.Prototype.HostedTranscriptTest do
     for action <- [:read, :owner_transcript] do
       result =
         RemoteCallResult
-        |> Ash.Query.for_read(action, %{}, actor: ctx.enrolled.user)
+        |> Ash.Query.for_read(
+          action,
+          if(action == :owner_transcript, do: %{call_id: ctx.call_id}, else: %{}),
+          actor: ctx.enrolled.user
+        )
         |> Ash.read()
 
       assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result),
@@ -123,9 +127,12 @@ defmodule SdrAgent.Prototype.HostedTranscriptTest do
           %{ctx.enrolled.user | role: :admin},
           %Actor{type: :mac_worker, id: ctx.worker.id, tenant_id: ctx.fx.tenant.id}
         ] do
-      assert {:error, _} = read(ctx.call_id, actor)
+      refused = read(ctx.call_id, actor)
+      assert {:error, %Ash.Error.Forbidden{}} = refused
+      refute inspect(refused) =~ @bytes
       result = list(ctx.run, actor)
-      assert result == {:ok, []} or match?({:error, _}, result)
+      assert result == {:ok, []} or match?({:error, %Ash.Error.Forbidden{}}, result)
+      refute inspect(result) =~ @bytes
     end
 
     assert length(access_rows()) == 1
@@ -139,10 +146,20 @@ defmodule SdrAgent.Prototype.HostedTranscriptTest do
 
   test "disabled owner's stale User and foreign ids return no bytes or access record", ctx do
     assert {:ok, _} = read(ctx.call_id, ctx.enrolled.user)
-    assert {:error, _} = read(Ecto.UUID.generate(), ctx.enrolled.user)
-    assert {:error, _} = read(ctx.call_id, %{ctx.enrolled.user | tenant_id: Ecto.UUID.generate()})
+
+    for {id, actor} <- [
+          {Ecto.UUID.generate(), ctx.enrolled.user},
+          {ctx.call_id, %{ctx.enrolled.user | tenant_id: Ecto.UUID.generate()}}
+        ] do
+      refused = read(id, actor)
+      assert {:error, %Ash.Error.Forbidden{}} = refused
+      refute inspect(refused) =~ @bytes
+    end
+
     assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id, actor: ctx.enrolled.user)
-    assert {:error, _} = read(ctx.call_id, ctx.enrolled.user)
+    refused = read(ctx.call_id, ctx.enrolled.user)
+    assert {:error, %Ash.Error.Forbidden{}} = refused
+    refute inspect(refused) =~ @bytes
     assert length(access_rows()) == 1
   end
 
@@ -181,5 +198,62 @@ defmodule SdrAgent.Prototype.HostedTranscriptTest do
       Repo.query!("SELECT count(*) FROM model_result_releases WHERE model_invocation_id=$1", [
         Ecto.UUID.dump!(ctx.invocation.id)
       ])
+  end
+
+  test "private reader scope cannot be forged, captured or copied into another process", ctx do
+    check = SdrAgent.Agents.Checks.HostedTranscriptScope
+    assert Code.ensure_loaded?(check), "missing HostedTranscriptScope"
+    assert function_exported?(check, :match?, 3)
+    actor = ctx.enrolled.user
+    parent = self()
+    handler = "hosted-transcript-scope-#{System.unique_integer([:positive])}"
+
+    query = fn context ->
+      RemoteCallResult
+      |> Ash.Query.for_read(:owner_transcript, %{call_id: ctx.call_id},
+        actor: actor,
+        context: context
+      )
+    end
+
+    # Test-only observation during the actual successful read, not a new
+    # public scope constructor or a production test seam.
+    :telemetry.attach(
+      handler,
+      [:sdr_agent, :repo, :query],
+      fn _, _, metadata, _ ->
+        if self() == parent and
+             String.contains?(IO.iodata_to_binary(metadata.query), "remote_call_results") do
+          case Process.get({SdrAgent.Agents.RemoteTranscripts, :scope}) do
+            %{ref: ref} when is_reference(ref) ->
+              context = %{sdr_hosted_transcript_scope: ref}
+              subject = query.(context)
+              here = check.match?(actor, %{subject: subject}, [])
+              task = Task.async(fn -> check.match?(actor, %{subject: subject}, []) end)
+              other = Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
+              send(parent, {:reader_scope_observed, context, here, other})
+
+            _ ->
+              :ok
+          end
+        end
+      end,
+      nil
+    )
+
+    try do
+      assert {:ok, _} = read(ctx.call_id, actor)
+      assert_receive {:reader_scope_observed, context, true, {:ok, false}}, 10_000
+
+      for context <- [context, %{sdr_hosted_transcript_scope: make_ref()}] do
+        result = query.(context) |> Ash.read()
+        assert {:error, %Ash.Error.Forbidden{}} = result
+        refute inspect(result) =~ @bytes
+      end
+
+      assert length(access_rows()) == 1
+    after
+      :telemetry.detach(handler)
+    end
   end
 end

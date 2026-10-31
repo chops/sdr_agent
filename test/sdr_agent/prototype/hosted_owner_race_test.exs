@@ -136,6 +136,102 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
     end
   end
 
+  test "transcript waiting at head returns no bytes after owner disable commits", ctx do
+    assert function_exported?(SdrAgent.Agents, :read_remote_transcript, 2),
+           "read_remote_transcript/2 is not exported"
+
+    admin = SdrAgent.AuditCase.human(:admin, ctx.fx.tenant)
+    :ok = SdrAgent.AgentsFixtures.ensure_offering!(ctx.fx.tenant)
+    definition = SdrAgent.AgentsFixtures.definition!(ctx.fx.tenant)
+    agent = SdrAgent.Actor.system(:agent_runtime, ctx.fx.tenant.id)
+    fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
+    SdrAgent.AdmissionFixtures.admit_tuples!()
+    grant = SdrAgent.AgentsFixtures.grant!(fx.tenant, %{}, admin)
+    run = SdrAgent.PrototypeGateFixtures.run!(fx)
+    fx = Map.merge(fx, %{grant: grant, run: run})
+    f = SdrAgent.RemoteCallFixtures
+    f.remote!()
+    %{token: token} = f.enrol!(fx)
+    f.reserve!(fx)
+    nonce = f.nonce()
+    launch = f.claim!(token, nonce)
+    bytes = "private-transcript-head-race"
+
+    assert f.kind(f.complete(token, nonce, launch.call_id, launch.request_sha256, bytes)) ==
+             :accepted
+
+    enrolled = H.enrol!(ctx)
+    parent = self()
+    before = SQL.query!(Repo, "SELECT count(*) FROM audit_accesses", []).rows
+
+    holder =
+      Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        with_connection(fn ->
+          :ok = PrototypeFixtures.leave_runtime()
+          :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+
+          SdrAgent.Audit.transaction(fn ->
+            assert {:ok, _} = SdrAgent.Audit.Kernel.lock_head(ctx.fx.tenant.id)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:transcript_head_held, backend})
+
+            receive do
+              :disable_owner -> H.disable(ctx, enrolled.owner.id)
+            after
+              @bound -> flunk("transcript disable barrier timed out")
+            end
+          end)
+        end)
+      end)
+
+    try do
+      assert_receive {:transcript_head_held, holder_backend}, @bound
+
+      reader =
+        Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+          with_connection(fn ->
+            H.enter!(ctx)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:transcript_backend, backend})
+
+            call(SdrAgent.Agents, :read_remote_transcript, [
+              launch.call_id,
+              [actor: enrolled.user]
+            ])
+          end)
+        end)
+
+      try do
+        assert_receive {:transcript_backend, backend}, @bound
+        await_head_holder(backend, holder_backend)
+        send(holder.pid, :disable_owner)
+        assert {:ok, {:ok, {:ok, _}}} = Task.yield(holder, @bound)
+        assert {:ok, {:error, %Ash.Error.Forbidden{}} = refused} = Task.yield(reader, @bound)
+        refute inspect(refused) =~ bytes
+        assert SQL.query!(Repo, "SELECT count(*) FROM audit_accesses", []).rows == before
+      after
+        Task.shutdown(reader, :brutal_kill)
+      end
+    after
+      Task.shutdown(holder, :brutal_kill)
+    end
+  end
+
+  defp await_head_holder(backend, holder, attempts \\ 400)
+
+  defp await_head_holder(_backend, _holder, 0),
+    do: flunk("reader never waited on exact head holder")
+
+  defp await_head_holder(backend, holder, attempts) do
+    %{rows: [[waiting?]]} =
+      SQL.query!(Repo, "SELECT $2::int = ANY(pg_blocking_pids($1::int))", [backend, holder])
+
+    unless waiting? do
+      Process.sleep(25)
+      await_head_holder(backend, holder, attempts - 1)
+    end
+  end
+
   defp await_worker_waiting(backend, attempts \\ 400)
   defp await_worker_waiting(_backend, 0), do: flunk("worker control never waited at head")
 
