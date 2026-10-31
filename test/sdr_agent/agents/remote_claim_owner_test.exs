@@ -13,12 +13,14 @@ defmodule SdrAgent.Agents.RemoteClaimOwnerTest do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Actor
+  alias SdrAgent.Clock
   alias SdrAgent.AdmissionFixtures
   alias SdrAgent.AgentsFixtures
   alias SdrAgent.HostedOwnerFixtures, as: H
   alias SdrAgent.PrototypeFixtures
   alias SdrAgent.PrototypeGateFixtures, as: G
   alias SdrAgent.RemoteCallFixtures, as: F
+  alias SdrAgent.RemoteSettlerFixtures, as: S
 
   setup do
     ctx = H.activated!()
@@ -132,6 +134,33 @@ defmodule SdrAgent.Agents.RemoteClaimOwnerTest do
     assert F.invocation(ctx.invocation.id).status == :sent
     assert F.count(F.nonce_resource(), "worker_id = $1", [F.dump(ctx.worker.id)]) == 1
     assert F.event_count(ctx.fx) == events
+  end
+
+  # Codex conditional GO (codex-w2-fresh-pass-replay-conditional-go): work
+  # claimed before the disable still completes or expires.
+  test "after owner disable, a claimed call still completes", ctx do
+    enrolled = H.enrol!(ctx)
+    ctx = prototype_call!(ctx)
+    nonce = F.nonce()
+    launch = F.claim!(ctx.token, nonce)
+    disable_owner!(ctx, enrolled.owner)
+    H.enter!(ctx)
+
+    result = F.complete(ctx.token, nonce, launch.call_id, launch.request_sha256, F.transcript())
+    assert F.kind(result) == :accepted
+    assert F.call_row(launch.call_id)["state"] == "completed"
+  end
+
+  test "after owner disable, a claimed call still expires at its result deadline", ctx do
+    enrolled = H.enrol!(ctx)
+    ctx = prototype_call!(ctx)
+    launch = F.claim!(ctx.token, F.nonce())
+    disable_owner!(ctx, enrolled.owner)
+    H.enter!(ctx)
+
+    Clock.freeze(F.ts(F.call_row(launch.call_id)["result_deadline"]))
+    S.settle!(ctx.fx)
+    assert F.call_row(launch.call_id)["state"] == "expired_unknown"
   end
 
   test "ordinary runtime is unchanged: a disabled hosted owner does not gate the claim", ctx do

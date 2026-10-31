@@ -290,6 +290,79 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
     end
   end
 
+  # W2 replay (Codex conditional GO, codex-w2-fresh-pass-replay-conditional-go):
+  # a launch-producing replay waits at the retained head (worker -> head),
+  # then rechecks the owner after the disable commits and emits nothing.
+  test "claimed-call replay waiting at head is refused after owner disable commits", ctx do
+    admin = SdrAgent.AuditCase.human(:admin, ctx.fx.tenant)
+    :ok = SdrAgent.AgentsFixtures.ensure_offering!(ctx.fx.tenant)
+    definition = SdrAgent.AgentsFixtures.definition!(ctx.fx.tenant)
+    agent = SdrAgent.Actor.system(:agent_runtime, ctx.fx.tenant.id)
+    fx = Map.merge(ctx.fx, %{admin: admin, definition: definition, agent: agent})
+    f = SdrAgent.RemoteCallFixtures
+    f.remote!()
+    %{token: token, worker: worker} = f.enrol!(fx)
+    enrolled = H.enrol!(ctx)
+    H.enter!(ctx)
+    grant = SdrAgent.PrototypeGateFixtures.provision!(fx)
+    run = SdrAgent.PrototypeGateFixtures.run!(fx)
+    invocation = f.reserve!(Map.merge(fx, %{grant: grant, run: run}))
+    nonce = f.nonce()
+    launch = f.claim!(token, nonce)
+    before = f.call_row(launch.call_id)
+    parent = self()
+
+    holder =
+      Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        with_connection(fn ->
+          :ok = PrototypeFixtures.leave_runtime()
+          :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+
+          SdrAgent.Audit.transaction(fn ->
+            assert {:ok, _} = SdrAgent.Audit.Kernel.lock_head(ctx.fx.tenant.id)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:replay_head_held, backend})
+
+            receive do
+              :disable_owner -> H.disable(ctx, enrolled.owner.id)
+            after
+              @bound -> flunk("replay disable barrier timed out")
+            end
+          end)
+        end)
+      end)
+
+    try do
+      assert_receive {:replay_head_held, holder_backend}, @bound
+
+      replayer =
+        Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+          with_connection(fn ->
+            H.enter!(ctx)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:replay_backend, backend})
+            f.claim(token, nonce)
+          end)
+        end)
+
+      try do
+        assert_receive {:replay_backend, backend}, @bound
+        await_head_holder(backend, holder_backend)
+        send(holder.pid, :disable_owner)
+        assert {:ok, {:ok, {:ok, _}}} = Task.yield(holder, @bound)
+        assert {:ok, {:error, :owner_unavailable} = refused} = Task.yield(replayer, @bound)
+        refute inspect(refused) =~ f.prompt_marker()
+        assert f.call_row(launch.call_id) == before
+        assert f.invocation(invocation.id).status == :sent
+        assert f.count(f.nonce_resource(), "worker_id = $1", [f.dump(worker.id)]) == 1
+      after
+        Task.shutdown(replayer, :brutal_kill)
+      end
+    after
+      Task.shutdown(holder, :brutal_kill)
+    end
+  end
+
   defp await_head_holder(backend, holder, attempts \\ 400)
 
   defp await_head_holder(_backend, _holder, 0),
