@@ -92,6 +92,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.AgentRun
   alias SdrAgent.Agents.CalibrationFinish
   alias SdrAgent.Agents.Changes.BuildSettingsSnapshot
+  alias SdrAgent.Agents.Changes.CreateRemoteCall
   alias SdrAgent.Agents.CalibrationRecovery
   alias SdrAgent.Agents.Decision
   alias SdrAgent.Agents.ModelCallGrant
@@ -100,6 +101,7 @@ defmodule SdrAgent.Agents do
   alias SdrAgent.Agents.ProfileSwitches
   alias SdrAgent.Agents.ServerStarts
   alias SdrAgent.Agents.ReleasedOutput
+  alias SdrAgent.Agents.RemoteCalls
   alias SdrAgent.Agents.RunSettings
   alias SdrAgent.Agents.RunSettingsSnapshot
   alias SdrAgent.Agents.SettingsRevision
@@ -141,6 +143,11 @@ defmodule SdrAgent.Agents do
     resource SdrAgent.Agents.ModelServerStart
     resource SdrAgent.Agents.SettingsRevision
     resource SdrAgent.Agents.RunSettingsSnapshot
+    # S-B2: remote ClaudeCLI calls (`SdrAgent.Agents.RemoteCalls`).
+    resource SdrAgent.Agents.RemoteModelCall
+    resource SdrAgent.Agents.ClaimNonce
+    resource SdrAgent.Agents.RemoteCallResult
+    resource SdrAgent.Agents.RemoteCallReceipt
   end
 
   ## Definitions
@@ -476,6 +483,7 @@ defmodule SdrAgent.Agents do
   defp reserve_admitted(run, attrs, request, actor, gate) do
     AdmissionContext.with_owned_registrations(fn ->
       with {:ok, locked} <- lock_run(run.id, actor),
+           :ok <- remote_request(request),
            {:ok, candidates} <- Admission.lock_candidates(locked, attrs.profile_id),
            {:ok, _head} <- Kernel.lock_head(locked.tenant_id),
            :ok <- relocation_fence(),
@@ -505,10 +513,14 @@ defmodule SdrAgent.Agents do
           request_sha256: payload.sha256
         })
 
-      ModelInvocation
-      |> Ash.Changeset.for_create(:reserve, attrs, actor: actor, context: context)
-      |> Ash.create(return_notifications?: true)
-      |> collect()
+      # S-B2 P1: the reservation-owned scope in which only this :reserve's
+      # own after_action may create its RemoteModelCall.
+      CreateRemoteCall.with_reservation(fn ->
+        ModelInvocation
+        |> Ash.Changeset.for_create(:reserve, attrs, actor: actor, context: context)
+        |> Ash.create(return_notifications?: true)
+        |> collect()
+      end)
     end
   end
 
@@ -647,6 +659,9 @@ defmodule SdrAgent.Agents do
       is not the expected one). Each is then recorded as a
       `model.launch.refused` event of the actor's tenant only. The option
       can only add refusals; without it a launch is admitted as before.
+    * **A remote invocation** (one that has a `RemoteModelCall`, S-B2):
+      checked under the invocation lock, `{:error, :remote_transport}` with
+      nothing written; only `SdrAgent.Agents.RemoteCalls.claim/3` sends it.
     * **A stopped run** (`:run_not_running_at_launch`): the row is failed
       and never sent, and no Failure is opened (the stop is already its
       cause): `{:error, :run_not_running_at_launch}`.
@@ -729,6 +744,7 @@ defmodule SdrAgent.Agents do
          {:ok, run} <- lock_tenant_run(target.agent_run_id, actor),
          :ok <- Admission.lock_operation_share(run.operation_id),
          {:ok, invocation} <- lock_invocation(target.id, actor),
+         :ok <- local_transport(invocation),
          :ok <- calibration_target(invocation, actor, expected),
          :ok <- launch_state(invocation),
          :ok <- Admission.lock_charge(invocation),
@@ -788,6 +804,32 @@ defmodule SdrAgent.Agents do
   # rolls back with no write (before an admission refusal could be
   # recorded; every audit append re-checks it too, `SdrAgent.Audit.Kernel`).
   defp relocation_fence, do: SdrAgent.Prototype.check_fence()
+
+  # S-B2 (entity/plan r2 "Agents reservation"): under the trusted :remote
+  # transport the request's prompt and schema encoding are each at most
+  # 262144 bytes, refused after the run lock and before admission (the
+  # whole reservation rolls back: no charge).
+  defp remote_request(request) do
+    if RemoteCalls.remote?() do
+      case RemoteCalls.check_request(request) do
+        :ok -> :ok
+        {:error, message} -> {:error, invalid_input(:request, message)}
+      end
+    else
+      :ok
+    end
+  end
+
+  # S-B2: an invocation that has a RemoteModelCall is sent only by the
+  # atomic remote claim (`SdrAgent.Agents.RemoteCalls.claim/3`); the local
+  # launch refuses it under the invocation lock and writes nothing.
+  defp local_transport(invocation) do
+    case RemoteCalls.remote_invocation?(invocation) do
+      {:ok, false} -> :ok
+      {:ok, true} -> {:ok, {:refused, :remote_transport}}
+      {:error, error} -> {:error, error}
+    end
+  end
 
   # An unlocked read only to find the run to lock first; the row is re-read
   # under its own lock.

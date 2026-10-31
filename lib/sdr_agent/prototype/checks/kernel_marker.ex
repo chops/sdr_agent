@@ -2,7 +2,7 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
   @moduledoc """
   Policy check for the D-237 setup-only and task-entry actions (interfaces
   r6 IF-2 phase 2, IF-3): `authorize_if {SdrAgent.Prototype.Checks.KernelMarker,
-  marker: :setup | :task_entry | :relocation}`.
+  marker: :setup | :task_entry | :relocation | :mac_worker}`.
 
   Contract: it passes only when the request is an audit-kernel request
   (`SdrAgent.Audit.Checks.KernelContext`: a `:kernel` actor with the private
@@ -17,8 +17,9 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
   the production build) it never matches and has no `context/1`.
 
   Stage (D-237 S1): the `:setup` (B2a) and `:task_entry` (session) positive
-  branches, and S-B1's `:relocation` branch, are implemented; any other
-  marker option never matches.
+  branches, S-B1's `:relocation` branch and S-B2's `:mac_worker` branch
+  (the owner-run `SdrAgent.Operations.MacWorker` `:enrol`, `:disable` and
+  `:set_intake`) are implemented; any other marker option never matches.
   """
   use Ash.Policy.SimpleCheck
 
@@ -35,7 +36,8 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
     @markers %{
       setup: :sdr_prototype_setup,
       task_entry: :sdr_prototype_task_entry,
-      relocation: :sdr_prototype_relocation
+      relocation: :sdr_prototype_relocation,
+      mac_worker: :sdr_prototype_mac_worker
     }
 
     @impl true
@@ -52,8 +54,8 @@ defmodule SdrAgent.Prototype.Checks.KernelMarker do
 
     def match?(_actor, _authorizer, _opts), do: false
 
-    @doc "The context a kernel request carries for `marker` (`:setup`, `:task_entry` or `:relocation`)."
-    @spec context(:setup | :task_entry | :relocation) :: map()
+    @doc "The context a kernel request carries for `marker` (`:setup`, `:task_entry`, `:relocation` or `:mac_worker`)."
+    @spec context(:setup | :task_entry | :relocation | :mac_worker) :: map()
     def context(marker) when is_map_key(@markers, marker),
       do: Map.put(KernelContext.context(), Map.fetch!(@markers, marker), true)
   else

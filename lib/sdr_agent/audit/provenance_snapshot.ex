@@ -79,6 +79,13 @@ defmodule SdrAgent.Audit.ProvenanceSnapshot do
       authorize_if Checks.KernelContext
     end
 
+    # S-B2: the :mac_worker actor type grants nothing by itself; a strict
+    # denial, independent of the read policy below (left unchanged).
+    policy [action_type(:read), actor_attribute_equals(:type, :mac_worker)] do
+      access_type :strict
+      forbid_if always()
+    end
+
     policy action_type(:read) do
       authorize_if actor_present()
     end

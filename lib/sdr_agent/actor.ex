@@ -21,6 +21,11 @@ defmodule SdrAgent.Actor do
       agent session's `PrototypeDelegation`, whose id is the actor id; it is
       authority only when `SdrAgent.Prototype.operator_actor/1` resolves it
       against the live binding (never by the struct alone)
+    * `:mac_worker` (MAC) — an enrolled off-host executor (S-B2,
+      `SdrAgent.Operations.MacWorker`): built only inside
+      `SdrAgent.Agents.RemoteCalls` after a token digest match, and granting
+      nothing by itself (every remote-call write also needs the RemoteCalls
+      scope)
   """
 
   @types [
@@ -34,7 +39,8 @@ defmodule SdrAgent.Actor do
     :auditor_cli,
     :kernel,
     :seeder,
-    :prototype_operator
+    :prototype_operator,
+    :mac_worker
   ]
 
   @enforce_keys [:type]
@@ -52,6 +58,7 @@ defmodule SdrAgent.Actor do
           | :kernel
           | :seeder
           | :prototype_operator
+          | :mac_worker
 
   @type t :: %__MODULE__{type: type(), id: String.t() | nil, tenant_id: Ecto.UUID.t() | nil}
 

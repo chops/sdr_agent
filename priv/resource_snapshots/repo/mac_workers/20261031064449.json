@@ -1,0 +1,271 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "token_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"active\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "status",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"open\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "intake",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "profile_pins",
+      "type": "map"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "enrolled_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "disabled_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "last_seen_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": "full",
+        "match_with": {
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "mac_workers_binding_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_database_bindings"
+      },
+      "scale": null,
+      "size": null,
+      "source": "binding_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "status"
+      ],
+      "base_filter": null,
+      "check": "status IN ('active', 'disabled')",
+      "name": "mac_workers_status"
+    },
+    {
+      "attribute": [
+        "intake"
+      ],
+      "base_filter": null,
+      "check": "intake IN ('open', 'paused')",
+      "name": "mac_workers_intake"
+    },
+    {
+      "attribute": [
+        "token_sha256"
+      ],
+      "base_filter": null,
+      "check": "octet_length(token_sha256) = 32",
+      "name": "mac_workers_token_sha256_size"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [
+    {
+      "all_tenants?": false,
+      "concurrently": false,
+      "error_fields": [
+        "binding_id"
+      ],
+      "fields": [
+        {
+          "type": "atom",
+          "value": "binding_id"
+        }
+      ],
+      "include": null,
+      "include_base_filter?": true,
+      "message": null,
+      "name": "mac_workers_one_active_per_binding",
+      "nulls_distinct": true,
+      "prefix": null,
+      "table": null,
+      "unique": true,
+      "using": null,
+      "where": "status = 'active'"
+    }
+  ],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION mac_workers_terminal_immutable()",
+      "global?": false,
+      "name": "mac_workers_guard_function",
+      "up": "CREATE FUNCTION mac_workers_terminal_immutable() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  IF TG_OP <> 'UPDATE' THEN\n    RAISE EXCEPTION '% is append-only: % rejected (invocations cannot be deleted)', TG_TABLE_NAME, TG_OP\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  IF OLD.status IN ('disabled') THEN\n    RAISE EXCEPTION '% row % is terminal: update rejected', TG_TABLE_NAME, OLD.id\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  IF (to_jsonb(NEW) - ARRAY['status', 'intake', 'disabled_at', 'last_seen_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'intake', 'disabled_at', 'last_seen_at']) THEN\n    RAISE EXCEPTION '% row %: immutable column changed', TG_TABLE_NAME, OLD.id\n      USING ERRCODE = 'restrict_violation';\n  END IF;\n  RETURN NEW;\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER mac_workers_guard_row ON mac_workers",
+      "global?": false,
+      "name": "mac_workers_guard_row",
+      "up": "CREATE TRIGGER mac_workers_guard_row BEFORE UPDATE OR DELETE ON mac_workers FOR EACH ROW EXECUTE FUNCTION mac_workers_terminal_immutable()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER mac_workers_guard_truncate ON mac_workers",
+      "global?": false,
+      "name": "mac_workers_guard_truncate",
+      "up": "CREATE TRIGGER mac_workers_guard_truncate BEFORE TRUNCATE ON mac_workers FOR EACH STATEMENT EXECUTE FUNCTION mac_workers_terminal_immutable()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "40C347ADF904952C0937CE4BC7422BE1C2A2B9F7DBF14619C5F44C70510D40D5",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "mac_workers_unique_id_tenant_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        }
+      ],
+      "name": "unique_id_tenant",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "mac_workers_unique_token_sha256_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "token_sha256"
+        }
+      ],
+      "name": "unique_token_sha256",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "mac_workers",
+  "temporal": null
+}
