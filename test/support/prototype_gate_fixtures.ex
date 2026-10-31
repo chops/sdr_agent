@@ -299,6 +299,7 @@ defmodule SdrAgent.PrototypeGateFixtures do
     run = Ash.get!(SdrAgent.Agents.AgentRun, inv.agent_run_id, authorize?: false)
     s = fx.snapshot
     hex = &Base.encode16(&1, case: :lower)
+    funding = SdrAgent.Prototype.Authority.funding_entry()
 
     %{
       "schema" => "d237-basis/1",
@@ -325,8 +326,8 @@ defmodule SdrAgent.PrototypeGateFixtures do
         "system_identifier" => Integer.to_string(s.system_identifier)
       },
       "window" => %{
-        "starts_at" => "2026-10-28T02:38:32.000000Z",
-        "expires_at" => "2026-11-07T07:00:00.000000Z",
+        "starts_at" => stamp(funding.starts_at),
+        "expires_at" => stamp(funding.expires_at),
         "decided_at" => Calendar.strftime(decided_at, "%Y-%m-%dT%H:%M:%S.%fZ")
       },
       "invocation" => %{
@@ -352,6 +353,10 @@ defmodule SdrAgent.PrototypeGateFixtures do
       "label" => "UNVERIFIED (PROTOTYPE)"
     }
   end
+
+  # The basis stamp form: ISO 8601 UTC with exactly 6 fractional digits.
+  defp stamp(%DateTime{microsecond: {micro, _precision}} = at),
+    do: DateTime.to_iso8601(%{at | microsecond: {micro, 6}})
 
   @doc """
   A `released_unverified` decision of `invocation` with the caller-built
