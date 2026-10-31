@@ -68,11 +68,12 @@ check_source() {
 acquire_lock() {
   remote "test ! -e $DEPLOY_LOCK" || die "a deploy holds $DEPLOY_LOCK on $HOST"
   remote "mkdir $LOCK" 2>/dev/null || die "another build holds $LOCK on $HOST"
-  trap 'remote "rm -rf $LOCK" >/dev/null 2>&1 || true' EXIT
+  trap 'remote "rmdir $LOCK" >/dev/null 2>&1 || true' EXIT
 }
 
 build() {
   STAGE="$(remote 'mktemp -d /root/sdr_agent-build.XXXXXXXX')"
+  [[ $STAGE =~ ^/root/sdr_agent-build\.[A-Za-z0-9]{8}$ ]] || die "unexpected stage path from mktemp"
   log INFO "shipping $REV to $HOST:$STAGE"
   git -C "$PROJECT_ROOT" archive --format=tar "$REV" | remote "tar -x -C $STAGE"
   remote "echo $REV > $STAGE/REVISION"
@@ -147,7 +148,7 @@ check_artifact() {
     set -euo pipefail
     echo "$SUM  $STAGE/release.tar.gz" | sha256sum -c --quiet
     dir="$STAGE/check"
-    rm -rf "$dir" && mkdir -p "$dir"
+    mkdir "$dir"
     tar -xzf "$STAGE/release.tar.gz" -C "$dir" --strip-components=1
     [ "$(cat "$dir/REVISION")" = "$REV" ] || { echo "artifact REVISION mismatch"; exit 1; }
     [ -x "$dir/bin/sdr_agent" ] && [ -x "$dir/bin/server" ] \
