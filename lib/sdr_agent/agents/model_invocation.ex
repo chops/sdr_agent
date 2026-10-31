@@ -266,6 +266,10 @@ defmodule SdrAgent.Agents.ModelInvocation do
                   :prototype_authority
                 ]
               ] ++ @event}
+
+      # S-B2 (plan P1): under the trusted :remote transport, the reserved
+      # call's RemoteModelCall, in this transaction.
+      change SdrAgent.Agents.Changes.CreateRemoteCall
     end
 
     update :mark_sent do
@@ -322,6 +326,13 @@ defmodule SdrAgent.Agents.ModelInvocation do
 
     policy action([:reserve, :mark_sent, :complete, :fail, :mark_unknown]) do
       authorize_if {Checks.ActorType, types: [:agent_runtime]}
+    end
+
+    # S-B2: the :mac_worker actor type grants nothing by itself; a strict
+    # denial, independent of the read policy below (left unchanged).
+    policy [action_type(:read), actor_attribute_equals(:type, :mac_worker)] do
+      access_type :strict
+      forbid_if always()
     end
 
     policy action_type(:read) do

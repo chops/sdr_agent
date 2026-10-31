@@ -11,7 +11,8 @@ defmodule SdrAgent.Operations do
   built yet. The D-237 prototype binding and delegations, and S-B1's
   append-only relocation chain (`SdrAgent.Prototype.Relocation`,
   `SdrAgent.Prototype.RelocationEvent`; ADR-0024 decision 1), are
-  kernel-only resources here. Operations sits above Audit and Accounts (FKs to tenants and users)
+  kernel-only resources here, as is S-B2's `SdrAgent.Operations.MacWorker`
+  (an off-host executor; owner-run enrolment and control). Operations sits above Audit and Accounts (FKs to tenants and users)
   and below Agents, Sales, Research and Outreach, which open Failures here in
   the same transaction as the state change that causes them (S2 "Operator
   attention"): AgentRun failed / budget exhausted / system-cancelled, Lead
@@ -56,6 +57,8 @@ defmodule SdrAgent.Operations do
     # ADR-0024 decision 1 (S-B1): the append-only relocation chain.
     resource SdrAgent.Prototype.Relocation
     resource SdrAgent.Prototype.RelocationEvent
+    # S-B2: the off-host executor of remote ClaudeCLI calls.
+    resource SdrAgent.Operations.MacWorker
   end
 
   ## Operations

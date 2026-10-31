@@ -1,0 +1,473 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "true",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "singleton",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "true",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "prototype",
+      "type": "boolean"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "instance_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "dataset_class",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "policy_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "policy_entry_sha256",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "funding_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "witness_mode",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "database",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "database_oid",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "system_identifier",
+      "type": "bigint"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "bound_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_database_bindings_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": "full",
+        "match_with": {
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_database_bindings_operator_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "operator_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": true,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": {
+          "tenant_id": "tenant_id"
+        },
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "prototype_database_bindings_auditor_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "auditor_user_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "prototype_database_bindings_trace_ids"
+    },
+    {
+      "attribute": [
+        "singleton"
+      ],
+      "base_filter": null,
+      "check": "singleton IS TRUE",
+      "name": "prototype_database_bindings_singleton"
+    },
+    {
+      "attribute": [
+        "prototype"
+      ],
+      "base_filter": null,
+      "check": "prototype IS TRUE",
+      "name": "prototype_database_bindings_prototype"
+    },
+    {
+      "attribute": [
+        "auditor_user_id"
+      ],
+      "base_filter": null,
+      "check": "auditor_user_id IS NULL OR auditor_user_id <> operator_user_id",
+      "name": "prototype_database_bindings_auditor_not_operator"
+    },
+    {
+      "attribute": [
+        "dataset_class"
+      ],
+      "base_filter": null,
+      "check": "dataset_class = 'real_prototype'",
+      "name": "prototype_database_bindings_dataset_class"
+    },
+    {
+      "attribute": [
+        "policy_id"
+      ],
+      "base_filter": null,
+      "check": "policy_id = 'd237-prototype/1'",
+      "name": "prototype_database_bindings_policy_id"
+    },
+    {
+      "attribute": [
+        "policy_entry_sha256"
+      ],
+      "base_filter": null,
+      "check": "policy_entry_sha256 ~ '^[0-9a-f]{64}$'",
+      "name": "prototype_database_bindings_policy_entry_sha256"
+    },
+    {
+      "attribute": [
+        "funding_id"
+      ],
+      "base_filter": null,
+      "check": "funding_id = 'd237-funding/1'",
+      "name": "prototype_database_bindings_funding_id"
+    },
+    {
+      "attribute": [
+        "witness_mode"
+      ],
+      "base_filter": null,
+      "check": "witness_mode = 'absent'",
+      "name": "prototype_database_bindings_witness_mode"
+    },
+    {
+      "attribute": [
+        "database"
+      ],
+      "base_filter": null,
+      "check": "database = 'sdr_agent_prototype'",
+      "name": "prototype_database_bindings_database"
+    },
+    {
+      "attribute": [
+        "database_oid"
+      ],
+      "base_filter": null,
+      "check": "database_oid > 0",
+      "name": "prototype_database_bindings_database_oid"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION prototype_database_bindings_append_only()",
+      "global?": false,
+      "name": "prototype_database_bindings_guard_function",
+      "up": "CREATE FUNCTION prototype_database_bindings_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_database_bindings_guard_row ON prototype_database_bindings",
+      "global?": false,
+      "name": "prototype_database_bindings_guard_row",
+      "up": "CREATE TRIGGER prototype_database_bindings_guard_row BEFORE UPDATE OR DELETE ON prototype_database_bindings FOR EACH ROW EXECUTE FUNCTION prototype_database_bindings_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER prototype_database_bindings_guard_truncate ON prototype_database_bindings",
+      "global?": false,
+      "name": "prototype_database_bindings_guard_truncate",
+      "up": "CREATE TRIGGER prototype_database_bindings_guard_truncate BEFORE TRUNCATE ON prototype_database_bindings FOR EACH STATEMENT EXECUTE FUNCTION prototype_database_bindings_append_only()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "C388E7ACBC8F058A2DD87DCA6A459708418A9CAD73DEDD482B3303B110AD1351",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_database_bindings_unique_id_tenant_operator_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "operator_user_id"
+        }
+      ],
+      "name": "unique_id_tenant_operator",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_database_bindings_unique_singleton_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "singleton"
+        }
+      ],
+      "name": "unique_singleton",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "prototype_database_bindings_unique_id_tenant_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "id"
+        },
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        }
+      ],
+      "name": "unique_id_tenant",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "prototype_database_bindings",
+  "temporal": null
+}

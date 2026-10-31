@@ -1143,7 +1143,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_028_052_400, "d237_06_sources"},
       {20_261_028_052_425, "d237_07_dossier"},
       {20_261_031_001_212, "d270_01_relocation_chain"},
-      {20_261_031_022_459, "d270_02_relocation_event_position"}
+      {20_261_031_022_459, "d270_02_relocation_event_position"},
+      {20_261_031_064_445, "d270_03_remote_calls"}
     ]
 
     # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
@@ -1155,15 +1156,16 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @public_tables Enum.sort(~w(
       accounts agent_definitions agent_runs anchor_sink_receipts approvals
       audit_accesses audit_anchors audit_chain_heads audit_events audit_exports
-      audit_signing_keys campaign_enrollments campaigns contacts decisions
+      audit_signing_keys campaign_enrollments campaigns claim_nonces contacts decisions
       delivery_operations delivery_receipts dossier_entries dossier_sources
       draft_revisions drafts evidence_claims failures icp_definitions leads
-      model_call_allocations model_call_grants model_invocations
+      mac_workers model_call_allocations model_call_grants model_invocations
       model_profile_settings model_profile_switches model_result_releases
       model_server_counters model_server_starts oban_jobs oban_peers operations
       payloads prototype_database_bindings prototype_delegations
       prototype_relocation_events prototype_relocations
-      provenance_snapshots qualification_evidences qualifications replies
+      provenance_snapshots qualification_evidences qualifications
+      remote_call_receipts remote_call_results remote_model_calls replies
       reply_assessments research_artifacts retention_markers revision_citations
       run_settings_snapshots send_quota_days sequence_steps sequences
       settings_revisions suppressions tenants tokens tool_invocations users

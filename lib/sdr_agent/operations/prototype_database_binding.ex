@@ -18,7 +18,8 @@ defmodule SdrAgent.Operations.PrototypeDatabaseBinding do
 
   Keys: UNIQUE `singleton` (one row per database) and UNIQUE `(id,
   tenant_id, operator_user_id)`, the composite foreign-key target of
-  `SdrAgent.Operations.PrototypeDelegation`.
+  `SdrAgent.Operations.PrototypeDelegation`, and UNIQUE `(id, tenant_id)`, the
+  composite foreign-key target of `SdrAgent.Operations.MacWorker` (S-B2).
 
   CREATE-ONLY: a trigger rejects update, delete and truncate; foreign keys
   are RESTRICT. Rows are written only by setup phase 2 (event
@@ -228,6 +229,9 @@ defmodule SdrAgent.Operations.PrototypeDatabaseBinding do
   identities do
     identity :unique_singleton, [:singleton]
     identity :unique_id_tenant_operator, [:id, :tenant_id, :operator_user_id]
+    # S-B2: the composite foreign-key target of `SdrAgent.Operations.MacWorker`
+    # (index `prototype_database_bindings_unique_id_tenant_index`).
+    identity :unique_id_tenant, [:id, :tenant_id]
   end
 
   @doc "The fixed values the database checks, by column."
