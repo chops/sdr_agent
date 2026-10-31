@@ -1140,25 +1140,22 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
 
     receive do
       {^port, {:data, {:eol, line}}} ->
-        case Jason.decode(line) do
-          {:ok, %{"type" => "system", "subtype" => "init"} = event} ->
-            case attest(event, state.profile) do
-              :ok ->
-                attested(state, event)
-                collect(port, os_pid, state, deadline, event, [event | messages])
+        case stream_line(line, init, messages, state.profile) do
+          {:attested, event, messages} ->
+            attested(state, event)
+            collect(port, os_pid, state, deadline, event, messages)
 
-              {:error, reason} ->
-                drifted(state, reason)
-                stop_tree(os_pid, state, {:error, reason})
-            end
+          {:drift, reason} ->
+            drifted(state, reason)
+            stop_tree(os_pid, state, {:error, reason})
 
-          {:ok, %{"type" => "result"} = event} when not is_nil(init) ->
-            finish_result(event, init, Enum.reverse([event | messages]), state.profile)
+          {:result, result} ->
+            result
 
-          {:ok, event} when is_map(event) ->
-            collect(port, os_pid, state, deadline, init, [event | messages])
+          {:cont, messages} ->
+            collect(port, os_pid, state, deadline, init, messages)
 
-          _ ->
+          :invalid ->
             stop_tree(os_pid, state, {:error, :invalid_cli_stream})
         end
 
@@ -1202,7 +1199,57 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
   defp drifted(state, reason),
     do: note(state, %{status: :drift, reason: reason, model: nil, version: nil})
 
-  defp attest(event, profile) do
+  @doc """
+  The decision of one complete stream-json `line` (pure; no port, process,
+  reaper or I/O effect), given the attested `init` event so far (or nil),
+  the events seen so far (newest first) and the call's `profile`:
+
+    * `{:attested, init, messages}` — an init event that `attest/2`
+      accepts; it becomes the attested init;
+    * `{:drift, reason}` — an init event `attest/2` refuses;
+    * `{:result, outcome}` — a result event after an attested init:
+      `finish_result/4` of it;
+    * `{:cont, messages}` — any other JSON object (a result before any
+      init included);
+    * `:invalid` — anything that is not a JSON object
+      (`:invalid_cli_stream`).
+
+  The local collector applies it to each line it receives and stops at the
+  first result; `SdrAgent.Agents.RemoteCalls` applies it to a stored
+  transcript.
+  """
+  @spec stream_line(binary(), map() | nil, [map()], ModelProfiles.Profile.t()) ::
+          {:attested, map(), [map()]}
+          | {:drift, atom()}
+          | {:result, {:ok, map()} | {:error, atom()}}
+          | {:cont, [map()]}
+          | :invalid
+  def stream_line(line, init, messages, profile) do
+    case Jason.decode(line) do
+      {:ok, %{"type" => "system", "subtype" => "init"} = event} ->
+        case attest(event, profile) do
+          :ok -> {:attested, event, [event | messages]}
+          {:error, reason} -> {:drift, reason}
+        end
+
+      {:ok, %{"type" => "result"} = event} when not is_nil(init) ->
+        {:result, finish_result(event, init, Enum.reverse([event | messages]), profile)}
+
+      {:ok, event} when is_map(event) ->
+        {:cont, [event | messages]}
+
+      _ ->
+        :invalid
+    end
+  end
+
+  @doc """
+  The init attestation of `event` against `profile` (pure): `:ok`, or
+  `{:error, reason}` naming the first drift (model, CLI version, tools, MCP
+  servers, slash commands).
+  """
+  @spec attest(map(), ModelProfiles.Profile.t()) :: :ok | {:error, atom()}
+  def attest(event, profile) do
     cond do
       event["model"] != profile.resolved_model -> {:error, :model_attestation_drift}
       event["claude_code_version"] != profile.cli_version -> {:error, :version_attestation_drift}
@@ -1213,10 +1260,19 @@ defmodule SdrAgent.AI.ModelProvider.ClaudeCLI do
     end
   end
 
-  defp finish_result(%{"is_error" => true}, _init, _messages, _profile),
+  @doc """
+  The reply of a result `event` (pure) after the attested `init`, with
+  every event of the call in order (`messages`, the result included) and
+  the call's `profile`: `{:ok, reply}` whose `:output` is the one JSON
+  object of the result text (optionally fenced, `unfence/1`), or
+  `{:error, :claude_cli_error}` / `{:error, :missing_structured_output}`.
+  """
+  @spec finish_result(map(), map(), [map()], ModelProfiles.Profile.t()) ::
+          {:ok, map()} | {:error, atom()}
+  def finish_result(%{"is_error" => true}, _init, _messages, _profile),
     do: {:error, :claude_cli_error}
 
-  defp finish_result(event, init, messages, profile) do
+  def finish_result(event, init, messages, profile) do
     with result when is_binary(result) <- event["result"],
          {:ok, output} when is_map(output) <- result |> unfence() |> Jason.decode() do
       {:ok,

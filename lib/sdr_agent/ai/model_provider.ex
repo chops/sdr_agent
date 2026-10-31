@@ -248,8 +248,14 @@ defmodule SdrAgent.AI.ModelProvider do
   # constraints refuse negatives). Anything else is `:malformed`.
   @usage_keys [:input_tokens, :output_tokens, :plan_calls]
 
-  defp envelope({:ok, %{output: _, raw_response: raw} = result})
-       when is_binary(raw) and not is_struct(result) do
+  @doc """
+  The closed provider reply envelope (R0-04-1), checked before any
+  settlement write: `{:ok, result}` (usage normalized), `{:error, reason}`,
+  `{:unknown, reason}`, or `:malformed`.
+  """
+  @spec envelope(term()) :: {:ok, map()} | {:error, term()} | {:unknown, term()} | :malformed
+  def envelope({:ok, %{output: _, raw_response: raw} = result})
+      when is_binary(raw) and not is_struct(result) do
     case Map.fetch(result, :usage) do
       :error ->
         {:ok, Map.put(result, :usage, empty_usage())}
@@ -262,9 +268,9 @@ defmodule SdrAgent.AI.ModelProvider do
     end
   end
 
-  defp envelope({:error, _reason} = error), do: error
-  defp envelope({:unknown, _reason} = unknown), do: unknown
-  defp envelope(_other), do: :malformed
+  def envelope({:error, _reason} = error), do: error
+  def envelope({:unknown, _reason} = unknown), do: unknown
+  def envelope(_other), do: :malformed
 
   defp usage(usage) when is_map(usage) and not is_struct(usage) do
     with true <- Enum.sort(Map.keys(usage)) == Enum.sort(@usage_keys),
@@ -281,14 +287,37 @@ defmodule SdrAgent.AI.ModelProvider do
   defp usage(_usage), do: :error
 
   defp settle_result(request, invocation, result, started) do
-    latency = elapsed(started)
+    case validate_result(request.schema, result, elapsed(started)) do
+      {:complete, attrs, output} ->
+        with {:ok, completed} <-
+               Agents.complete_model_invocation(invocation, attrs, actor: request.actor) do
+          {:ok, Map.put(result, :invocation, completed) |> Map.put(:output, output)}
+        end
 
-    case Zoi.parse(request.schema, result.output) do
+      {:fail, attrs, errors} ->
+        with {:ok, _failed} <-
+               Agents.fail_model_invocation(invocation, attrs, actor: request.actor) do
+          {:error, {:validation_failed, errors}}
+        end
+    end
+  end
+
+  @doc """
+  The Zoi validation of an enveloped success `result` against `schema`
+  (pure; the settlement attributes, `latency_ms` given): `{:complete,
+  attrs, output}` for a valid object, else `{:fail, attrs, errors}`
+  (`validation_failed`; an output that is not an object has no parsed
+  output and one entry naming only its type, R0-04-2).
+  """
+  @spec validate_result(Zoi.schema(), map(), non_neg_integer()) ::
+          {:complete, map(), map()} | {:fail, map(), list()}
+  def validate_result(schema, result, latency) do
+    case Zoi.parse(schema, result.output) do
       {:ok, output} when not is_map(output) or is_struct(output) ->
-        not_object(request, invocation, result, output, [], latency)
+        not_object(result, output, [], latency)
 
       {:error, errors} when not is_map(result.output) or is_struct(result.output) ->
-        not_object(request, invocation, result, result.output, errors, latency)
+        not_object(result, result.output, errors, latency)
 
       {:ok, output} ->
         attrs = %{
@@ -300,10 +329,7 @@ defmodule SdrAgent.AI.ModelProvider do
           latency_ms: latency
         }
 
-        with {:ok, completed} <-
-               Agents.complete_model_invocation(invocation, attrs, actor: request.actor) do
-          {:ok, Map.put(result, :invocation, completed) |> Map.put(:output, output)}
-        end
+        {:complete, attrs, output}
 
       {:error, errors} ->
         attrs = %{
@@ -316,17 +342,14 @@ defmodule SdrAgent.AI.ModelProvider do
           latency_ms: latency
         }
 
-        with {:ok, _failed} <-
-               Agents.fail_model_invocation(invocation, attrs, actor: request.actor) do
-          {:error, {:validation_failed, errors}}
-        end
+        {:fail, attrs, errors}
     end
   end
 
   # R0-04-2: `parsed_output` is a map, so an output that is not one, valid
   # or not, is failed as `validation_failed` with no parsed output and one
   # entry naming only its type (never its value).
-  defp not_object(request, invocation, result, output, errors, latency) do
+  defp not_object(result, output, errors, latency) do
     type_entry = %{"message" => "output is not an object", "type" => type_name(output)}
 
     attrs = %{
@@ -339,9 +362,7 @@ defmodule SdrAgent.AI.ModelProvider do
       latency_ms: latency
     }
 
-    with {:ok, _failed} <- Agents.fail_model_invocation(invocation, attrs, actor: request.actor) do
-      {:error, {:validation_failed, errors ++ [type_entry]}}
-    end
+    {:fail, attrs, errors ++ [type_entry]}
   end
 
   defp type_name(value) when is_binary(value), do: "string"
@@ -352,11 +373,7 @@ defmodule SdrAgent.AI.ModelProvider do
   defp type_name(_value), do: "other"
 
   defp fail(invocation, reason, started) do
-    attrs = %{
-      error: %{"kind" => "provider_error", "reason" => safe_reason(reason)},
-      latency_ms: elapsed(started)
-    }
-
+    attrs = failure_attrs(reason, elapsed(started))
     actor = actor(invocation)
 
     Audit.transaction(fn ->
@@ -373,7 +390,26 @@ defmodule SdrAgent.AI.ModelProvider do
     end
   end
 
-  defp attention(invocation, reason, actor) when reason in @drift do
+  @doc """
+  The `:fail` attributes of a known provider failure `reason` (the redacted
+  reason name only) with `latency_ms`.
+  """
+  @spec failure_attrs(term(), non_neg_integer() | nil) :: map()
+  def failure_attrs(reason, latency) do
+    %{
+      error: %{"kind" => "provider_error", "reason" => safe_reason(reason)},
+      latency_ms: latency
+    }
+  end
+
+  @doc """
+  The operator attention of a failed `invocation`: a reviewed-configuration
+  drift `reason` (an init attestation drift, or none at all) opens a
+  critical `provider_error` Failure as `actor` (call it in the failed
+  invocation's transaction); any other reason is `{:ok, :none}`.
+  """
+  @spec attention(struct(), term(), struct()) :: {:ok, term()} | {:error, term()}
+  def attention(invocation, reason, actor) when reason in @drift do
     Operations.open_failure(
       %{
         subject_resource: inspect(invocation.__struct__),
@@ -389,7 +425,7 @@ defmodule SdrAgent.AI.ModelProvider do
     )
   end
 
-  defp attention(_invocation, _reason, _actor), do: {:ok, :none}
+  def attention(_invocation, _reason, _actor), do: {:ok, :none}
 
   defp mark_unknown(invocation) do
     case Agents.mark_model_invocation_unknown(invocation, actor: actor(invocation)) do

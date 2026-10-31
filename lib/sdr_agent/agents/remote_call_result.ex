@@ -19,9 +19,15 @@ defmodule SdrAgent.Agents.RemoteCallResult do
   stays forbidden in S-B2 (`%Ash.ForbiddenField{}`); every external or
   unscoped read is Forbidden, auditors included. The audit kernel's
   integrity read (`SdrAgent.Audit.Kernel.integrity_opts/1`) is the only
-  reader of the bytes, to hash the stored row. S-B3 adds a scoped
-  settlement read and S-B5 the hosted owner's. A trigger refuses UPDATE,
-  DELETE and TRUNCATE.
+  reader of the bytes, to hash the stored row; and, S-B3 (plan r3 D1), the
+  settler's internal settlement read: the `:transcript` field policy's
+  second branch `{SdrAgent.Agents.Checks.RemoteCallsScope, read:
+  :settlement}` passes only while `SdrAgent.Agents.RemoteCalls.settle_due/1`
+  holds its internally registered settlement marker on the open scope, for
+  one completed call after its locked rebinding checks. A plain scoped read
+  (claim, complete, heartbeat, duplicate checks) keeps the field forbidden.
+  The bytes are never logged nor put in an AuditEvent. S-B5 adds the hosted
+  owner's read. A trigger refuses UPDATE, DELETE and TRUNCATE.
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -63,6 +69,7 @@ defmodule SdrAgent.Agents.RemoteCallResult do
   field_policies do
     field_policy :transcript do
       authorize_if IntegrityRead
+      authorize_if {RemoteCallsScope, read: :settlement}
     end
 
     field_policy :* do

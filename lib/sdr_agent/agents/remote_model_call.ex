@@ -17,12 +17,14 @@ defmodule SdrAgent.Agents.RemoteModelCall do
   `(worker_id) WHERE state = 'claimed'` (one claimed call per worker).
 
   Lifecycle (`transitions/0`): pending → claimed (`:claim`), claimed →
-  completed (`:complete`), claimed → expired_unknown (`:expire_unknown`);
-  pending → expired_unclaimed belongs to the S-B3 settler. Each create and
-  transition appends one AuditEvent through the unchanged
-  `SdrAgent.Audit.Changes.AppendEvent` (`remote_call.created`,
-  `.claimed`, `.completed`, `.expired_unknown`; `:domain_change`) whose
-  payload is ids, state, digests and deadlines only.
+  completed (`:complete`), claimed → expired_unknown (`:expire_unknown`,
+  by a late complete or the S-B3 settler), pending → expired_unclaimed
+  (`:expire_unclaimed`, only the S-B3 settler
+  `SdrAgent.Agents.RemoteCalls.settle_due/1`). Each create and transition
+  appends one AuditEvent through the unchanged
+  `SdrAgent.Audit.Changes.AppendEvent` (`remote_call.created`, `.claimed`,
+  `.completed`, `.expired_unknown`, `.expired_unclaimed`; `:domain_change`)
+  whose payload is ids, state, digests and deadlines only.
 
   `:create` authorizes only inside the reservation-owned scope
   (`SdrAgent.Agents.Checks.RemoteReservationScope`), reached only from
@@ -52,7 +54,8 @@ defmodule SdrAgent.Agents.RemoteModelCall do
   @transitions [
     {:claim, [:pending], :claimed},
     {:complete, [:claimed], :completed},
-    {:expire_unknown, [:claimed], :expired_unknown}
+    {:expire_unknown, [:claimed], :expired_unknown},
+    {:expire_unclaimed, [:pending], :expired_unclaimed}
   ]
 
   postgres do
@@ -131,6 +134,13 @@ defmodule SdrAgent.Agents.RemoteModelCall do
       require_atomic? false
       change {Transition, from: [:claimed], to: :expired_unknown, attribute: :state}
       change {AppendEvent, [event_type: "remote_call.expired_unknown"] ++ @event}
+    end
+
+    update :expire_unclaimed do
+      description "S-B3: pending → expired_unclaimed at or after the claim deadline (the settler)."
+      require_atomic? false
+      change {Transition, from: [:pending], to: :expired_unclaimed, attribute: :state}
+      change {AppendEvent, [event_type: "remote_call.expired_unclaimed"] ++ @event}
     end
   end
 

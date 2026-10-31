@@ -13,11 +13,21 @@ defmodule SdrAgent.Agents.RemoteCalls do
   `RemoteModelCall` `:create` instead requires the reservation scope
   (`SdrAgent.Agents.Checks.RemoteReservationScope`), bound only inside the
   `:reserve` transaction by `SdrAgent.Agents.Changes.CreateRemoteCall`.
-  This module alone opens it: inside a transaction it opens (or joins), it
-  binds a fresh reference to the current process and passes the context
-  (key `:sdr_agent_remote_calls_scope`) to its own requests;
-  the binding is removed when the transaction function returns. There is no
-  public grant (the test-seam build adds `__with_scope_for_test__/1`).
+  Only this module opens the RemoteCalls scope: inside a transaction it
+  opens (or joins), it binds a fresh reference to the current process and
+  passes the context (key `:sdr_agent_remote_calls_scope`) to its own
+  requests; the binding is removed when the transaction function returns.
+  There is no public grant (the test-seam build adds
+  `__with_scope_for_test__/1`).
+
+  The settlement read (S-B3 plan r3 D1): only `settle_due/1`, after the
+  locked rebinding checks of one completed call, registers an internal
+  settlement marker (this process, keyed to the current scope reference,
+  inside the same transaction) around its read of the stored transcript;
+  the `RemoteCallResult` `:transcript` field policy's `{RemoteCallsScope,
+  read: :settlement}` branch passes only then (`settlement?/1`). The marker
+  is restored on every exit; no context key, other process or plain scope
+  passes it.
 
   ## Contracts
 
@@ -56,6 +66,40 @@ defmodule SdrAgent.Agents.RemoteCalls do
       conflict and late, `{:error, kind}` for refused_*.
     * `heartbeat(token, pins)` — an active worker with equal pins: writes
       `last_seen_at` and returns `{:ok, intake}`.
+    * `settle_due(opts)` (S-B3; the cron worker
+      `SdrAgent.Agents.RemoteSettler`) — only the kernel actor of a tenant
+      with the `:remote_settler` KernelMarker context
+      (`SdrAgent.Prototype.Checks.KernelMarker`); anything else is
+      Forbidden with no write. Under the trusted `:remote` transport it
+      selects, unlocked and in bounded batches, the tenant's pending calls
+      at or after their claim deadline, claimed calls at or after their
+      result deadline, and completed or expired_unknown calls whose
+      invocation is still `sent`. Each one is then settled in its own
+      RemoteCalls scope under run → Operation (share) → invocation → call
+      (the authoritative reread) → charge → chain head, never a MacWorker
+      lock, with the clock read once every lock is held. The locked rows
+      are rebound first (the call's tenant; the invocation its own, of the
+      same tenant, `:claude_cli`; the transport still `:remote`); a
+      mismatch or a state that no longer applies is skipped with no write.
+      Then: pending → expired_unclaimed (`:expire_unclaimed`) and a
+      `reserved` invocation → failed `remote_unclaimed` (the charge kept);
+      claimed → expired_unknown and a `sent` invocation → unknown; an
+      expired_unknown call's `sent` invocation → unknown; a completed
+      call's `sent` invocation is settled from the stored transcript:
+      request binding (`request_sha256` equal to the call's), the schema
+      recovered from the purpose and equal to the frozen id, version and
+      sha256, the ClaudeCLI stream fold (`ClaudeCLI.stream_line/4`, init
+      attestation, the first result; any non-blank byte after it, or an
+      init without a result, is unprocessable), the reply envelope and
+      the Zoi validation (`ModelProvider.validate_result/3`). A drift
+      (missing init included) fails with its reason and the critical
+      `provider_error` Failure of the local path
+      (`ModelProvider.attention/3`); any other unprocessable transcript
+      fails `remote_result_unprocessable`; a schema-invalid object fails
+      validation as locally. All writes are the existing invocation and
+      run actions as the tenant's agent runtime. The release stays the
+      result gate's (`SdrAgent.SDR.StaleRunSweeper`); the transcript is
+      never logged nor put in an event. `{:ok, counts}`.
 
   Internal entries used by `SdrAgent.Agents`: `remote_invocation?/1` (the
   local launch's `:remote_transport` refusal), `remote?/0` and `check_request/1` (the
@@ -78,6 +122,7 @@ defmodule SdrAgent.Agents.RemoteCalls do
   alias SdrAgent.Repo
 
   @scope_key :sdr_agent_remote_calls_scope
+  @settlement_key {__MODULE__, :settlement}
   @result_window 600
   @field_cap 262_144
   @launch_purpose "remote_call_launch"
@@ -101,6 +146,18 @@ defmodule SdrAgent.Agents.RemoteCalls do
   @spec scope_of(term()) :: map()
   def scope_of(context) when is_map(context), do: Map.take(context, [@scope_key])
   def scope_of(_context), do: %{}
+
+  @doc """
+  Whether `context` carries the open RemoteCalls scope of this process
+  (`scoped?/1`) AND this module registered its internal settlement marker
+  against that same scope reference (only inside `settle_due/1`'s read of
+  one completed call's transcript, plan r3 D1).
+  """
+  @spec settlement?(term()) :: boolean()
+  def settlement?(context) when is_map(context),
+    do: scoped?(context) and Process.get(@settlement_key) == Map.get(context, @scope_key)
+
+  def settlement?(_context), do: false
 
   # Runs `fun.(scope)` in a transaction (a new one, or the caller's) with a
   # fresh reference bound to this process. `fun` returns `{:ok, value}` to
@@ -528,6 +585,376 @@ defmodule SdrAgent.Agents.RemoteCalls do
     worker
     |> Ash.Changeset.for_update(:touch_last_seen, %{}, actor: mac(worker), context: scope)
     |> Ash.update()
+  end
+
+  ## Settlement (S-B3)
+
+  # Compiled only with the prototype authority: the production build has no
+  # :remote_settler marker, so its settle_due/1 refuses every caller.
+  @prototype_authority Application.compile_env(:sdr_agent, :prototype_authority_compiled, false)
+
+  if @prototype_authority do
+    alias Ash.Error.Forbidden
+    alias SdrAgent.Agents
+    alias SdrAgent.AI.ModelProfiles
+    alias SdrAgent.AI.ModelProvider
+    alias SdrAgent.AI.ModelProvider.ClaudeCLI
+    alias SdrAgent.Audit
+    alias SdrAgent.Prototype.Checks.KernelMarker
+    alias SdrAgent.SDR.Schemas
+
+    @batch 100
+    @unprocessable :remote_result_unprocessable
+
+    @doc false
+    # The settler's entry (`SdrAgent.Agents.RemoteSettler`). See the moduledoc.
+    @spec settle_due(keyword()) :: {:ok, map()} | {:error, term()}
+    def settle_due(opts) when is_list(opts) do
+      actor = Keyword.get(opts, :actor)
+
+      cond do
+        not settler?(actor, Keyword.get(opts, :context)) -> {:error, Forbidden.exception([])}
+        remote?() -> settle_tenant(actor.tenant_id)
+        true -> {:ok, %{}}
+      end
+    end
+
+    def settle_due(_opts), do: {:error, Forbidden.exception([])}
+
+    defp settler?(%Actor{type: :kernel, tenant_id: tenant_id} = actor, context)
+         when is_binary(tenant_id) and is_map(context),
+         do: KernelMarker.match?(actor, %{subject: %{context: context}}, marker: :remote_settler)
+
+    defp settler?(_actor, _context), do: false
+
+    defp settle_tenant(tenant_id) do
+      with {:ok, candidates} <- with_scope(&due(tenant_id, SdrAgent.Clock.utc_now(), &1)) do
+        candidates
+        |> Enum.map(&settle_one/1)
+        |> Enum.reduce({:ok, %{}}, &tally/2)
+      end
+    end
+
+    # One candidate in its own audited transaction (the invocation actions
+    # are guarded) holding a fresh RemoteCalls scope.
+    defp settle_one(candidate) do
+      Audit.transaction(fn ->
+        case with_scope(&settle_locked(candidate, &1)) do
+          {:ok, outcome} -> outcome
+          {:error, error} -> Repo.rollback(error)
+        end
+      end)
+    end
+
+    defp tally({:ok, outcome}, {:ok, counts}),
+      do: {:ok, Map.update(counts, outcome, 1, &(&1 + 1))}
+
+    defp tally({:error, error}, {:ok, _counts}), do: {:error, error}
+    defp tally(_result, {:error, error}), do: {:error, error}
+
+    # The unlocked selection (bounded per case); each candidate is decided
+    # again under its locks.
+    defp due(tenant_id, now, scope) do
+      with {:ok, unclaimed} <-
+             RemoteModelCall
+             |> Ash.Query.for_read(:read, %{}, context: scope)
+             |> Ash.Query.filter(
+               tenant_id == ^tenant_id and state == :pending and claim_deadline <= ^now
+             )
+             |> batch()
+             |> Ash.read(),
+           {:ok, unknown} <-
+             RemoteModelCall
+             |> Ash.Query.for_read(:read, %{}, context: scope)
+             |> Ash.Query.filter(
+               tenant_id == ^tenant_id and state == :claimed and result_deadline <= ^now
+             )
+             |> batch()
+             |> Ash.read(),
+           {:ok, sent} <- sent_invocations(tenant_id),
+           {:ok, settled} <-
+             RemoteModelCall
+             |> Ash.Query.for_read(:read, %{}, context: scope)
+             |> Ash.Query.filter(
+               tenant_id == ^tenant_id and state in [:completed, :expired_unknown] and
+                 model_invocation_id in ^sent
+             )
+             |> batch()
+             |> Ash.read() do
+        {:ok, Enum.uniq_by(unclaimed ++ unknown ++ settled, & &1.id)}
+      end
+    end
+
+    defp batch(query), do: query |> Ash.Query.sort(id: :asc) |> Ash.Query.limit(@batch)
+
+    defp sent_invocations(tenant_id) do
+      ModelInvocation
+      |> Ash.Query.for_read(:read, %{}, actor: Actor.system(:agent_runtime, tenant_id))
+      |> Ash.Query.filter(tenant_id == ^tenant_id and status == :sent and provider == :claude_cli)
+      |> Ash.Query.select([:id])
+      |> Ash.read()
+      |> case do
+        {:ok, rows} -> {:ok, Enum.map(rows, & &1.id)}
+        {:error, error} -> {:error, error}
+      end
+    end
+
+    # Run → Operation (share) → invocation → call → charge → chain head, the
+    # call re-read under its lock; never a MacWorker lock.
+    defp settle_locked(candidate, scope) do
+      tenant_id = candidate.tenant_id
+      agent = Actor.system(:agent_runtime, tenant_id)
+
+      with {:ok, target} <- invocation(candidate.model_invocation_id, tenant_id, nil, agent),
+           {:ok, run} <- run(target.agent_run_id, tenant_id, agent),
+           :ok <- Admission.lock_operation_share(run.operation_id),
+           {:ok, invocation} <- invocation(target.id, tenant_id, :for_update, agent),
+           {:ok, call} <- call(candidate.id, tenant_id, :for_update, scope),
+           :ok <- Admission.lock_charge(invocation),
+           {:ok, _head} <- Kernel.lock_head(call.tenant_id) do
+        # The settlement instant is read only once every lock is held.
+        if bound?(call, invocation),
+          do: settle_call(call, invocation, SdrAgent.Clock.utc_now(), scope),
+          else: {:ok, :skipped}
+      else
+        {:error, reason}
+        when reason in [:invocation_not_found, :run_not_found, :call_not_found] ->
+          {:ok, :skipped}
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+
+    # The rebinding of the locked rows (plan r2 E1).
+    defp bound?(call, invocation) do
+      invocation.id == call.model_invocation_id and invocation.tenant_id == call.tenant_id and
+        invocation.provider == :claude_cli and remote?()
+    end
+
+    defp settle_call(%{state: :pending} = call, invocation, now, scope) do
+      if reached?(now, call.claim_deadline) do
+        agent = Actor.system(:agent_runtime, call.tenant_id)
+
+        with {:ok, _expired} <- transition(call, :expire_unclaimed, agent, scope),
+             {:ok, _failed} <- fail_unclaimed(invocation, agent),
+             do: {:ok, :expired_unclaimed}
+      else
+        {:ok, :skipped}
+      end
+    end
+
+    defp settle_call(%{state: :claimed} = call, invocation, now, scope) do
+      if reached?(now, call.result_deadline) do
+        agent = Actor.system(:agent_runtime, call.tenant_id)
+
+        with {:ok, _expired} <- transition(call, :expire_unknown, agent, scope),
+             {:ok, _unknown} <- unknown_sent(invocation, agent),
+             do: {:ok, :expired_unknown}
+      else
+        {:ok, :skipped}
+      end
+    end
+
+    defp settle_call(
+           %{state: :expired_unknown} = call,
+           %{status: :sent} = invocation,
+           _now,
+           _scope
+         ) do
+      agent = Actor.system(:agent_runtime, call.tenant_id)
+      with {:ok, _unknown} <- unknown_sent(invocation, agent), do: {:ok, :unknown}
+    end
+
+    defp settle_call(%{state: :completed} = call, %{status: :sent} = invocation, _now, scope) do
+      agent = Actor.system(:agent_runtime, call.tenant_id)
+
+      with {:ok, decision} <- decide(call, invocation, scope),
+           do: apply_decision(decision, invocation, agent)
+    end
+
+    defp settle_call(_call, _invocation, _now, _scope), do: {:ok, :skipped}
+
+    defp reached?(now, deadline), do: DateTime.compare(now, deadline) != :lt
+
+    defp fail_unclaimed(%{status: :reserved} = invocation, agent) do
+      Agents.fail_model_invocation(
+        invocation,
+        ModelProvider.failure_attrs(:remote_unclaimed, nil),
+        actor: agent
+      )
+    end
+
+    defp fail_unclaimed(_invocation, _agent), do: {:ok, :none}
+
+    defp unknown_sent(%{status: :sent} = invocation, agent),
+      do: Agents.mark_model_invocation_unknown(invocation, actor: agent)
+
+    defp unknown_sent(_invocation, _agent), do: {:ok, :none}
+
+    # The decision for a completed call: `{:complete, attrs}`, `{:invalid,
+    # attrs}` (validation failed) or `{:failure, reason, latency}`.
+    defp decide(call, invocation, scope) do
+      with {:ok, schema} <- bound_schema(call, invocation),
+           {:ok, profile} <- call_profile(call),
+           {:ok, result} <- settlement_read(call, scope) do
+        latency = latency(call, result)
+
+        {:ok,
+         result.transcript
+         |> fold_transcript(profile)
+         |> reply(schema, latency)}
+      else
+        :unprocessable -> {:ok, {:failure, @unprocessable, nil}}
+        {:error, error} -> {:error, error}
+      end
+    end
+
+    # The persisted request binding and the schema recovered from the
+    # purpose, equal to the frozen ref (as admission compares it).
+    defp bound_schema(call, invocation) do
+      with true <- invocation.request_sha256 == call.request_sha256,
+           true <- invocation.profile_id == call.profile_id,
+           {:ok, schema, ref} <- recovered_schema(invocation.purpose),
+           true <-
+             {invocation.output_schema_id, invocation.output_schema_version,
+              invocation.output_schema_sha256} == {ref.id, ref.version, ref.sha256} do
+        {:ok, schema}
+      else
+        _unbound -> :unprocessable
+      end
+    end
+
+    defp recovered_schema(purpose) do
+      {:ok, Schemas.for_purpose(purpose), Schemas.ref(purpose)}
+    rescue
+      FunctionClauseError -> :unknown_purpose
+    end
+
+    defp call_profile(call) do
+      case ModelProfiles.fetch_real(call.profile_id) do
+        {:ok, %ModelProfiles.Profile{adapter: ClaudeCLI} = profile} -> {:ok, profile}
+        _other -> :unprocessable
+      end
+    end
+
+    # The domain-private settlement read of the stored bytes (plan r3 D1).
+    defp settlement_read(call, scope) do
+      with_settlement(scope, fn ->
+        RemoteCallResult
+        |> Ash.Query.for_read(:read, %{}, context: scope)
+        |> Ash.Query.filter(call_id == ^call.id and tenant_id == ^call.tenant_id)
+        |> Ash.read_one()
+      end)
+      |> case do
+        {:ok, %RemoteCallResult{transcript: transcript} = result} when is_binary(transcript) ->
+          {:ok, result}
+
+        {:ok, _missing} ->
+          {:error, :result_unreadable}
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+
+    defp latency(%{claimed_at: %DateTime{} = claimed_at}, %{received_at: %DateTime{} = received}),
+      do: max(DateTime.diff(received, claimed_at, :millisecond), 0)
+
+    defp latency(_call, _result), do: nil
+
+    # The stored stream through the unchanged ClaudeCLI line fold. Unlike the
+    # local collector, which stops reading at the first result, the whole
+    # transcript is known: any non-blank byte after the first result, or an
+    # unterminated non-blank tail, is unprocessable; an init with no result
+    # is unprocessable; no init at all is the local missing attestation.
+    defp fold_transcript(transcript, profile) do
+      {lines, [tail]} = transcript |> String.split("\n") |> Enum.split(-1)
+      blank_tail? = blank?([tail])
+
+      case walk(lines, nil, [], profile) do
+        {:drift, reason} ->
+          {:failure, reason}
+
+        {:result, outcome, rest} ->
+          if blank_tail? and blank?(rest), do: outcome, else: {:failure, @unprocessable}
+
+        {:end, nil} when blank_tail? ->
+          {:failure, :missing_init_attestation}
+
+        _invalid_or_no_result ->
+          {:failure, @unprocessable}
+      end
+    end
+
+    defp walk([], init, _messages, _profile), do: {:end, init}
+
+    defp walk([line | rest], init, messages, profile) do
+      case ClaudeCLI.stream_line(line, init, messages, profile) do
+        {:attested, event, messages} -> walk(rest, event, messages, profile)
+        {:cont, messages} -> walk(rest, init, messages, profile)
+        {:drift, reason} -> {:drift, reason}
+        {:result, outcome} -> {:result, outcome, rest}
+        :invalid -> :invalid
+      end
+    end
+
+    defp blank?(lines), do: Enum.all?(lines, &(String.trim(&1) == ""))
+
+    defp reply({:failure, reason}, _schema, latency), do: {:failure, reason, latency}
+    defp reply({:error, reason}, _schema, latency), do: {:failure, reason, latency}
+
+    defp reply({:ok, _reply} = success, schema, latency) do
+      case ModelProvider.envelope(success) do
+        {:ok, result} -> ModelProvider.validate_result(schema, result, latency) |> validated()
+        _malformed -> {:failure, @unprocessable, latency}
+      end
+    end
+
+    defp validated({:complete, attrs, _output}), do: {:complete, attrs}
+    defp validated({:fail, attrs, _errors}), do: {:invalid, attrs}
+
+    defp apply_decision({:complete, attrs}, invocation, agent) do
+      with {:ok, _completed} <- Agents.complete_model_invocation(invocation, attrs, actor: agent),
+           do: {:ok, :completed}
+    end
+
+    defp apply_decision({:invalid, attrs}, invocation, agent) do
+      with {:ok, _failed} <- Agents.fail_model_invocation(invocation, attrs, actor: agent),
+           do: {:ok, :failed}
+    end
+
+    # As the local path's known failure: the redacted reason, and for a
+    # drift the critical attention Failure in this transaction.
+    defp apply_decision({:failure, reason, latency}, invocation, agent) do
+      with {:ok, failed} <-
+             Agents.fail_model_invocation(
+               invocation,
+               ModelProvider.failure_attrs(reason, latency),
+               actor: agent
+             ),
+           {:ok, _attention} <- ModelProvider.attention(failed, reason, agent),
+           do: {:ok, :failed}
+    end
+
+    # Registers the settlement marker against `scope`'s reference for `fun`
+    # only, restoring the previous value on every exit.
+    defp with_settlement(%{@scope_key => ref}, fun) when is_reference(ref) do
+      previous = Process.get(@settlement_key)
+      Process.put(@settlement_key, ref)
+
+      try do
+        fun.()
+      after
+        if is_nil(previous),
+          do: Process.delete(@settlement_key),
+          else: Process.put(@settlement_key, previous)
+      end
+    end
+  else
+    @doc false
+    # The production build: no settler marker exists, so no caller settles.
+    def settle_due(_opts), do: {:error, Ash.Error.Forbidden.exception([])}
   end
 
   ## Reads and locks

@@ -35,7 +35,9 @@ config :sdr_agent, Oban,
        {"* * * * *", SdrAgent.Outreach.StaleDeliverySweeper},
        {"*/5 * * * *", SdrAgent.Agents.Witness.ScanWorker},
        # S13: recovers agent runs abandoned by a crash (job no longer live).
-       {"*/5 * * * *", SdrAgent.SDR.StaleRunSweeper}
+       {"*/5 * * * *", SdrAgent.SDR.StaleRunSweeper},
+       # S-B3: settles and expires remote ClaudeCLI calls.
+       {"* * * * *", SdrAgent.Agents.RemoteSettler}
      ]}
   ],
   repo: SdrAgent.Repo
