@@ -300,3 +300,24 @@ unresolved; no success, source cause or waiver is inferred from exit 0.
 This documentation follow-up does not alter the tested source. Claude's
 integrated 1117e9ee gate is separately running on its own c3 lane; do not
 substitute this diagnostic for that full-gate result or a live check.
+
+* Owner Q1 approval and live Cloud facts (2026-10-31)
+Charles explicitly approved: "i approve isolating/restarting only the SDR
+synthetic service before copying real data". This clears the sequencing
+choice in the technically reviewed hosted-infra r2 plan, not the other
+review/fencing/restore/readiness requirements. AgentBuilder and other
+application databases/services remain untouched. No service was changed
+by recording this approval.
+
+Charles also authorized using the existing Hetzner token for the read-only
+check. At 2026-10-31T21:16:09.168717Z, the API identified server 119180121
+as ch-web-prod, with backup_window null (Cloud backups off). Its token
+project has six snapshot images and zero backup images; none identifies
+this server through created_from or bound_to, and none lacks both forms
+of provenance. No images, backup settings or remote data were changed.
+This establishes current API metadata, not forensic contents of other
+servers' images or historical copies; live Borg sources/access controls
+and pre-copy rechecks remain separate. No backup secrets were accessed.
+
+Full authority/facts receipt:
+/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/codex-owner-q1-hetzner-readonly-facts-20261031.org.
