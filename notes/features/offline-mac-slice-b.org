@@ -865,6 +865,19 @@ grant). Bind constant-deny branches at compile time for Ordinary/Unavailable;
 dynamic provider callbacks still reject non-true results and exceptions.
 After correction, prod/test/dev WAE all rc0 (2026-10-31T08:20Z).
 
+** Remaining controls: worker RED
+
+Entity48dfc516 PASS with W1-W4 (Claude051bc596,
+m_1793433568000000000_ed26ea34); concrete steps in
+codex-sb5-controls-implementation-plan-20261031.org. W1 refuses a second
+active worker; W2 chosen claim-time live-owner check after retained head
+lock, separate transport RED; W3 access/read in one transaction; W4 pause
+closes new intake, never completion/expiry. Worker tests only:
+x2-20261031T082102Z-65315, 2 existing PASS + 11 intended new assertion
+failures, no skips/exclusions, owned DBs dropped. Includes independent
+head-wait owner-disable race. Receipt codex-sb5-worker-red-receipt-20261031.org.
+Worker GREEN awaits correlated approval. Transcript/UI GREEN not started.
+
 * S-B1 corrective r3b (entity PASS m_codex_sb1_r3b_plan_pass_20261031T020308Z)
 
 Review artifact codex-sb1-r3b-entity-plan-pass-20261031T020241Z.org, sha256 bbb5c558c47b8749fc6158d86c0095a83c61b3696d79cc37a857e9453782f69d. Reviewer: Codex (ai_pair=true), correlated to m_1793412049869711500_d6a5318f. Verdict: PASS for the exact r3b proposal (sha256 884f06b0629cf11787582a8765bd8558ff98c0e11fd3b857292d520f1d6aa18c), copied below with demoted headings. Earlier rounds: GREEN review 85b05b45 (M1-M3) and r3 amend 7c86458a.

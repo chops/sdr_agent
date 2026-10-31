@@ -65,6 +65,90 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
              ])
   end
 
+  test "worker control waiting at head rechecks owner after disable commits", ctx do
+    assert function_exported?(SdrAgent.Operations, :set_mac_worker_intake, 3),
+           "set_mac_worker_intake/3 is not exported"
+
+    enrolled = H.enrol!(ctx)
+    %{worker: worker} = SdrAgent.RemoteCallFixtures.enrol!(ctx.fx)
+    parent = self()
+
+    holder =
+      Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+        with_connection(fn ->
+          :ok = PrototypeFixtures.leave_runtime()
+          :ok = PrototypeFixtures.put_live_identity(ctx.destination)
+
+          SdrAgent.Audit.transaction(fn ->
+            assert {:ok, _} = SdrAgent.Audit.Kernel.lock_head(ctx.fx.tenant.id)
+            send(parent, :worker_head_held)
+
+            receive do
+              :disable_owner -> H.disable(ctx, enrolled.owner.id)
+            after
+              @bound -> flunk("disable barrier timed out")
+            end
+          end)
+        end)
+      end)
+
+    try do
+      assert_receive :worker_head_held, @bound
+
+      control =
+        Task.Supervisor.async_nolink(ctx.supervisor, fn ->
+          with_connection(fn ->
+            H.enter!(ctx)
+            backend = hd(hd(SQL.query!(Repo, "SELECT pg_backend_pid()", []).rows))
+            send(parent, {:worker_backend, backend})
+
+            call(SdrAgent.Operations, :set_mac_worker_intake, [
+              worker,
+              :paused,
+              [actor: enrolled.user]
+            ])
+          end)
+        end)
+
+      try do
+        assert_receive {:worker_backend, backend}, @bound
+        await_worker_waiting(backend)
+        send(holder.pid, :disable_owner)
+        assert {:ok, {:ok, {:ok, _}}} = Task.yield(holder, @bound)
+        assert {:ok, {:error, _}} = Task.yield(control, @bound)
+
+        assert %{rows: [["open"]]} =
+                 SQL.query!(Repo, "SELECT intake FROM mac_workers WHERE id=$1", [
+                   Ecto.UUID.dump!(worker.id)
+                 ])
+
+        assert %{rows: [[0]]} =
+                 SQL.query!(
+                   Repo,
+                   "SELECT count(*) FROM audit_events WHERE event_type='mac_worker.intake_set'",
+                   []
+                 )
+      after
+        Task.shutdown(control, :brutal_kill)
+      end
+    after
+      Task.shutdown(holder, :brutal_kill)
+    end
+  end
+
+  defp await_worker_waiting(backend, attempts \\ 400)
+  defp await_worker_waiting(_backend, 0), do: flunk("worker control never waited at head")
+
+  defp await_worker_waiting(backend, attempts) do
+    %{rows: [[waiting?]]} =
+      SQL.query!(Repo, "SELECT cardinality(pg_blocking_pids($1::int)) > 0", [backend])
+
+    unless waiting? do
+      Process.sleep(25)
+      await_worker_waiting(backend, attempts - 1)
+    end
+  end
+
   defp compete(ctx, action) do
     parent = self()
 
