@@ -5,21 +5,24 @@ defmodule SdrAgent.Agents.RemoteLaunchBoundTest do
 
   A legacy call (stored before the tightened reservation invariant) whose
   stored request encodes to a `{"call": launch}` response over 1048576
-  bytes is planted by a narrow, test-only SQL fixture. It inserts one
-  honest content-addressed Payload (the true SHA-256 of the oversized
-  body) and repoints the call's and invocation's `request_sha256` at it,
-  with triggers suppressed for that one transaction. No production path
-  is bypassed.
+  bytes is planted honestly. The oversized request is reserved through
+  the domain under the `:local` transport (no remote caps), which stores
+  its true content-addressed Payload and invocation. A narrow, test-only
+  SQL fixture then INSERTs the RemoteModelCall row such a reservation had
+  before the invariant (and, for the replay case, the claimed call and its
+  spent nonce). INSERT only: no UPDATE, no DELETE, no trigger or role
+  change; every database protection stays on.
 
   - A fresh claim of that call returns `{:error, :launch_undeliverable}`.
     Everything rolls back, audit included: the call stays pending, the
     invocation reserved, no nonce row, and no audit event at all (no
     `remote_call.claimed`, no payload-view access record).
   - A replay of a nonce already bound to a claimed call whose stored request
-    became undeliverable returns `{:error, :launch_undeliverable}` and
+    is undeliverable returns `{:error, :launch_undeliverable}` and
     changes nothing (call row, nonce rows, audit count). The W2 lock and
     fresh-owner order is unchanged (covered by RemoteClaimOwnerTest).
-  - Control: the same world with a deliverable request claims normally.
+  - Controls: a deliverable reservation, and the same legacy plant of a
+    deliverable request, claim normally.
 
   Synthetic fixtures only; no model, CLI or network.
   """
@@ -37,42 +40,68 @@ defmodule SdrAgent.Agents.RemoteLaunchBoundTest do
   # The undeliverable body: 262144 escaping bytes (each is \u0001 on the wire).
   defp oversized_body, do: F.request(String.duplicate(<<1>>, 262_144))
 
-  # Test-only legacy plant: one honest Payload for `body`, then the call and
-  # its invocation point at it. Triggers are suppressed for this one
-  # transaction only.
-  defp plant_request!(fx, invocation, body) do
-    sha = :crypto.hash(:sha256, body)
-    old = F.invocation(invocation.id).request_sha256
-    tenant = F.dump(fx.tenant.id)
+  # The honest reservation of `body` under the :local transport (no remote
+  # caps): its Payload and invocation are written by the domain.
+  defp local_reservation!(fx, body) do
+    F.remote!(:local)
+    invocation = F.reserve!(fx, %{request: body})
+    F.remote!(:remote)
+    assert F.call_of(invocation.id) == nil, "prerequisite: a :local reservation has no call"
+    invocation
+  end
 
-    {:ok, _} =
-      Repo.transaction(fn ->
-        Repo.query!("SET LOCAL session_replication_role = replica")
+  # Test-only legacy plant, INSERT only (no UPDATE, no DELETE, no trigger or
+  # role change). The call row copies the invocation's own tenant and stored
+  # request_sha256, so it points at the honest Payload.
+  @insert_call ~s[INSERT INTO "remote_model_calls" ] <>
+                 ~s[(tenant_id, state, request_sha256, profile_id, model_id, claim_deadline, ] <>
+                 ~s[claimed_at, result_deadline, worker_id, model_invocation_id) ] <>
+                 ~s[SELECT tenant_id, $1, request_sha256, $2, $3, $4, $5, $6, $7, id ] <>
+                 ~s[FROM "model_invocations" WHERE id = $8 RETURNING id]
 
-        %{num_rows: 1} =
-          Repo.query!(
-            ~s[INSERT INTO "payloads" (sha256, tenant_id, byte_size, content_type, content, trace_id, span_id, inserted_at) ] <>
-              ~s[SELECT $1, tenant_id, $2, content_type, $3, trace_id, span_id, inserted_at FROM "payloads" ] <>
-              ~s[WHERE tenant_id = $4 AND sha256 = $5],
-            [sha, byte_size(body), body, tenant, old]
-          )
+  @insert_nonce ~s[INSERT INTO "claim_nonces" (tenant_id, claim_nonce, created_at, worker_id, call_id) ] <>
+                  ~s[VALUES ($1, $2, $3, $4, $5)]
 
-        %{num_rows: 1} =
-          Repo.query!(~s[UPDATE "model_invocations" SET request_sha256 = $1 WHERE id = $2], [
-            sha,
-            F.dump(invocation.id)
-          ])
+  defp legacy_pending!(invocation) do
+    pins = F.pins()
+    now = SdrAgent.Clock.utc_now()
 
-        %{num_rows: 1} =
-          Repo.query!(
-            ~s[UPDATE "remote_model_calls" SET request_sha256 = $1 WHERE model_invocation_id = $2],
-            [sha, F.dump(invocation.id)]
-          )
+    %{num_rows: 1, rows: [[id]]} =
+      Repo.query!(@insert_call, [
+        "pending",
+        pins["profile_id"],
+        pins["model_id"],
+        DateTime.add(now, 600, :second),
+        nil,
+        nil,
+        nil,
+        F.dump(invocation.id)
+      ])
 
-        Repo.query!("SET LOCAL session_replication_role = origin")
-      end)
+    F.load(id)
+  end
 
-    sha
+  defp legacy_claimed!(ctx, invocation, nonce) do
+    pins = F.pins()
+    now = SdrAgent.Clock.utc_now()
+    worker = F.dump(ctx.worker.id)
+
+    %{num_rows: 1, rows: [[id]]} =
+      Repo.query!(@insert_call, [
+        "claimed",
+        pins["profile_id"],
+        pins["model_id"],
+        DateTime.add(now, 600, :second),
+        now,
+        DateTime.add(now, 600, :second),
+        worker,
+        F.dump(invocation.id)
+      ])
+
+    %{num_rows: 1} =
+      Repo.query!(@insert_nonce, [F.dump(ctx.fx.tenant.id), nonce, now, worker, id])
+
+    F.load(id)
   end
 
   defp nonces(ctx), do: F.count(F.nonce_resource(), "worker_id = $1", [F.dump(ctx.worker.id)])
@@ -83,9 +112,16 @@ defmodule SdrAgent.Agents.RemoteLaunchBoundTest do
     assert launch.call_id == F.load(F.call_of(invocation.id)["id"])
   end
 
+  test "control: the legacy plant of a deliverable request claims normally", ctx do
+    invocation = local_reservation!(ctx.fx, F.request())
+    call_id = legacy_pending!(invocation)
+    launch = F.claim!(ctx.token, F.nonce())
+    assert launch.call_id == call_id
+  end
+
   test "a fresh claim of an undeliverable legacy call rolls back everything", ctx do
-    invocation = F.reserve!(ctx.fx)
-    _sha = plant_request!(ctx.fx, invocation, oversized_body())
+    invocation = local_reservation!(ctx.fx, oversized_body())
+    _call_id = legacy_pending!(invocation)
     events = F.event_count(ctx.fx)
 
     result = F.claim(ctx.token, F.nonce())
@@ -100,17 +136,17 @@ defmodule SdrAgent.Agents.RemoteLaunchBoundTest do
     assert F.event_count(ctx.fx) == events, "an audit row survived the refused claim"
   end
 
-  test "a replay whose stored request became undeliverable changes nothing", ctx do
-    invocation = F.reserve!(ctx.fx)
+  test "a replay whose stored request is undeliverable changes nothing", ctx do
+    invocation = local_reservation!(ctx.fx, oversized_body())
     nonce = F.nonce()
-    launch = F.claim!(ctx.token, nonce)
-    _sha = plant_request!(ctx.fx, invocation, oversized_body())
-    before = F.call_row(launch.call_id)
+    call_id = legacy_claimed!(ctx, invocation, nonce)
+    before = F.call_row(call_id)
     events = F.event_count(ctx.fx)
 
     result = F.claim(ctx.token, nonce)
     assert result == {:error, :launch_undeliverable}, "replay: #{inspect(result, limit: 5)}"
-    assert F.call_row(launch.call_id) == before
+    refute inspect(result) =~ F.prompt_marker()
+    assert F.call_row(call_id) == before
     assert nonces(ctx) == 1
     assert F.event_count(ctx.fx) == events, "an audit row survived the refused replay"
   end

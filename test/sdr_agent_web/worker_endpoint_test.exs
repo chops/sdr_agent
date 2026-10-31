@@ -339,6 +339,11 @@ defmodule SdrAgentWeb.WorkerEndpointTest do
 
       _invocation = pending!(ctx)
       nonce = F.nonce()
+      private = "private-oversize-#{System.unique_integer([:positive])}"
+
+      oversized =
+        ~s({"claim_nonce":"#{private}","pad":"#{private}) <>
+          String.duplicate("a", 13 * 1_048_576) <> ~s("})
 
       log =
         capture_log([level: :debug], fn ->
@@ -347,6 +352,9 @@ defmodule SdrAgentWeb.WorkerEndpointTest do
           _ = post_json(ctx, "/worker/heartbeat", pins_body())
           _ = post_raw("/worker/claim", "{not json " <> nonce, bearer: ctx.bearer)
           _ = post_json(ctx, "/worker/claim", pins_body(%{"claim_nonce" => nonce}), bearer: "bad")
+          # Codex 13795d74 item 5: an oversized body with a valid bearer must
+          # not leak through Endpoint exception logging.
+          _ = post_raw("/worker/claim", oversized, bearer: ctx.bearer)
         end)
 
       assert log =~ "/worker/", "control: the requests were logged at all"
@@ -355,7 +363,8 @@ defmodule SdrAgentWeb.WorkerEndpointTest do
             bearer: ctx.bearer,
             prompt: F.prompt_marker(),
             transcript: F.transcript_marker(),
-            nonce: nonce
+            nonce: nonce,
+            oversized_body: private
           ] do
         refute log =~ marker, "#{label} reached the logs"
       end

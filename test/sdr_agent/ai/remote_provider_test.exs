@@ -23,16 +23,24 @@ defmodule SdrAgent.AI.RemoteProviderTest do
   - Direct-domain control (Codex 27883f4d condition 2): a remote
     reservation whose stored request passes the raw caps but whose launch
     cannot be delivered (escaping input) is refused at reservation. This
-    asserts the proposed tightened reservation invariant (addendum pending
-    review), so that no undeliverable call is ever claimed.
+    asserts the tightened reservation invariant (addendum 037a03d2, Codex
+    entity PASS 77dcda1e): `check_request/1` itself refuses it, so no
+    undeliverable call is ever claimed.
   - `SdrAgent.SDR.Model.call/4` end to end in prototype runtime: the
     facade waits, holding no lock (the test's claim, complete and settle
     run during the wait), and returns the released output from the result
     gate's own read: one invocation, one settlement, a `released_unverified`
     release.
+  - Each settled call is charged once to the provisioned grant and has
+    exactly one reserved, sent and completed event (no failed or unknown).
+  - A withheld result (an honest live warning Failure on the invocation,
+    so the prototype gate withholds `witness_evidence_present`) gives the
+    caller a halt and no business output, although the invocation is
+    completed.
   - Wait timeout (`config :sdr_agent, :remote_wait_ms`): the run halts
-    `:provider_error` and is failed. A late completion is then settled
-    once by the settler, with no release, no resume and no second call.
+    `:provider_error` and is failed with the `remote_wait_timeout` detail.
+    A late completion is then settled once by the settler, with no
+    release, no resume, no refund and no second call or charge.
 
   Synthetic fixtures only; no model, CLI or network.
   """
@@ -43,6 +51,7 @@ defmodule SdrAgent.AI.RemoteProviderTest do
   alias SdrAgent.AI.ModelProvider
   alias SdrAgent.AI.ModelProvider.ClaudeCLI
   alias SdrAgent.AI.ModelProvider.Runtime
+  alias SdrAgent.GateFixtures
   alias SdrAgent.HostedOwnerFixtures, as: H
   alias SdrAgent.PrototypeGateFixtures, as: G
   alias SdrAgent.RemoteCallFixtures, as: F
@@ -201,10 +210,13 @@ defmodule SdrAgent.AI.RemoteProviderTest do
     end)
   end
 
-  defp drive!(ctx, output \\ S.valid_output()) do
+  # Claims, completes and settles the run's pending call. `before_complete`
+  # runs after the claim (the invocation is sent) and before completion.
+  defp drive!(ctx, output \\ S.valid_output(), before_complete \\ fn _launch -> :ok end) do
     _call = await_pending!(ctx)
     nonce = F.nonce()
     launch = F.claim!(ctx.token, nonce)
+    before_complete.(launch)
 
     result =
       F.complete(
@@ -219,6 +231,24 @@ defmodule SdrAgent.AI.RemoteProviderTest do
     S.settle!(ctx.fx)
     launch
   end
+
+  # Settlement audit cardinality of invocation `id`: exactly one of each
+  # lifecycle event the domain wrote, and no other terminal event.
+  defp settlement_events(id) do
+    Map.new(
+      ~w(model.invocation.reserved model.invocation.sent model.invocation.completed model.invocation.failed model.invocation.unknown),
+      &{&1, S.any_tenant_subject_count(&1, id)}
+    )
+  end
+
+  defp settled_once,
+    do: %{
+      "model.invocation.reserved" => 1,
+      "model.invocation.sent" => 1,
+      "model.invocation.completed" => 1,
+      "model.invocation.failed" => 0,
+      "model.invocation.unknown" => 0
+    }
 
   ## Runtime under :remote
 
@@ -318,14 +348,15 @@ defmodule SdrAgent.AI.RemoteProviderTest do
     end
   end
 
-  ## Direct-domain reservation control (addendum pending)
+  ## Direct-domain reservation control (addendum 037a03d2)
 
   describe "direct reservation" do
     test "an undeliverable escaping request is refused at remote reservation", ctx do
       ctx = world!(ctx)
       body = F.request(String.duplicate(<<1>>, 262_144))
-      # The gap: the stored body passes the raw caps today.
-      assert SdrAgent.Agents.RemoteCalls.check_request(body) == :ok
+      # The tightened invariant: the request check itself refuses it.
+      assert match?({:error, _message}, SdrAgent.Agents.RemoteCalls.check_request(body)),
+             "check_request admitted an undeliverable request"
 
       result = F.reserve(ctx.fx, %{request: body})
 
@@ -366,6 +397,49 @@ defmodule SdrAgent.AI.RemoteProviderTest do
 
       assert {:ok, %{disposition: :released_unverified}} =
                SdrAgent.Agents.get_result_release(invocation.id, actor: ctx.fx.agent)
+
+      # One charge to the provisioned grant, and one settlement.
+      assert G.charged(ctx.fx) == 1
+      assert settlement_events(invocation.id) == settled_once()
+    end
+
+    test "a withheld result gives the caller no business output", ctx do
+      ctx = world!(ctx)
+      task = call_async(ctx)
+
+      # An honest domain Failure (a live warning on the sent invocation)
+      # makes the prototype gate withhold: witness_evidence_present. The
+      # comparator is not touched.
+      launch =
+        drive!(ctx, S.valid_output(), fn launch ->
+          [row] = invocations(ctx)
+          invocation = F.invocation(F.load(row["id"]))
+          assert F.load(F.call_of(invocation.id)["id"]) == launch.call_id
+
+          GateFixtures.cause!(invocation,
+            severity: :warning,
+            operation_id: ctx.fx.run.operation_id
+          )
+        end)
+
+      result = Task.await(task, 30_000)
+
+      assert match?({:error, {:halt, _reason}}, result),
+             "a withheld remote result reached the caller: #{inspect(result, limit: 8)}"
+
+      refute inspect(result) =~ "82"
+
+      assert [row] = invocations(ctx)
+      id = F.load(row["id"])
+      assert S.invocation_row(id)["status"] == "completed"
+      assert F.call_row(launch.call_id)["state"] == "completed"
+
+      assert {:ok, %{disposition: :withheld, reason: :prototype_authority_refused}} =
+               SdrAgent.Agents.get_result_release(id, actor: ctx.fx.agent)
+
+      assert S.run_row(ctx.fx.run.id)["status"] != "running"
+      assert G.charged(ctx.fx) == 1
+      assert settlement_events(id) == settled_once()
     end
 
     test "timeout: the run fails; a late result settles once with no release", ctx do
@@ -374,11 +448,17 @@ defmodule SdrAgent.AI.RemoteProviderTest do
 
       result = Task.await(call_async(ctx), 30_000)
       assert result == {:error, {:halt, :provider_error}}, "timeout: #{inspect(result, limit: 8)}"
-      assert S.run_row(ctx.fx.run.id)["status"] == "failed"
+
+      run = S.run_row(ctx.fx.run.id)
+      assert run["status"] == "failed"
+      assert run["status_reason"] == "provider_error"
+      # The discriminator: the wait bound, not any other provider error.
+      assert run["failure_reason"] == "model provider error: remote_wait_timeout"
 
       assert [invocation] = invocations(ctx)
       id = F.load(invocation["id"])
       assert invocation["status"] in ["reserved", "sent"], "the caller settled the invocation"
+      assert G.charged(ctx.fx) == 1
 
       launch = drive!(ctx)
       assert F.call_row(launch.call_id)["state"] == "completed"
@@ -387,6 +467,10 @@ defmodule SdrAgent.AI.RemoteProviderTest do
       assert length(invocations(ctx)) == 1
       assert F.count(F.call_resource()) == 1
       assert S.run_row(ctx.fx.run.id)["status"] == "failed"
+
+      # The late result: one settlement, no refund or second charge.
+      assert G.charged(ctx.fx) == 1
+      assert settlement_events(id) == settled_once()
     end
   end
 end
