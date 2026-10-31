@@ -49,7 +49,11 @@ defmodule SdrAgent.Agents.RemoteScopeTest do
              :accepted
 
     mac = struct(Actor, type: :mac_worker, id: worker.id, tenant_id: fx.tenant.id)
-    %{worker: worker, launch: launch, bytes: bytes, mac: mac}
+
+    # Loaded here, in the test process and before any seam opens, so a
+    # Task's authority check needs no database connection.
+    worker_row = Ash.get!(F.loaded!(F.worker_resource()), worker.id, authorize?: false)
+    %{worker: worker, worker_row: worker_row, launch: launch, bytes: bytes, mac: mac}
   end
 
   defp any_row!(resource) do
@@ -180,25 +184,36 @@ defmodule SdrAgent.Agents.RemoteScopeTest do
   defp can_read?(life, context) do
     result_resource = F.loaded!(F.result_resource())
 
+    # A query subject never strict-passes `Ash.can?/3` under
+    # run_queries?: false (it reports :maybe), so ask for the altered query
+    # and count only a pass that added no policy filter.
     Enum.any?(Ash.Resource.Info.actions(result_resource), fn action ->
       action.type == :read and
-        Ash.can?(
-          Ash.Query.for_read(result_resource, action.name, %{},
-            actor: life.mac,
-            context: context
-          ),
-          life.mac,
-          run_queries?: false,
-          maybe_is: false
-        ) == true
+        (
+          query =
+            Ash.Query.for_read(result_resource, action.name, %{},
+              actor: life.mac,
+              context: context
+            )
+
+          case Ash.can(query, life.mac,
+                 run_queries?: false,
+                 maybe_is: false,
+                 alter_source?: true
+               ) do
+            {:ok, true, %Ash.Query{filter: filter}} -> filter == query.filter
+            _ -> false
+          end
+        )
     end)
   end
 
   defp can_touch?(life, context) do
-    worker = Ash.get!(F.loaded!(F.worker_resource()), life.worker.id, authorize?: false)
-
     changeset =
-      Ash.Changeset.for_update(worker, :touch_last_seen, %{}, actor: life.mac, context: context)
+      Ash.Changeset.for_update(life.worker_row, :touch_last_seen, %{},
+        actor: life.mac,
+        context: context
+      )
 
     Ash.can?(changeset, life.mac, run_queries?: false, maybe_is: false) == true
   end

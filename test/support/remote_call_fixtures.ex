@@ -474,7 +474,7 @@ defmodule SdrAgent.RemoteCallFixtures do
       Repo.query!(
         "SELECT a.attname FROM pg_constraint c " <>
           "JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey) " <>
-          "WHERE c.conrelid = $1::regclass AND c.conname = $2",
+          "WHERE c.conrelid = $1::text::regclass AND c.conname = $2",
         [table, name]
       )
 
@@ -491,7 +491,7 @@ defmodule SdrAgent.RemoteCallFixtures do
           "c.confrelid::regclass::text, " <>
           "(SELECT array_agg(a.attname ORDER BY a.attname) FROM pg_attribute a " <>
           " WHERE a.attrelid = c.confrelid AND a.attnum = ANY(c.confkey)) " <>
-          "FROM pg_constraint c WHERE c.conrelid = $1::regclass AND c.contype = 'f'",
+          "FROM pg_constraint c WHERE c.conrelid = $1::text::regclass AND c.contype = 'f'",
         [table]
       )
 
@@ -505,7 +505,7 @@ defmodule SdrAgent.RemoteCallFixtures do
         "SELECT (SELECT array_agg(a.attname ORDER BY a.attname) FROM pg_attribute a " <>
           " WHERE a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)), " <>
           "pg_get_expr(i.indpred, i.indrelid) " <>
-          "FROM pg_index i WHERE i.indrelid = $1::regclass AND i.indisunique",
+          "FROM pg_index i WHERE i.indrelid = $1::text::regclass AND i.indisunique",
         [table]
       )
 
