@@ -165,7 +165,9 @@ defmodule SdrAgentWeb.AuthRequestLimitTest do
             do:
               post(build_conn(), "/hosted-enrollment", %{enrollment_token: "synthetic-not-a-jwt"})
 
-      limited = post(build_conn(), "/hosted-enrollment", %{enrollment_token: link})
+      # A valid link and chosen password: only the limiter can refuse it.
+      valid = Map.merge(%{"enrollment_token" => link}, H.setup_attrs())
+      limited = post(build_conn(), "/hosted-enrollment", valid)
       assert redirected_to(limited) == redirected_to(hd(bad))
 
       assert Phoenix.Flash.get(limited.assigns.flash, :error) ==
@@ -175,7 +177,7 @@ defmodule SdrAgentWeb.AuthRequestLimitTest do
       refute inspect(rows, limit: :infinity) =~ link
 
       Clock.freeze(DateTime.add(t0, 15, :minute))
-      admitted = post(build_conn(), "/hosted-enrollment", %{enrollment_token: link})
+      admitted = post(build_conn(), "/hosted-enrollment", valid)
       assert redirected_to(admitted) == "/"
     end
   end
