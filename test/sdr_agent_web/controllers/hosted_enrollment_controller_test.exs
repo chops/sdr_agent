@@ -92,7 +92,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
     conn =
       conn
       |> init_test_session(%{sentinel: "discard", return_to: "https://example.test/foreign"})
-      |> post(@path, %{enrollment_token: link})
+      |> post(@path, setup_params(link))
 
     assert redirected_to(conn) == "/"
     assert get_session(conn, :sentinel) == nil
@@ -113,7 +113,7 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
 
     log =
       capture_log([level: :debug], fn ->
-        conn = post(conn, @path, %{enrollment_token: link})
+        conn = post(conn, @path, setup_params(link))
         assert redirected_to(conn) == "/"
       end)
 
@@ -135,9 +135,9 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
     require_route!(:post)
     ctx = H.activated!()
     %{enrollment_token: link} = H.enrol!(ctx)
-    first = post(conn, @path, %{enrollment_token: link})
+    first = post(conn, @path, setup_params(link))
     assert redirected_to(first) == "/"
-    replay = post(build_conn(), @path, %{enrollment_token: link})
+    replay = post(build_conn(), @path, setup_params(link))
     assert redirected_to(replay) == @path
     assert get_session(replay, "user_token") == nil
   end
@@ -147,10 +147,81 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
     ctx = H.activated!()
     %{enrollment_token: link, owner: owner} = H.enrol!(ctx)
     assert {:ok, _} = H.disable(ctx, owner.id)
-    conn = post(conn, @path, %{enrollment_token: link})
+    conn = post(conn, @path, setup_params(link))
     assert redirected_to(conn) == @path
     assert get_session(conn, "user_token") == nil
   end
+
+  test "GET offers a password and confirmation that are never prefilled", %{conn: conn} do
+    require_route!(:get)
+    document = conn |> get(@path) |> html_response(200) |> LazyHTML.from_document()
+
+    for name <- ["password", "password_confirmation"] do
+      input =
+        LazyHTML.query(
+          document,
+          "form#hosted-enrollment-form input[type=password][name=#{name}]"
+        )
+
+      assert Enum.count(input) == 1, "missing #{name} input"
+      assert LazyHTML.attribute(input, "autocomplete") == ["new-password"]
+      assert LazyHTML.attribute(input, "minlength") == ["12"]
+      assert LazyHTML.attribute(input, "required") != []
+      assert LazyHTML.attribute(input, "value") in [[], [""]]
+    end
+  end
+
+  test "POST without a valid chosen password is refused and leaves the link usable",
+       %{conn: conn} do
+    require_route!(:post)
+    ctx = H.activated!()
+    %{enrollment_token: link} = H.enrol!(ctx)
+    short = "short-pass1"
+
+    for params <- [
+          %{enrollment_token: link},
+          Map.merge(%{enrollment_token: link}, H.setup_attrs(short)),
+          %{
+            enrollment_token: link,
+            password: H.setup_password(),
+            password_confirmation: H.setup_password() <> "x"
+          }
+        ] do
+      log =
+        capture_log([level: :debug], fn ->
+          refused = post(build_conn(), @path, params)
+          assert redirected_to(refused) == @path
+          assert get_session(refused, "user_token") == nil
+
+          assert Phoenix.Flash.get(refused.assigns.flash, :error) ==
+                   "Enrollment link is not valid."
+        end)
+
+      refute log =~ link
+      refute log =~ short
+      refute log =~ H.setup_password()
+    end
+
+    conn = post(conn, @path, setup_params(link))
+    assert redirected_to(conn) == "/"
+  end
+
+  test "the password chosen at setup signs in through the normal password strategy",
+       %{conn: conn} do
+    require_route!(:post)
+    ctx = H.activated!()
+    %{enrollment_token: link, user: user} = H.enrol!(ctx)
+    log = capture_log([level: :debug], fn -> post(conn, @path, setup_params(link)) end)
+    refute log =~ H.setup_password()
+
+    assert {:ok, %{id: id}} =
+             Accounts.sign_in(to_string(user.email), H.setup_password())
+
+    assert id == user.id
+  end
+
+  defp setup_params(link),
+    do: Map.merge(%{"enrollment_token" => link}, H.setup_attrs())
 
   test "POST with CSRF protection enabled rejects an absent CSRF token", %{conn: conn} do
     require_route!(:post)

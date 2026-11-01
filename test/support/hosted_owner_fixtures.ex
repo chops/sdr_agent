@@ -93,7 +93,25 @@ defmodule SdrAgent.HostedOwnerFixtures do
     enrolled
   end
 
-  def consume(token), do: call(SdrAgent.Operations, :consume_hosted_owner_link, [token])
+  @setup_password "synthetic-owner-setup-pass"
+
+  @doc "The synthetic password the default consume/1 fixture chooses at setup."
+  def setup_password, do: @setup_password
+
+  def setup_attrs(password \\ @setup_password),
+    do: %{"password" => password, "password_confirmation" => password}
+
+  def consume(token), do: consume(token, setup_attrs())
+
+  def consume(token, attrs),
+    do: call(SdrAgent.Operations, :consume_hosted_owner_link, [token, attrs])
+
+  @doc "The pre-repair token-only API, which must now fail closed."
+  def consume_token_only(token),
+    do: call(SdrAgent.Operations, :consume_hosted_owner_link, [token])
+
+  def reissue(context, owner_id, opts \\ nil),
+    do: call(SdrAgent.Operations, :reissue_hosted_owner_link, [owner_id, opts || console(context)])
 
   def consume!(token) do
     result = consume(token)
