@@ -40,6 +40,12 @@ defmodule SdrAgent.Accounts.User do
       password, never an admin or anchor. Creation records `user.created`;
       terminal disable records `user.status_changed` and revokes all tokens.
       These are not public registration or an authentication strategy;
+    * `:set_hosted_owner_password` and `:reissue_hosted_owner_link` — the
+      same exact Operations scope only: the owner chooses a password (at
+      least 12 characters, confirmed) when exchanging a one-use link, and a
+      console reissue revokes the owner's links and sessions. Both revoke all
+      of the owner's tokens and record `user.password_set` or
+      `operations.hosted_owner.link_reissued` without credential content;
     * `:change_role`, `:change_status` — ADM (guarded); the last active
       admin can be neither demoted nor disabled; disabling revokes all of the
       user's tokens;
@@ -303,6 +309,37 @@ defmodule SdrAgent.Accounts.User do
               event_type: "user.status_changed", category: :domain_change, previous: [:status]}
     end
 
+    update :set_hosted_owner_password do
+      description "Operations link-exchange scope only: the owner chooses a password."
+      require_atomic? false
+      accept []
+
+      argument :password, :string,
+        sensitive?: true,
+        allow_nil?: false,
+        constraints: [min_length: 12]
+
+      argument :password_confirmation, :string, sensitive?: true, allow_nil?: false
+      change get_and_lock_for_update()
+      validate confirm(:password, :password_confirmation)
+      change {Password.HashPasswordChange, strategy_name: :password}
+      # Revokes every stored token of the owner, including the link being
+      # exchanged; the Operations caller mints the new session afterwards.
+      change AshAuthentication.AddOn.LogOutEverywhere.OnPasswordChange
+      change {AppendEvent, event_type: "user.password_set", category: :domain_change}
+    end
+
+    update :reissue_hosted_owner_link do
+      description "Operations console reissue scope only: revoke the owner's links and sessions."
+      require_atomic? false
+      accept []
+      change get_and_lock_for_update()
+      change AshAuthentication.AddOn.LogOutEverywhere.OnPasswordChange
+
+      change {AppendEvent,
+              event_type: "operations.hosted_owner.link_reissued", category: :domain_change}
+    end
+
     update :change_role do
       description "ADM: change a user's role; the last active admin keeps the admin role."
       require_atomic? false
@@ -389,7 +426,12 @@ defmodule SdrAgent.Accounts.User do
     # This boundary precedes the auth-library bypass, like the prototype
     # administration refusal above: no direct auth interaction can create
     # or disable a hosted identity outside the Operations transaction scope.
-    policy action([:create_hosted_owner, :disable_hosted_owner_user]) do
+    policy action([
+             :create_hosted_owner,
+             :disable_hosted_owner_user,
+             :set_hosted_owner_password,
+             :reissue_hosted_owner_link
+           ]) do
       forbid_unless Checks.HostedOwnerWriteScope
       authorize_if always()
     end

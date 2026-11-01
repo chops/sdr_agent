@@ -4,7 +4,8 @@ defmodule SdrAgentWeb.HostedEnrollmentController do
   GET receives no fragment and never consumes a link. A dedicated root avoids
   inline/third-party scripts; the bundled handoff fills an initially closed
   CSRF form only after removing the fragment from browser history.
-  POST consumes the signed, stored one-use link through Operations, clears
+  POST consumes the signed, stored one-use link with the owner's chosen
+  password through Operations (the password is never echoed back), clears
   the previous session and uses the existing authentication session helper.
   Rejections use one closed message, never token content.
   """
@@ -25,7 +26,9 @@ defmodule SdrAgentWeb.HostedEnrollmentController do
   def create(conn, params) do
     conn = private_headers(conn)
 
-    case Operations.consume_hosted_owner_link(Map.get(params, "enrollment_token")) do
+    password = Map.take(params, ["password", "password_confirmation"])
+
+    case Operations.consume_hosted_owner_link(Map.get(params, "enrollment_token"), password) do
       {:ok, user} ->
         conn
         |> clear_session()

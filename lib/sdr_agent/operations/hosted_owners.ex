@@ -85,11 +85,17 @@ defmodule SdrAgent.Operations.HostedOwners do
       )
     end
 
-    @doc "Exchange a signed, stored, unexpired one-use link for a normal stored session."
-    def consume_link(token) when is_binary(token) do
+    @doc """
+    Exchange a signed, stored, unexpired one-use link and the owner's chosen
+    password (`"password"`, `"password_confirmation"`, at least 12
+    characters) for a normal stored session. Setting the password revokes
+    every earlier token of the owner, the link included; the session is
+    minted last. Any refusal rolls everything back and leaves the link usable.
+    """
+    def consume_link(token, attrs) when is_binary(token) and is_map(attrs) do
       with {:ok, claims, User} <- Jwt.verify(token, :sdr_agent),
            {:ok, user} <- AshAuthentication.subject_to_user(claims["sub"], User) do
-        transaction(fn -> consume_locked(token, claims, user) end)
+        transaction(fn -> consume_locked(token, claims, user, password_args(attrs)) end)
       else
         _refused -> {:error, :invalid_enrollment_link}
       end
@@ -97,22 +103,77 @@ defmodule SdrAgent.Operations.HostedOwners do
       _error -> {:error, :invalid_enrollment_link}
     end
 
+    def consume_link(_token, _attrs), do: {:error, :invalid_enrollment_link}
+
+    @doc "The token-only exchange set no usable password; it fails closed."
     def consume_link(_token), do: {:error, :invalid_enrollment_link}
 
-    defp consume_locked(token, claims, user) do
+    defp password_args(attrs) do
+      %{
+        password: Map.get(attrs, "password"),
+        password_confirmation: Map.get(attrs, "password_confirmation")
+      }
+    end
+
+    defp consume_locked(token, claims, user, password) do
       with {:ok, owner} <- lock_owner(claims["hosted_owner_id"], user.tenant_id),
-           {:ok, fresh} <- lock_user(owner.user_id, user.tenant_id, :for_share),
+           {:ok, fresh} <- lock_user(owner.user_id, user.tenant_id, :for_update),
            {:ok, _} <- Kernel.lock_head(user.tenant_id),
            {:ok, _claims, User} <- Jwt.verify(token, :sdr_agent),
            :ok <- stored_link(token),
            :ok <- link_owner(owner, fresh, claims, user.id),
+           # The one-use revoke runs before the password change, whose
+           # log-out-everywhere revokes every stored token (this link too).
            :ok <- TokenActions.revoke(Token, token, single_use?: true),
-           {:ok, session, _} <- Jwt.token_for_user(fresh) do
-        {:ok, Ash.Resource.put_metadata(fresh, :token, session)}
+           {:ok, updated} <- scoped_update(fresh, :set_hosted_owner_password, password, fresh),
+           {:ok, session, _} <- Jwt.token_for_user(updated) do
+        {:ok, Ash.Resource.put_metadata(updated, :token, session)}
       else
         _refused -> {:error, :invalid_enrollment_link}
       end
     end
+
+    @doc """
+    Console-only recovery for the existing active owner of the current
+    activation: revokes the owner's earlier links and sessions and issues
+    one fresh 15-minute link. No user or owner row is created; the password
+    is unchanged until the owner exchanges the new link.
+    """
+    def reissue_link(id, opts) do
+      actor = Keyword.get(opts, :actor)
+
+      if console?(actor, opts) do
+        transaction(fn -> reissue_locked(id, actor) end)
+      else
+        forbidden()
+      end
+    end
+
+    defp reissue_locked(id, actor) do
+      with {:ok, owner} <- lock_owner(id, actor.tenant_id),
+           {:ok, user} <- lock_user(owner.user_id, actor.tenant_id, :for_update),
+           {:ok, _} <- Kernel.lock_head(actor.tenant_id),
+           {:ok, binding, activation} <- live_activation(actor.tenant_id),
+           :ok <- reissuable(owner, user, binding, activation),
+           {:ok, user} <- scoped_update(user, :reissue_hosted_owner_link, actor),
+           {:ok, token, _claims} <- link(user, owner) do
+        {:ok, %{owner: owner, enrollment_token: token}}
+      end
+    end
+
+    defp reissuable(
+           %HostedOwner{status: :active} = owner,
+           %User{role: :reviewer, status: :active} = user,
+           binding,
+           activation
+         ) do
+      if owner.user_id == user.id and owner.binding_id == binding.id and
+           owner.relocation_id == activation.id,
+         do: :ok,
+         else: forbidden()
+    end
+
+    defp reissuable(_owner, _user, _binding, _activation), do: forbidden()
 
     defp stored_link(token) do
       case TokenActions.get_token(Token, %{"token" => token, "purpose" => @purpose}) do
@@ -462,10 +523,12 @@ defmodule SdrAgent.Operations.HostedOwners do
       end)
     end
 
-    defp scoped_update(%resource{id: id} = row, action, actor) do
+    defp scoped_update(row, action, actor), do: scoped_update(row, action, %{}, actor)
+
+    defp scoped_update(%resource{id: id} = row, action, args, actor) do
       with_scope(resource, action, id, actor, fn context ->
         row
-        |> Ash.Changeset.for_update(action, %{}, actor: actor, context: context)
+        |> Ash.Changeset.for_update(action, args, actor: actor, context: context)
         |> Ash.update()
       end)
     end
@@ -517,6 +580,10 @@ defmodule SdrAgent.Operations.HostedOwners do
     def enrol(_attrs, _opts), do: {:error, :not_prototype_runtime}
     @doc "Unavailable in an ordinary production build."
     def consume_link(_token), do: {:error, :not_prototype_runtime}
+    @doc "Unavailable in an ordinary production build."
+    def consume_link(_token, _attrs), do: {:error, :not_prototype_runtime}
+    @doc "Unavailable in an ordinary production build."
+    def reissue_link(_id, _opts), do: {:error, :not_prototype_runtime}
     @doc "Unavailable in an ordinary production build."
     def disable(_id, _opts), do: {:error, :not_prototype_runtime}
     @doc "No hosted authority in an ordinary production build."

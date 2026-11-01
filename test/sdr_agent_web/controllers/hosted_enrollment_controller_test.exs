@@ -11,8 +11,15 @@ defmodule SdrAgentWeb.HostedEnrollmentControllerTest do
 
   alias SdrAgent.Accounts
   alias SdrAgent.HostedOwnerFixtures, as: H
+  alias SdrAgent.TestSupport.RateLimits
 
   @path "/hosted-enrollment"
+
+  # The enrollment bucket is node-global (10 per 15 minutes); this file posts
+  # more than that in total, so each test starts from zero.
+  setup do
+    RateLimits.reset()
+  end
 
   defp require_route!(verb) do
     routes = Phoenix.Router.routes(SdrAgentWeb.Router)

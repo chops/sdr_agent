@@ -111,7 +111,8 @@ defmodule SdrAgent.HostedOwnerFixtures do
     do: call(SdrAgent.Operations, :consume_hosted_owner_link, [token])
 
   def reissue(context, owner_id, opts \\ nil),
-    do: call(SdrAgent.Operations, :reissue_hosted_owner_link, [owner_id, opts || console(context)])
+    do:
+      call(SdrAgent.Operations, :reissue_hosted_owner_link, [owner_id, opts || console(context)])
 
   def consume!(token) do
     result = consume(token)

@@ -166,16 +166,22 @@ defmodule SdrAgent.Prototype.HostedOwnerPasswordTest do
     test "reissue refuses every non-console actor without any write", ctx do
       %{enrollment_token: link, owner: owner} = H.enrol!(ctx)
       signed = H.consume!(link)
-      before = state(ctx)
+      {users, owners, tokens, _audit} = state(ctx)
+      reissued = events(ctx, "operations.hosted_owner.link_reissued")
 
+      # Reissue is a guarded console call: a refusal may append exactly the
+      # kernel's authz.denied record after the rollback, never a reissue.
       for opts <- [
             [actor: signed],
             [actor: ctx.fx.auditor],
             [actor: Actor.system(:kernel, ctx.fx.tenant.id)],
             []
           ] do
+        denied = events(ctx, "authz.denied")
         assert {:error, _} = H.reissue(ctx, owner.id, opts)
-        assert state(ctx) == before
+        assert {^users, ^owners, ^tokens, _} = state(ctx)
+        assert events(ctx, "operations.hosted_owner.link_reissued") == reissued
+        assert (events(ctx, "authz.denied") - denied) in [0, 1]
       end
 
       assert {:ok, _} = Accounts.current_operator(signed.__metadata__.token)
@@ -185,17 +191,22 @@ defmodule SdrAgent.Prototype.HostedOwnerPasswordTest do
       %{owner: owner} = H.enrol!(ctx)
       assert {:error, _} = H.reissue(ctx, Ecto.UUID.generate())
       assert {:ok, _} = H.disable(ctx, owner.id)
-      before = state(ctx)
+      {users, owners, tokens, _audit} = state(ctx)
+      reissued = events(ctx, "operations.hosted_owner.link_reissued")
       assert {:error, _} = H.reissue(ctx, owner.id)
-      assert state(ctx) == before
+      # A guarded refusal may add only the kernel's authz.denied record.
+      assert {^users, ^owners, ^tokens, _} = state(ctx)
+      assert events(ctx, "operations.hosted_owner.link_reissued") == reissued
     end
 
     test "reissue refuses once the owner's activation is no longer current", ctx do
       %{owner: owner} = H.enrol!(ctx)
       _return = H.relocate!(ctx, ctx.destination, ctx.source, 2)
-      before = state(ctx)
+      {users, owners, tokens, _audit} = state(ctx)
+      reissued = events(ctx, "operations.hosted_owner.link_reissued")
       assert {:error, _} = H.reissue(ctx, owner.id)
-      assert state(ctx) == before
+      assert {^users, ^owners, ^tokens, _} = state(ctx)
+      assert events(ctx, "operations.hosted_owner.link_reissued") == reissued
     end
 
     test "a failed reissue audit rolls back revocation and keeps the session", ctx do
@@ -269,7 +280,8 @@ defmodule SdrAgent.Prototype.HostedOwnerPasswordTest do
     for text <- List.flatten(rows) do
       refute text =~ link
       refute text =~ H.setup_password()
-      refute text =~ "hashed_password"
+      # The field may be named in the audit's redaction list, never valued.
+      refute text =~ ~r/"hashed_password"\s*:/
       refute text =~ "$2b$"
     end
   end

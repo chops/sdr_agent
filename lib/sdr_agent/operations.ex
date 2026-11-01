@@ -80,8 +80,25 @@ defmodule SdrAgent.Operations do
     )
   end
 
-  @doc "Exchange one signed, stored, 15-minute enrollment link for a normal user session."
+  @doc """
+  Exchange one signed, stored, 15-minute enrollment link and the owner's
+  chosen password (`"password"`, `"password_confirmation"`) for a normal
+  user session.
+  """
+  def consume_hosted_owner_link(token, attrs),
+    do: SdrAgent.Operations.HostedOwners.consume_link(token, attrs)
+
+  @doc "The token-only exchange sets no password and fails closed."
   def consume_hosted_owner_link(token), do: SdrAgent.Operations.HostedOwners.consume_link(token)
+
+  @doc "Console-only: revoke the existing owner's links and sessions and issue one fresh link."
+  def reissue_hosted_owner_link(id, opts) do
+    Guard.run(
+      %{resource: SdrAgent.Accounts.User, action: :reissue_hosted_owner_link, guarded?: true},
+      Keyword.get(opts, :actor),
+      fn -> SdrAgent.Operations.HostedOwners.reissue_link(id, opts) end
+    )
+  end
 
   @doc "Whether the User is admissible to this runtime's website, with fresh hosted authority."
   def hosted_web_principal?(user), do: SdrAgent.Operations.HostedOwners.web_principal?(user)
