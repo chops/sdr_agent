@@ -1,0 +1,35 @@
+#+TITLE: Run status - owner password setup
+#+DATE: 2026-11-01T15:44:12Z
+
+* State: security gate hold; no live changes
+Owner password repair source ad2088477087abef4c38be90d11236b30de2c977
+is pushed on claude/hosted-owner-password-setup; independently source-PASS
+reviewed by Codex. Focused71/71; compile test/hosted/prod, format and Credo
+reported passing. No claim of full gate PASS. Actual login recovery is
+NOT deployed and the owner has not set a password through the repaired flow.
+
+* Failing command / evidence
+Full gate c4-20261101T154112Z-5808 stopped before database effects at
+mix hex.audit: jsv0.26.0 EEF-CVE-2026-117680 LOW, akaCVE-2026-117680 and
+GHSA-cvmg-hgv6-jqcp. No dependency change in the password diff. Advisory
+published today13:29Z, fixed stable0.26.2 per OSV. Accepted ADR0008 makes
+audit blocking, and ADR0001 requires owner notification/stop on security
+failure. No ignore list, runner bypass or dependency edit authorized here.
+Private evidence: lane run summary/audit.log under the standard local
+lane-runs root; source review codex-owner-password-source-review-20261101.org
+under the standard private handoff tmp root. No credentials in this record.
+
+* Required next decision
+Request owner approval of minimal jsv0.26.0 ->0.26.2 security patch and the
+reviewed ADR0008 amendment, then rerun the release checks and continue
+SDR-only deploy plus ONE existing-owner link reissue. Do not infer an audit
+waiver from earlier, separately pinned dependency approval D271.
+
+* Preserved current delivery
+Last deployed source45c64004286a47a81a8d08205a1ece70058f6e0a remains live.
+No last fully-green global SHA is asserted (known inherited suite failures
+remain separately recorded). Hosted records: companies2, contacts2;
+ClaudeCLI ledger: completed-valid3, failed1. Hosted remote calls0 and
+Mac worker active/paused. No new calls, imports, worker changes or outreach.
+Console script and wrapper independently reviewed PASS but not executed.
+Original checkout's four user inv files remain untouched.
