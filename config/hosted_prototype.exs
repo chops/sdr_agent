@@ -21,7 +21,9 @@ config :sdr_agent, SdrAgentWeb.Endpoint,
   code_reloader: false,
   debug_errors: false,
   watchers: [],
-  live_reload: false
+  # Disabled, but keyword-shaped: every connected LiveView reads
+  # live_reload[:notify][:live_view] after mount, which raises on `false`.
+  live_reload: []
 
 # Match the prototype's content-free witness mode, without a host-side
 # wire-witness store or exporter. Runtime rejects attempts to configure one.
