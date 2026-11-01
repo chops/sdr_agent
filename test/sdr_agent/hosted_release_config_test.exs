@@ -53,7 +53,7 @@ defmodule SdrAgent.HostedReleaseConfigTest do
     assert endpoint[:code_reloader] in [nil, false]
     assert endpoint[:debug_errors] in [nil, false]
     assert endpoint[:watchers] in [nil, []]
-    assert endpoint[:live_reload] in [nil, false]
+    assert endpoint[:live_reload] in [nil, []]
     assert endpoint[:force_ssl][:rewrite_on] == [:x_forwarded_proto]
     assert endpoint[:http][:http_2_options][:enabled] == false
     assert config[:swoosh][:api_client] == false
@@ -117,8 +117,25 @@ defmodule SdrAgent.HostedReleaseConfigTest do
     System.put_env("SDR_ANCHOR_SINKS", "file")
     config = Config.Reader.merge(hosted_build!(), hosted_runtime!())
     assert config[:sdr_agent][SdrAgentWeb.Endpoint][:server] == true
-    assert config[:sdr_agent][SdrAgentWeb.Endpoint][:live_reload] in [nil, false]
+    assert config[:sdr_agent][SdrAgentWeb.Endpoint][:live_reload] in [nil, []]
     assert config[:sdr_agent][:anchor_sinks] == []
+  end
+
+  # Every connected LiveView reads `endpoint.config(:live_reload)[:notify][:live_view]`
+  # after mount (phoenix_live_view Channel.maybe_subscribe_to_live_reload/1); a
+  # non-keyword value such as `false` raises there and crashes the channel.
+  test "hosted live_reload is disabled in the shape a connected LiveView reads" do
+    config = Config.Reader.merge(hosted_build!(), hosted_runtime!())
+    live_reload = config[:sdr_agent][SdrAgentWeb.Endpoint][:live_reload]
+
+    notify =
+      try do
+        {:ok, live_reload[:notify][:live_view]}
+      rescue
+        error -> {:raised, error.__struct__}
+      end
+
+    assert notify == {:ok, nil}
   end
 
   for key <- ["SDR_PROTOTYPE", "SDR_PROTOTYPE_INSTANCE"] do
