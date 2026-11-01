@@ -1,11 +1,11 @@
 #+TITLE: Run status - owner password setup
-#+DATE: 2026-11-01T15:44:12Z
+#+DATE: 2026-11-01T16:21:50Z
 
-* State: owner approved security patch; implementation resumed
-Owner password repair source ad2088477087abef4c38be90d11236b30de2c977
+* State: source reviewed, release staged; final verification running
+Owner password repair source e5d449bfe4f6d75b32cc89b1dbd31a3daf49df18
 is pushed on claude/hosted-owner-password-setup; independently source-PASS
-reviewed by Codex. Focused71/71; compile test/hosted/prod, format and Credo
-reported passing. No claim of full gate PASS. Actual login recovery is
+reviewed by Codex. Focused79/79; compile test/hosted/prod, format and Credo
+passing; dependency audit now clean. No claim of full gate PASS. Actual login recovery is
 NOT deployed and the owner has not set a password through the repaired flow.
 
 * Failing command / evidence
@@ -23,10 +23,24 @@ under the standard private handoff tmp root. No credentials in this record.
 Owner explicitly replied "approved" to the minimal jsv0.26.0 ->0.26.2
 security patch and ADR0008 amendment, received before2026-11-01T15:47:35Z.
 Relay m_codex_owner_jsv_patch_approved_20261101 names this exact scope.
-Claude owns amendment, minimal lock update and Linux build; Codex owns
+Claude completed amendment, minimal lock update and Linux build; Codex owns
 independent review, SDR-only deployment and ONE existing-owner link reissue.
-Rerun release checks; dependency audit remains blocking, not waived. No
-unrelated dependency changes, data import, new model call or worker unpause.
+The full pre-patch suite c4-20261101T154249Z-13069 had15 failures: exact14
+known baseline names from c4-20261031T231158Z-99069, plus a stale token-only
+POST in the enrollment limiter test. That fixture now sends a valid chosen
+password, preserving the eleventh refusal and later admission assertions;
+focused79/79 passes. Final full gate c4-20261101T161219Z-37297 is running.
+Its dependency audit is clean (exit0), not waived. No unrelated dependency
+changes, data import, new model call or worker unpause.
+
+* Inactive staged release verified
+Artifact sha25688bddd737b2d23dbda8517f204e8bc7feacd48958e068d797923eb0c69155720,
+exact sourcee5d449bf, staged separately from live release. No priv/config
+delta, migration or secret rotation. Runtime SQL-app-role no-start BootCheck
+PASS against canonical hosted identity/binding; live_reload remains[].
+Current site still45c64004, healthy, unchanged PID and foreign service
+activation counters. Actual swap/rehearsal/reissue waits final comparison.
+Private staged-readiness receipt9a56fd39 records full paths/hashes/evidence.
 
 * Preserved current delivery
 Last deployed source45c64004286a47a81a8d08205a1ece70058f6e0a remains live.
