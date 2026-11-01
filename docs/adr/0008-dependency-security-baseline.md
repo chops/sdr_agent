@@ -1019,3 +1019,44 @@ override is a fix route under rule 2, not an exception to it.
 
 Trigger: no. Dependency versions only. No entity, attribute, relationship, policy, action or contract changes,
 and there is no architecture-diagram trigger.
+
+## Amendment (2026-11-01, accepted): EEF-CVE-2026-117680
+
+**Status: accepted** by the owner on 2026-11-01, relayed by Codex
+(m_codex_owner_jsv_patch_approved_20261101): approval of the minimal
+`jsv` 0.26.0 → 0.26.2 security update and this amendment. It is not an
+audit waiver; the blocking `mix hex.audit` step stays as rule 4 of the
+policy above requires. Codex reviewed the amendment text independently (D-204): PASS,
+m_codex_jsv_amendment_pass_20261101, for draft sha256 f1acae05.
+
+### Advisory
+
+- **EEF-CVE-2026-117680** (LOW; CVSS:4.0/AV:L/AC:L/AT:P/PR:N/UI:N/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N),
+  aka CVE-2026-117680, GHSA-cvmg-hgv6-jqcp; published 2026-11-01 13:29Z.
+- `JSV.Helpers.RegexExt.bounded_match?/2` runs schema regexes with a
+  backtracking budget but without `:report_errors`, so an exhausted budget
+  reads as a non-match. A `patternProperties` subschema can then be skipped,
+  and a string can pass a `not` + `pattern` deny-list. Only schemas whose
+  regex explores a catastrophic branch first are affected; the attacker
+  controls the data, not the schema.
+- Affected: `jsv` 0.1.0 to before 0.26.2. Fixed in **0.26.2**.
+- Found by the blocking `mix hex.audit` step of the full gate
+  c4-20261101T154112Z-5808 (owner password setup, head ad208847), which
+  stopped before any database effect, as rule 4 intends.
+
+### Exposure in this project (a source survey, not a runtime proof)
+
+`jsv` is transitive: `jido_ai` (git) → `req_llm` 1.29.0 → `jsv`. `req_llm`
+calls `JSV.validate/2` in `ReqLLM.Generation` and `ReqLLM.Schema`. Nothing in
+`lib/` calls `JSV` or ReqLLM generation; `ReqLLM` appears only as a module
+name in the prototype containment list. Model calls use the Claude CLI
+transport, and their schemas come from `SdrAgent.AI.JsonSchema.render/1`
+(Zoi), which this project authors, not the attacker. So the vulnerable path
+is not known to be reachable today. We bump anyway rather than ignore the
+advisory: a fix exists and it is a patch release.
+
+### Decision
+
+Lock `jsv` at **0.26.2**. Only the `jsv` entry in `mix.lock` changes;
+`mix.exs` is unchanged and no other package moves (`mix deps.unlock jsv`
+then `mix deps.get`, checked by a lock diff). No `ignore_advisories` entry.
