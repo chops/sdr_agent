@@ -14,8 +14,10 @@ defmodule SdrAgent.Integrations.Wikidata do
       lower-cased host of the first official website whose host passes the
       dossier host rule; http and https both name a host, a website with a
       port or userinfo is unusable) and `employees` (the largest stated
-      count, or nil). A company without a usable host is dropped; a
-      malformed document is `{:error, :invalid_response}`.
+      count, or nil; a count that is not wholly a non-negative number is
+      unknown). A company without a usable host is dropped, a malformed
+      binding value is treated as absent, and a malformed document is
+      `{:error, :invalid_response}`.
 
   Candidates are unverified search results: `employees` is a Wikidata
   statement with no recency, never proof of current headcount or ICP fit.
@@ -79,8 +81,8 @@ defmodule SdrAgent.Integrations.Wikidata do
        )
        when is_binary(qid) do
     if Regex.match?(@qid, qid) do
-      host = host(get_in(row, ["site", "value"]))
-      emp = employees(get_in(row, ["emp", "value"]))
+      host = host(value(row, "site"))
+      emp = employees(value(row, "emp"))
 
       case acc do
         %{^qid => known} ->
@@ -93,7 +95,7 @@ defmodule SdrAgent.Integrations.Wikidata do
           {order, Map.put(acc, qid, known)}
 
         _new ->
-          name = get_in(row, ["cLabel", "value"])
+          name = value(row, "cLabel")
 
           entry = %{
             qid: qid,
@@ -110,6 +112,14 @@ defmodule SdrAgent.Integrations.Wikidata do
   end
 
   defp collect(_row, acc), do: acc
+
+  # The string value of a binding, or nil for anything malformed.
+  defp value(row, key) do
+    case row do
+      %{^key => %{"value" => v}} when is_binary(v) -> v
+      _ -> nil
+    end
+  end
 
   defp host(url) when is_binary(url) do
     case URI.new(url) do
@@ -138,7 +148,7 @@ defmodule SdrAgent.Integrations.Wikidata do
 
   defp employees(value) when is_binary(value) do
     case Float.parse(value) do
-      {n, _rest} when n >= 0 -> trunc(n)
+      {n, ""} when n >= 0 -> trunc(n)
       _ -> nil
     end
   end

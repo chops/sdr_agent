@@ -8,12 +8,14 @@ defmodule SdrAgent.Discovery.PublicAddress do
   198.51.100/24, 203.0.113/24, 224/4 (multicast) and 240/4 (reserved,
   including the broadcast address).
 
-  Refused IPv6: ::/128, ::1, every IPv4-embedding form (::/96 compatible,
-  ::ffff:0:0/96 mapped, 64:ff9b::/96 and 64:ff9b:1::/48 NAT64, 2002::/16
-  6to4), 100::/64 (discard), 2001::/23 (IETF protocol assignments, Teredo
-  included), 2001:db8::/32, fc00::/7, fe80::/10 and ff00::/8. An embedding
-  form is refused whatever address it carries: no translation path is
-  trusted.
+  IPv6 is admitted only inside the global unicast envelope 2000::/3, so
+  site-local fec0::/10 and every unallocated range are refused. Also refused:
+  ::/128, ::1, every IPv4-embedding form (::/96 compatible, ::ffff:0:0/96
+  mapped, 64:ff9b::/96 and 64:ff9b:1::/48 NAT64, 2002::/16 6to4), 100::/64
+  (discard), 2001::/23 (IETF protocol assignments, Teredo included),
+  2001:db8::/32 and 3fff::/20 (documentation), 3ffe::/16 (former 6bone),
+  fc00::/7, fe80::/10 and ff00::/8. An embedding form is refused whatever
+  address it carries: no translation path is trusted.
 
   Anything else (a string, a malformed tuple) is refused.
   """
@@ -27,7 +29,7 @@ defmodule SdrAgent.Discovery.PublicAddress do
 
   def public?({_, _, _, _, _, _, _, _} = ip) do
     if Enum.all?(Tuple.to_list(ip), &(is_integer(&1) and &1 in 0..0xFFFF)),
-      do: not v6_refused?(ip),
+      do: in?(ip, {0x2000, 0, 0, 0, 0, 0, 0, 0}, 3, 16) and not v6_refused?(ip),
       else: false
   end
 
@@ -60,6 +62,8 @@ defmodule SdrAgent.Discovery.PublicAddress do
     {{0x2001, 0, 0, 0, 0, 0, 0, 0}, 23},
     {{0x2001, 0xDB8, 0, 0, 0, 0, 0, 0}, 32},
     {{0x2002, 0, 0, 0, 0, 0, 0, 0}, 16},
+    {{0x3FFE, 0, 0, 0, 0, 0, 0, 0}, 16},
+    {{0x3FFF, 0, 0, 0, 0, 0, 0, 0}, 20},
     {{0xFC00, 0, 0, 0, 0, 0, 0, 0}, 7},
     {{0xFE80, 0, 0, 0, 0, 0, 0, 0}, 10},
     {{0xFF00, 0, 0, 0, 0, 0, 0, 0}, 8}

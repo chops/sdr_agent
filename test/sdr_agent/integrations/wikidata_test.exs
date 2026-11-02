@@ -104,8 +104,9 @@ defmodule SdrAgent.Integrations.WikidataTest do
   # malformed binding value never raises.
   test "a count with a non-numeric tail is unknown" do
     for emp <- ["50garbage", "12 people", "", "-5", "1e3x"] do
-      assert {:ok, [%{employees: nil}]} =
-               call(:parse_companies, [doc([row("Q1", "Acme", "https://acme.example.com/", emp)])]),
+      assert call(:parse_companies, [doc([row("Q1", "Acme", "https://acme.example.com/", emp)])]) ==
+               {:ok,
+                [%{qid: "Q1", name: "Acme", website_host: "acme.example.com", employees: nil}]},
              emp
     end
 

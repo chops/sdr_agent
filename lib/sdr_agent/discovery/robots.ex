@@ -4,9 +4,10 @@ defmodule SdrAgent.Discovery.Robots do
   subset). `allowed?/3` takes the file's bytes (or `nil` for a file that is
   confirmed absent), our agent token and a path:
 
-    * Groups start at one or more `User-agent` lines; the group whose token
-      occurs (case-insensitively) in our agent token wins, otherwise the `*`
-      group, otherwise everything is allowed.
+    * Groups start at one or more `User-agent` lines. The rules of every
+      group whose token occurs (case-insensitively) in our agent token are
+      combined; if there is none, the rules of every `*` group are combined;
+      otherwise everything is allowed. An empty `User-agent` names nobody.
     * Within the group the longest matching `Allow`/`Disallow` pattern wins,
       `Allow` on a tie; an empty `Disallow` matches nothing. `*` matches any
       run of characters and a trailing `$` anchors the end.
@@ -30,14 +31,15 @@ defmodule SdrAgent.Discovery.Robots do
     groups = parse(robots_txt)
     agent = String.downcase(agent)
 
-    rules =
-      Enum.find_value(groups, fn {agents, rules} ->
-        if Enum.any?(agents, &(&1 != "*" and String.contains?(agent, &1))), do: rules
-      end) ||
-        Enum.find_value(groups, fn {agents, rules} -> if "*" in agents, do: rules end) ||
-        []
+    own = rules_of(groups, &(&1 not in ["", "*"] and String.contains?(agent, &1)))
+    rules = if own == [], do: rules_of(groups, &(&1 == "*")), else: own
 
     decide(rules, path)
+  end
+
+  # Every group with an agent token satisfying `match?`, combined in file order.
+  defp rules_of(groups, match?) do
+    for {agents, rules} <- groups, Enum.any?(agents, match?), rule <- rules, do: rule
   end
 
   defp decide(rules, path) do
