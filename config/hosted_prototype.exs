@@ -14,6 +14,7 @@ config :sdr_agent,
   seeding_allowed?: false,
   prototype_test_seams: false,
   claude_cli_test_seams: false,
+  public_web_test_seams: false,
   smoke_attestation_plug: false,
   otel_capture_content: false
 

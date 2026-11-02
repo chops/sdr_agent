@@ -16,6 +16,9 @@ config :sdr_agent, :smoke_attestation_plug, true
 # may run without a pin and past the staged real-model gate. Dev and prod
 # builds contain neither.
 config :sdr_agent, :claude_cli_test_seams, true
+# Discovery transport: test-only `port:` and `cacerts:` options for local
+# HTTPS servers. Dev, hosted and prod builds always use 443 and system CAs.
+config :sdr_agent, :public_web_test_seams, true
 config :sdr_agent, token_signing_secret: "x0lKSRtwFS5BaFNguZ0LCt7JYjNRZ4pi"
 config :bcrypt_elixir, log_rounds: 1
 config :ash, policies: [show_policy_breakdowns?: true], disable_async?: true

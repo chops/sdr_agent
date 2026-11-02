@@ -57,11 +57,15 @@ defmodule SdrAgent.Integrations.PublicWebTransportTest do
       conn = conn |> put_resp_content_type("text/html") |> send_chunked(200)
       chunk = :binary.copy("a", 65_536)
 
-      sent =
-        Enum.reduce_while(1..64, 0, fn _i, n ->
+      {conn, sent} =
+        Enum.reduce_while(1..64, {conn, 0}, fn _i, {conn, n} ->
+          # Paced so kernel buffers cannot absorb the whole body before the
+          # client stops reading (Codex RED-B reliability note).
+          Process.sleep(25)
+
           case chunk(conn, chunk) do
-            {:ok, _conn} -> {:cont, n + 1}
-            {:error, _reason} -> {:halt, n}
+            {:ok, conn} -> {:cont, {conn, n + 1}}
+            {:error, _reason} -> {:halt, {conn, n}}
           end
         end)
 
@@ -84,10 +88,12 @@ defmodule SdrAgent.Integrations.PublicWebTransportTest do
 
   defp pki(host) do
     san = [{:Extension, {2, 5, 29, 17}, false, [{:dNSName, String.to_charlist(host)}]}]
+    # TLS 1.3 refuses the default test keys and SHA-1 signatures.
+    key = [digest: :sha256, key: {:namedCurve, :secp256r1}]
 
     :public_key.pkix_test_data(%{
-      server_chain: %{root: [], intermediates: [], peer: [extensions: san]},
-      client_chain: %{root: [], intermediates: [], peer: []}
+      server_chain: %{root: key, intermediates: [], peer: [extensions: san] ++ key},
+      client_chain: %{root: key, intermediates: [], peer: key}
     })
   end
 

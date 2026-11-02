@@ -24,9 +24,14 @@ defmodule SdrAgent.Integrations.PublicWeb do
   `trust_level: :unverified`. Errors are closed atoms; no URL or body is
   ever echoed.
 
-  The default request is a refusing transport (`:transport_failed`): a real
-  pinned, streaming transport needs its own reviewed checkpoint (Codex
-  review of RED-A). The default resolver is the system resolver.
+  `robots_txt/2` reads `https://host/robots.txt` under the same rules: a
+  2xx body, `nil` only on a confirmed 404, otherwise an error.
+
+  The default request is still a refusing transport (`:transport_failed`).
+  The real pinned transport is `SdrAgent.Integrations.PublicWeb.Transport`;
+  a caller passes `request: &Transport.request(&1, &2, &3, [])` only after a
+  separately reviewed activation. The default resolver is the system
+  resolver.
 
   Options: `resolver: (host -> {:ok, [ip]} | {:error, term})` and
   `request: (ip, host, path -> {:ok, %{status:, headers:, body:}} | {:error, term})`.
@@ -57,19 +62,55 @@ defmodule SdrAgent.Integrations.PublicWeb do
     resolver = Keyword.get(opts, :resolver, &resolve/1)
     request = Keyword.get(opts, :request, &refuse/3)
 
-    if safe?(url),
-      do: step(url, url, 0, resolver, request),
-      else: {:error, :unsafe_url}
+    with true <- safe?(url) || {:error, :unsafe_url},
+         {:ok, response, final_url} <- walk(url, 0, resolver, request) do
+      page_of(response, url, final_url)
+    end
+  end
+
+  @doc """
+  The robots.txt of `host`, read from `https://host/robots.txt` under the
+  same address, redirect and request rules as `fetch/2`: `{:ok, body}` on a
+  2xx, `{:ok, nil}` only on a confirmed 404, any other status
+  `{:error, :http_status}`, and every failure an error (never "absent").
+  """
+  @spec robots_txt(String.t(), keyword()) :: {:ok, binary() | nil} | {:error, error()}
+  def robots_txt(host, opts \\ []) do
+    resolver = Keyword.get(opts, :resolver, &resolve/1)
+    request = Keyword.get(opts, :request, &refuse/3)
+    url = if is_binary(host), do: "https://" <> host <> "/robots.txt"
+
+    with true <- safe?(url) || {:error, :unsafe_url},
+         {:ok, %{status: status, body: body}, _final} <- walk(url, 0, resolver, request) do
+      cond do
+        status in 200..299 and byte_size(body) <= @max_bytes -> {:ok, body}
+        status in 200..299 -> {:error, :too_large}
+        status == 404 -> {:ok, nil}
+        true -> {:error, :http_status}
+      end
+    end
   end
 
   defp safe?(url), do: is_binary(url) and Rules.url(url, "url") == :ok
 
-  defp step(current, original, hops, resolver, request) do
+  # Follows redirects under the policy; returns the final response and URL.
+  defp walk(current, hops, resolver, request) do
     %URI{host: host, path: path} = URI.parse(current)
 
     with {:ok, ip} <- address(host, resolver),
          {:ok, response} <- call(request, ip, host, path || "/") do
-      respond(response, current, original, hops, resolver, request)
+      if response.status in @redirects,
+        do: follow(response, current, hops, resolver, request),
+        else: {:ok, response, current}
+    end
+  end
+
+  # The Location is checked before the hop count, as in GREEN-A.
+  defp follow(response, current, hops, resolver, request) do
+    with {:ok, next} <- location(response, current) do
+      if hops >= @max_redirects,
+        do: {:error, :too_many_redirects},
+        else: walk(next, hops + 1, resolver, request)
     end
   end
 
@@ -96,28 +137,18 @@ defmodule SdrAgent.Integrations.PublicWeb do
     end
   end
 
-  defp respond(%{status: status} = response, current, original, hops, resolver, request)
-       when status in @redirects do
-    with {:ok, next} <- location(response, current) do
-      if hops >= @max_redirects,
-        do: {:error, :too_many_redirects},
-        else: step(next, original, hops + 1, resolver, request)
-    end
-  end
-
-  defp respond(%{status: status, headers: headers, body: body}, current, original, _hops, _r, _q)
+  defp page_of(%{status: status, headers: headers, body: body}, original, final_url)
        when status in 200..299 do
     type = content_type(headers)
 
     cond do
       byte_size(body) > @max_bytes -> {:error, :too_large}
       type not in @types -> {:error, :unsupported_content}
-      true -> {:ok, page(original, current, type, body)}
+      true -> {:ok, page(original, final_url, type, body)}
     end
   end
 
-  defp respond(_response, _current, _original, _hops, _resolver, _request),
-    do: {:error, :http_status}
+  defp page_of(_response, _original, _final_url), do: {:error, :http_status}
 
   defp location(%{headers: headers}, current) do
     with value when is_binary(value) and value != "" <- header(headers, "location"),
