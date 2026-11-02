@@ -100,6 +100,49 @@ defmodule SdrAgent.Integrations.WikidataTest do
               ]}
   end
 
+  # Codex GREEN-A review (important): a malformed count is unknown, and a
+  # malformed binding value never raises.
+  test "a count with a non-numeric tail is unknown" do
+    for emp <- ["50garbage", "12 people", "", "-5", "1e3x"] do
+      assert {:ok, [%{employees: nil}]} =
+               call(:parse_companies, [doc([row("Q1", "Acme", "https://acme.example.com/", emp)])]),
+             emp
+    end
+
+    assert {:ok, [%{employees: 1000}]} =
+             call(:parse_companies, [
+               doc([row("Q1", "Acme", "https://acme.example.com/", "1000")])
+             ])
+  end
+
+  test "malformed binding values are skipped without raising" do
+    good = row("Q2", "Beta", "https://beta.example.net/")
+
+    bad = [
+      %{
+        "c" => "http://www.wikidata.org/entity/Q1",
+        "site" => %{"value" => "https://a.example.com"}
+      },
+      %{
+        "c" => %{"value" => "http://www.wikidata.org/entity/Q3"},
+        "site" => "https://c.example.com"
+      },
+      %{"c" => %{"value" => "http://www.wikidata.org/entity/Q4"}, "site" => %{"value" => 7}},
+      %{
+        "c" => %{"value" => "http://www.wikidata.org/entity/Q5"},
+        "site" => %{"value" => "https://e.example.com"},
+        "emp" => "9"
+      },
+      "row",
+      nil
+    ]
+
+    assert {:ok, candidates} = call(:parse_companies, [doc(bad ++ [good])])
+    hosts = Enum.map(candidates, &Map.take(&1, [:qid, :website_host]))
+    assert %{qid: "Q2", website_host: "beta.example.net"} in hosts
+    refute Enum.any?(candidates, &(&1.qid in ["Q1", "Q3", "Q4"]))
+  end
+
   test "a malformed document is refused" do
     for bad <- [%{}, %{"results" => %{}}, %{"results" => %{"bindings" => "x"}}, nil] do
       assert call(:parse_companies, [bad]) == {:error, :invalid_response}, inspect(bad)

@@ -72,6 +72,53 @@ defmodule SdrAgent.Discovery.RobotsTest do
     assert allowed?(txt, "/about")
   end
 
+  # Codex GREEN-A review R2: every group matching our token is combined
+  # before the longest-rule decision; so are repeated star groups; an empty
+  # User-agent names nobody.
+  test "repeated groups for our token are combined" do
+    txt = """
+    User-agent: SDR-agent-discovery
+    Allow: /
+
+    User-agent: otherbot
+    Disallow: /
+
+    User-agent: sdr-agent-discovery
+    Disallow: /private
+    """
+
+    assert allowed?(txt, "/team")
+    refute allowed?(txt, "/private/x")
+  end
+
+  test "repeated star groups are combined" do
+    txt = """
+    User-agent: *
+    Allow: /a
+
+    User-agent: otherbot
+    Disallow: /
+
+    User-agent: *
+    Disallow: /b
+    """
+
+    assert allowed?(txt, "/a")
+    refute allowed?(txt, "/b")
+  end
+
+  test "an empty User-agent names nobody and cannot override a later group" do
+    txt = """
+    User-agent:
+    Allow: /
+
+    User-agent: *
+    Disallow: /
+    """
+
+    refute allowed?(txt, "/team")
+  end
+
   test "an oversized robots file disallows everything" do
     txt = "User-agent: *\nAllow: /\n" <> String.duplicate("#", 512 * 1024)
     refute allowed?(txt, "/")

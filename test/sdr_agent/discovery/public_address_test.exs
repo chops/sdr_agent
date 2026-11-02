@@ -56,6 +56,19 @@ defmodule SdrAgent.Discovery.PublicAddressTest do
     for a <- @admitted, do: assert(public?(ip(a)), a)
   end
 
+  # Codex GREEN-A review R1: IPv6 is admitted only inside the global unicast
+  # envelope 2000::/3, minus its special-purpose blocks.
+  test "IPv6 outside global unicast, documentation and former 6bone are refused" do
+    for a <-
+          ~w(fec0::1 feff::1 4000::1 8000::1 e000::1 1000::1 3fff::1 3fff:fff::1 3ffe::1 3ffe:ffff::1),
+        do: refute(public?(ip(a)), a)
+  end
+
+  test "global unicast just outside the excluded blocks is still admitted" do
+    for a <- ~w(2001:4860:4860::8888 2c0f:fb50:4002::1 3ffd:ffff::1 3fff:1000::1),
+        do: assert(public?(ip(a)), a)
+  end
+
   test "anything that is not an address tuple is refused" do
     for v <- ["8.8.8.8", nil, {8, 8, 8}, {256, 0, 0, 1}, {1, 2, 3, 4, 5, 6, 7, 65_536}, :x],
         do: refute(public?(v), inspect(v))
