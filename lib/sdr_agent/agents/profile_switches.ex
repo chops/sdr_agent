@@ -489,14 +489,16 @@ defmodule SdrAgent.Agents.ProfileSwitches do
   `SdrAgent.Agents.LedgerCall.attempt/2`'s outcome: `{:ok, {:resolved,
   switch}}`, `{:ok, {:replay, switch}}` (the locked switch already carries
   this exact attestation; nothing written), `{:rolled_back, reason}` or
-  `{:unknown, reason}`.
+  `{:unknown, reason}`. In test builds a `faults: [client_slack_ms: ms]`
+  option is forwarded to the ledger call as this write's client-side slack
+  (#230); the settlement is never widened.
   """
   def commit_resolution(request, opts) do
     faults = write_faults(opts)
 
     LedgerCall.attempt(
       &guarded_resolution(request, faults, &1),
-      budget_ms: Keyword.fetch!(opts, :budget_ms)
+      [budget_ms: Keyword.fetch!(opts, :budget_ms)] ++ Keyword.take(faults, [:client_slack_ms])
     )
   end
 
