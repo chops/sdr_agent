@@ -1,6 +1,6 @@
 #+TITLE: Unlimited stored companies and contacts (D-272)
 #+DATE: 2026-11-02
-#+STATUS: owner approved; ENTITY and PLAN PASS; GREEN focused 61/61; source review and full gate pending
+#+STATUS: deployed 2ac4d6c3; independent source and deployment PASS; 97/97 focused; full gate FAIL with documented baseline/environment failures
 
 * Scope and approval
 Owner: "there should not be a limit to the number of contacts or companies.
@@ -78,4 +78,39 @@ Independent source PASS r2: m_claude_cap_green_source_review_20261102,
 61/61 PASS; compile --warnings-as-errors, format --check-formatted and Credo
 pass (1116 files, no issues). Earlier-decisions heading intentionally groups
 the historical log separately from the newly recorded owner supersession.
-Exact-head full gate remains pending; not yet deployed.
+Exact-head full gate c3-20261102T190603Z-12996 completed at
+2026-11-02T19:37:18Z: FAIL, 6160/6210 passing, 50 failures, 1 skipped,
+42 excluded; final manifest verified. Exact failure-name comparison against
+c4-20261101T161219Z-37297 found its same 14 inherited failures (Journey,
+twelve Output, Setup), plus 29 ContainmentGuard and seven
+TaskBoundaryEntryToken setup failures: all 36 report "precondition: an
+OTEL_ name". Both test modules and their production modules are unchanged
+from e5d449bf. Parent telemetry environment was inherited by the test child;
+no test or production assertion was changed.
+
+Clean-parent-env exact-head rerun c3-20261102T193946Z-71136 passed 67/67
+(36 environmental controls plus core quota/import); expanded rerun
+c3-20261102T194052Z-77036 passed all 97/97 (36 plus the full 61-control
+quota/import/entry/decoder set), no dirty files, manifests verified.
+Compile, format, workflow, codegen, Credo and advisory audit steps in the
+full gate returned rc0. Global gate remains FAIL, never relabeled PASS.
+
+* Deployment receipt
+Claude source PASS and staged runtime-role bootcheck r2 PASS;
+m_claude_cap_gate_env_review_20261102 and
+m_claude_cap_switch_ruling_20261102 explicitly accepted the environmental
+comparison and granted deployment GO, retaining the failed gate record.
+Reviewed switch script SHA256
+cfce5248a42205715a88b4b606ff47a2585c38e9a65573c20deec0b1bf20e383
+was transferred, hash-checked and executed unchanged, rc0:
+SDR_UNLIMITED_RELEASE_ACTIVE_HEALTH_PASS.
+
+At 2026-11-02T19:41:55Z, ch-web-prod live release
+/opt/sdr_agent_hosted/REVISION = 2ac4d6c3aa86fdb7e21f9d969cba32e73f030c70.
+Recoverable previous release retained at
+/opt/sdr_agent_hosted-previous-unlimited-20261102, revision e5d449bf.
+Only sdr-agent.service restarted: active/running, NRestarts=0;
+HTTPS /health and /sign-in both 200. Read-only DB postcheck: two accounts,
+two contacts, four model invocations, zero remote model calls, unchanged.
+No migrations, password operation, intake change, new model call or outreach.
+Removing the quota does not itself add prospects or activate discovery.
