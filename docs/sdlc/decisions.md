@@ -1,5 +1,28 @@
 # Decision log
 
+## D-272 — Unlimited stored companies and contacts (2026-11-02, confirmed)
+
+Owner: "there should not be a limit to the number of contacts or companies.
+get rid of those limits." Follow-up: "get it done today and start right now."
+This supersedes only D-249 F3's binding-wide imported-contact quota. Retain
+the exact historical `d237-prototype/1` policy entry, including
+`max_contacts: 3`, and its binding digest as immutable evidence, never as
+current quota authority. Remove admission reads of that field; do not rebind,
+rewrite the binding, reset data, or alter the accepted funding entry.
+
+`cap_used/1` and the `cap_used` summary field remain counts only, not limits.
+Historical `contact_cap_exceeded` decoding remains compatible. Per-command
+three-row selection and artifact byte/depth bounds remain operational
+batching, not lifetime storage quotas. Binding locks, fresh live checks,
+tenant policies, conflict/replay semantics and per-row rollback are unchanged.
+The 100-attempt CLI allowance and exclusive expiry `2026-11-07T07:00Z`,
+capture-only/no-outreach restrictions remain. Quota removal alone does not
+make hosted import or discovery available. Independent Claude entity/plan
+PASS: `m_claude_contact_cap_r2_review_20261102`; implementation plan:
+[`notes/features/unlimited-prospects.org`](../../notes/features/unlimited-prospects.org).
+
+## Earlier decisions
+
 Owner decisions that shaped the product and the process. IDs are stable; v0.2
 corrected some dates and wording after Codex's review, and each correction is
 noted in the entry. v0.3 (2026-10-12) adds D-021 to D-109 from the owner's

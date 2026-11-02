@@ -1,12 +1,12 @@
 defmodule SdrAgent.Prototype.DossierImportTest do
   @moduledoc """
   The above-domain import coordinator `SdrAgent.Prototype.DossierImport`
-  (interfaces r6 IF-6 "Binding-wide contact cap", "Mapping", "Tables";
-  supplement 1 r2 §5, R9; plan r7 section 6 F3 cap and Dossier/import):
-  one `Audit.transaction` per row under the binding lock, the authoritative
-  per-row cap recheck, idempotent replay by `(dossier_sha256, row_id)`,
+  (interfaces r6 IF-6 "Mapping", "Tables"; supplement 1 r2 §5, R9;
+  D-272 supersedes the historical F3 quota):
+  one `Audit.transaction` per row under the binding lock, unlimited stored
+  prospects, idempotent replay by `(dossier_sha256, row_id)`,
   `:dossier_conflict`, the scoped Payload writes, explicit rollback of the
-  whole row (no Sales row, no Payload reference, no cap slot), preserved
+  whole row (no Sales row or Payload reference), preserved
   denial records, and live operator and binding checks at both entries;
   and `cap_used/1`, the summary count of the binding's distinct imported
   contacts for the live operator only.
@@ -225,35 +225,36 @@ defmodule SdrAgent.Prototype.DossierImportTest do
     end
   end
 
-  describe "the binding-wide cap of 3 distinct contacts" do
-    test "a second command or a second dossier cannot pass the cap; a replay at the cap uses no slot",
+  describe "unlimited stored companies and contacts" do
+    test "a fourth distinct prospect imports across commands and replay adds nothing",
          ctx do
       rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
       assert import!(rows, ctx.actor).imported == ~w(row-1 row-2 row-3)
 
       [fourth] = rows!([F.company(4)], ["row-4"])
 
-      assert {:error, %{code: :contact_cap_exceeded, imported: [], replayed: []}} =
-               call(@import, :import, [[fourth], ctx.actor])
+      assert import!([fourth], ctx.actor) == %{imported: ["row-4"], replayed: []}
 
-      assert count("contacts") == 3
-      assert count("dossier_entries") == 3
+      assert count("accounts") == 4
+      assert count("contacts") == 4
+      assert count("dossier_entries") == 4
       assert import!([hd(rows)], ctx.actor) == %{imported: [], replayed: ["row-1"]}
+      assert count("contacts") == 4
     end
 
-    test "the precheck refuses an over-cap selection before any write", ctx do
+    test "a new batch is admitted regardless of the number already stored", ctx do
       [first] = rows!([F.company(1)], ["row-1"])
       import!([first], ctx.actor)
 
       rows = rows!(for(i <- 2..4, do: F.company(i)), ~w(row-2 row-3 row-4))
 
-      assert {:error, %{code: :contact_cap_exceeded, imported: [], failed_row: nil}} =
-               call(@import, :import, [rows, ctx.actor])
+      assert import!(rows, ctx.actor) == %{imported: ~w(row-2 row-3 row-4), replayed: []}
 
-      assert count("contacts") == 1
+      assert count("accounts") == 4
+      assert count("contacts") == 4
     end
 
-    test "two concurrent imports serialize on the binding lock; the per-row recheck holds the cap",
+    test "concurrent distinct imports serialize and both finish beyond three contacts",
          ctx do
       a = rows!([F.company(1), F.company(2)], ~w(row-1 row-2))
       b = rows!([F.company(3), F.company(4)], ~w(row-3 row-4))
@@ -265,11 +266,30 @@ defmodule SdrAgent.Prototype.DossierImportTest do
         end)
         |> Enum.map(&Task.await(&1, 30_000))
 
-      assert count("contacts") == 3
-      assert count("dossier_entries") == 3
+      assert count("contacts") == 4
+      assert count("dossier_entries") == 4
 
-      assert Enum.count(results, &match?({:error, %{code: :contact_cap_exceeded}}, &1)) == 1,
-             "expected exactly one cap refusal: #{inspect(results)}"
+      assert Enum.all?(results, &match?({:ok, %{imported: [_, _], replayed: []}}, &1)),
+             "expected both independent batches to import: #{inspect(results)}"
+    end
+
+    test "ten prospects survive repeated batches without resetting identity or counts", ctx do
+      snapshot = SdrAgent.Prototype.binding()
+      policy_digest = SdrAgent.Prototype.Authority.policy_entry_sha256()
+
+      for batch <- Enum.chunk_every(1..10, 3) do
+        companies = Enum.map(batch, &F.company/1)
+        ids = Enum.map(batch, &"row-#{&1}")
+        rows = rows!(companies, ids)
+        assert import!(rows, ctx.actor) == %{imported: ids, replayed: []}
+      end
+
+      assert count("accounts") == 10
+      assert count("contacts") == 10
+      assert count("leads") == 10
+      assert call(@import, :cap_used, [ctx.actor]) == {:ok, 10}
+      assert SdrAgent.Prototype.binding() == snapshot
+      assert SdrAgent.Prototype.Authority.policy_entry_sha256() == policy_digest
     end
 
     test "after a partial failure the same command resumes: committed rows replay, the failed row retries",
@@ -287,7 +307,7 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   end
 
   describe "the whole row is atomic (R9)" do
-    test "a Research write failing mid-row leaves no Sales row, no Payload reference and no cap slot",
+    test "a Research write failing mid-row leaves no Sales row or Payload reference",
          ctx do
       [row] = rows!([F.company(1)], ["row-1"])
       broken = put_in(row, [:plan, :sources], [%{hd(row.plan.sources) | source_id: "s!"}])
@@ -309,7 +329,7 @@ defmodule SdrAgent.Prototype.DossierImportTest do
 
       assert count("audit_events", @business_events) == events
 
-      # The slot was not consumed: three fresh rows still fit.
+      # A later batch succeeds after the failed row rolled back.
       rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
       assert import!(rows, ctx.actor).imported == ~w(row-1 row-2 row-3)
     end
@@ -355,9 +375,9 @@ defmodule SdrAgent.Prototype.DossierImportTest do
   end
 
   # Codex 22958123 (C2 and the closure items): the failure boundary, the
-  # authoritative per-row cap, same-key conflicts, nested calls and the
+  # superseded per-row quota (D-272), same-key conflicts, nested calls and the
   # locked binding re-check.
-  describe "closure: failure boundary, per-row cap, conflicts, nesting, locked re-check" do
+  describe "closure: failure boundary, unlimited rows, conflicts, nesting, locked re-check" do
     test "a real PostgreSQL failure late in the row is :import_failed, with no survivor and a usable connection",
          ctx do
       [row] = rows!([F.company(1)], ["row-1"])
@@ -382,22 +402,21 @@ defmodule SdrAgent.Prototype.DossierImportTest do
       assert count("audit_events", @business_events) == events
       assert length(events_of_type(ctx.tenant, "authz.denied")) == denials
 
-      # The connection is usable and no slot was used: the row imports.
+      # The connection is usable after rollback: the row imports.
       assert %{rows: [[1]]} = Repo.query!("SELECT 1", [])
       assert import!([row], ctx.actor) == %{imported: ["row-1"], replayed: []}
     end
 
-    test "the per-row recheck refuses a direct import_row over the cap, without the precheck",
+    test "a direct import_row admits the fourth prospect without a batch precheck",
          ctx do
       rows = rows!(for(i <- 1..3, do: F.company(i)), ~w(row-1 row-2 row-3))
       assert import!(rows, ctx.actor).imported == ~w(row-1 row-2 row-3)
       [fourth] = rows!([F.company(4)], ["row-4"])
-      before = {count("accounts"), count("contacts"), count("dossier_entries"), count("payloads")}
 
-      assert call(@import, :import_row, [fourth, ctx.actor]) == {:error, :contact_cap_exceeded}
+      assert {:ok, :imported, %{entry_id: _, lead_id: _}} =
+               call(@import, :import_row, [fourth, ctx.actor])
 
-      assert {count("accounts"), count("contacts"), count("dossier_entries"), count("payloads")} ==
-               before
+      assert {count("accounts"), count("contacts"), count("dossier_entries")} == {4, 4, 4}
     end
 
     test "the same key with a changed manifest, claims or notes is :dossier_conflict, writing nothing",

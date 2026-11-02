@@ -36,33 +36,28 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       index in the dossier, and the exact dossier and manifest digests; a
       parser refusal is returned unchanged. No database, network, evaluation
       or write; only the parser's own bounded artifact reads.
-    - `import/2` runs the precheck in its own `SdrAgent.Audit.transaction/1`
-      under the binding lock: `used` (distinct imported contacts) plus `new`
-      (the rows that are not identical replays) over the policy entry's
-      `max_contacts` refuses with `:contact_cap_exceeded` before any write. It
-      reserves no slot. A row that is not an identical replay counts as new
-      even if the per-row check would call it a conflict, so at the cap such
-      a selection is `:contact_cap_exceeded` (the precheck's precedence),
-      never silently switched. Then `import_row/2` per row in selection order,
-      stopping at the first failure: committed rows stay, and the same
-      command resumes (they replay, the failed row is retried).
+    - `import/2` calls `import_row/2` per row in selection order, stopping
+      at the first failure: committed rows stay, and the same command resumes
+      (they replay, the failed row is retried). D-272 removes the historical
+      binding-wide contact quota. The immutable policy entry remains binding
+      evidence, but its superseded quota field is never read for admission.
+      The parser's three-row command bound is batching, not a storage limit.
     - `import_row/2` runs ONE `SdrAgent.Audit.transaction/1` per row:
       1. lock the live binding row (`FOR UPDATE`; a lock only), then, holding
          it, run the full live check again (`:binding_mismatch`);
       2. replay: an existing entry for `(dossier_sha256, row_id)` with the
          same manifest, claims and notes digests returns its own entry and
-         lead ids, writes nothing and uses no slot (its importing delegation
+         lead ids and writes nothing (its importing delegation
          stays the historical one); different content is `:dossier_conflict`;
          the same domain or address already imported from any row or dossier
          is `:dossier_conflict`;
-      3. the authoritative cap recheck (`:contact_cap_exceeded`);
-      4. the claims, notes and source-excerpt Payloads, through the scoped
+      3. the claims, notes and source-excerpt Payloads, through the scoped
          store with the exact digests of the bytes being stored;
-      5. the account, contact and lead (Sales);
-      6. the entry and its verified-excerpt sources (Research).
+      4. the account, contact and lead (Sales);
+      5. the entry and its verified-excerpt sources (Research).
 
       Every error inside the callback calls `SdrAgent.Repo.rollback/1`, so a
-      failed row leaves no Sales or Research row, no Payload and no slot. A
+      failed row leaves no Sales or Research row and no Payload. A
       database failure inside a query or an action aborts the transaction;
       its structured rollback (an Ash query, changeset or action input) is
       returned after the rollback as the closed `:import_failed`, never
@@ -87,8 +82,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     (Codex 6d1ead6d option 2, d59fb7a3): Splode formats a non-Ash cause into
     `UnknownError` text, so its type is gone, and it is never recovered from
     that text. No count, code or write follows a raise. It reads only: no
-    write, audit, reservation or output. Never authority: the cap is decided
-    per row under the binding lock.
+    write, audit, reservation or output. Count only, no limit: neither this
+    historical API name nor the summary's `cap_used` field implies a quota.
 
     **Open boundary (Codex d59fb7a3).** A raise from `cap_used/1` is not
     value-free at the task: `Mix.CLI` re-raises a non-Mix exception to
@@ -120,8 +115,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @test_seams Application.compile_env(:sdr_agent, :claude_cli_test_seams, false)
 
-    # The coordinator's own result codes (members of
-    # SdrAgent.Prototype.SafeLog.reasons(:import)).
+    # Closed result codes, including historical contact_cap_exceeded decoding
+    # compatibility (D-272); no current admission path emits that quota code.
     @codes [
       :contact_cap_exceeded,
       :dossier_conflict,
@@ -182,8 +177,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     @spec import([map()], SdrAgent.Actor.t()) :: {:ok, map()} | {:error, map()}
     def import(rows, actor) when is_list(rows) do
       with :ok <- not_nested(),
-           :ok <- live(actor),
-           :ok <- precheck(rows, actor) do
+           :ok <- live(actor) do
         Enum.reduce_while(rows, {:ok, %{imported: [], replayed: []}}, &import_next(&1, &2, actor))
       else
         {:error, code} -> {:error, %{code: code, failed_row: nil, imported: [], replayed: []}}
@@ -238,7 +232,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     # write, and that transaction stays usable.
     defp not_nested, do: if(Repo.in_transaction?(), do: {:error, :import_failed}, else: :ok)
 
-    # After the row's (or the precheck's) transaction has rolled back: one of
+    # After the row's transaction has rolled back: one of
     # this coordinator's codes stays; Ash's structured rollback of a failed
     # query, changeset or action (a database failure inside it, which
     # aborts the transaction) and any other atom are the closed
@@ -251,9 +245,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp closed(%Ash.ActionInput{}), do: :import_failed
 
     @doc """
-    The binding's distinct imported contacts, for the live operator. Any
-    failed count read other than an exact Forbidden raises its original Ash
-    exception; see the moduledoc, including its open boundary.
+    The binding's distinct imported contacts, count only with no limit, for
+    the live operator. Any failed count read other than an exact Forbidden
+    raises its original Ash exception; see the moduledoc, including its open
+    boundary.
     """
     @spec cap_used(SdrAgent.Actor.t()) ::
             {:ok, non_neg_integer()}
@@ -261,8 +256,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def cap_used(actor), do: count_used(actor, [])
 
     # Outside any transaction (refused inside one), so a failed read returns
-    # an error here rather than rolling a caller back by throw; it is not
-    # used/1, whose read/1 rolls the row transaction back. Only an exact
+    # an error here rather than rolling a caller back by throw. Only an exact
     # Forbidden is mapped; any other returned error is raised as the
     # original exception, never classified (a lossy UnknownError carries no
     # type to classify).
@@ -321,22 +315,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
         else: {:error, :not_prototype_runtime}
     end
 
-    ## The binding lock and the cap
-
-    # Early refusal only: it reserves nothing, the per-row recheck decides.
-    defp precheck(rows, actor) do
-      fn ->
-        lock_binding!(actor)
-        new = Enum.count(rows, &(replay_of(&1, actor) != :replay))
-        if used(actor) + new > max_contacts!(), do: Repo.rollback(:contact_cap_exceeded)
-        :ok
-      end
-      |> Audit.transaction()
-      |> case do
-        {:ok, :ok} -> :ok
-        {:error, reason} -> {:error, closed(reason)}
-      end
-    end
+    ## The binding lock and the summary count
 
     # SELECT ... FOR UPDATE of the live binding row: a lock only (its
     # append-only trigger fires on UPDATE), so imports serialize.
@@ -369,36 +348,10 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
-    # The compiled policy entry's binding-wide cap.
-    defp max_contacts! do
-      case Prototype.policy_entry() do
-        {:ok, %{max_contacts: max}} when is_integer(max) and max >= 0 -> max
-        _ -> Repo.rollback(:binding_mismatch)
-      end
-    end
-
-    # Distinct imported contacts: every entry is an operator import into the
-    # binding's one tenant. A kernel read, tenant-filtered.
-    defp used(actor) do
-      {:ok, records} = entries(actor) |> Ash.Query.select([:contact_id]) |> read()
-
-      records
-      |> MapSet.new(& &1.contact_id)
-      |> MapSet.size()
-    end
-
     defp entries(actor) do
       DossierEntry
       |> Ash.Query.for_read(:read, %{}, Kernel.opts(actor.tenant_id))
       |> Ash.Query.filter(tenant_id == ^actor.tenant_id)
-    end
-
-    # :new, :replay or :conflict, by the row key `(dossier_sha256, row_id)`.
-    defp replay_of(row, actor) do
-      case existing(row, actor) do
-        nil -> :new
-        entry -> if identical?(entry, row), do: :replay, else: :conflict
-      end
     end
 
     defp existing(row, actor) do
@@ -434,7 +387,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp new_row(%{plan: plan} = row, actor, seams) do
       with :ok <- no_conflict(plan, actor),
-           :ok <- cap_recheck(actor),
            {:ok, claims} <- store(claims_bytes(row), :dossier_claims, actor),
            {:ok, notes} <- store(notes_bytes(row), :dossier_notes, actor),
            {:ok, account} <-
@@ -481,12 +433,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       |> Ash.Query.limit(1)
       |> read()
       |> then(fn {:ok, records} -> records != [] end)
-    end
-
-    defp cap_recheck(actor) do
-      if used(actor) + 1 > max_contacts!(),
-        do: {:error, :contact_cap_exceeded},
-        else: :ok
     end
 
     defp sources(sources, entry, lead, actor) do

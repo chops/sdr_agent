@@ -1,0 +1,81 @@
+#+TITLE: Unlimited stored companies and contacts (D-272)
+#+DATE: 2026-11-02
+#+STATUS: owner approved; ENTITY and PLAN PASS; GREEN focused 61/61; source review and full gate pending
+
+* Scope and approval
+Owner: "there should not be a limit to the number of contacts or companies.
+get rid of those limits." Follow-up: "get it done today and start right now."
+Remove the binding-wide imported-contact quota. No separate company quota
+exists on this path. Automatic public-web discovery and hosted import
+permissions are separate delivery slices, not claims made by this change.
+
+* Entity model
+Entity Model trigger: yes.
+Reason: removes a persisted-record admission invariant.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+| DossierEntry | Existing delta | Durable imported-row provenance | unchanged | unchanged | No binding-wide maximum distinct contact_id count; identical replay still writes nothing; conflicting rows refused; per-row rollback preserved | Existing live operator and tenant checks unchanged | none |
+| PrototypeDatabaseBinding / historical policy entry | Existing delta | Pin accepted authority identity | Historical max_contacts: 3 retained byte-for-byte | unchanged | Historical field is superseded, never read as runtime admission authority; binding append-only and identity digest unchanged | Existing lock and fresh live authority recheck unchanged | none |
+| Account / Contact / Lead | Existing dependency | Store imported prospects | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | unchanged | Existing domain actions, uniqueness and policy checks retained | unchanged | none |
+Capabilities: ai_pair=true. Reviewer: Claude via correlated peer review
+m_claude_contact_cap_r2_review_20261102, responding to
+m_1793643758254913000_ee765cdb. ENTITY PASS, PLAN PASS (cap-only),
+2026-11-02; review sha256
+5c8bbec37a71e809db6147ae8e9d8fc89f7354bf6b8d81942f9f33ff0823322c.
+
+* Affected modules
+- lib/sdr_agent/prototype/dossier_import.ex: remove precheck/count admission
+  and per-row quota recheck, retain lock/live recheck and count-only cap_used/1.
+- Tests: replace four obsolete quota-refusal expectations, add repeated
+  ten-prospect batches, static no-runtime-reader guard; retain golden entry
+  and historical closed-code decoding controls.
+- docs/sdlc/decisions.md: record owner supersession D-272.
+
+* Steps and acceptance
+1. RED quota admission, concurrent import, direct-row and no-reader tests.
+2. Peer GREEN checkpoint, then remove only quota enforcement and dead helpers.
+3. Update coordinator documentation to distinguish counts from limits.
+4. Focused importer, entry golden and refusal-decoder controls, full gate,
+   independent source review, commit explicit paths and push.
+Acceptance: at least ten distinct prospects through repeated bounded batches;
+replay count unchanged, conflicting/forbidden rows denied; immutable entry
+and binding unchanged; no runtime reader of the superseded field.
+
+* Preserved boundaries and risks
+- Three selected rows per command, artifact byte/depth bounds: operational
+  batching, not storage quotas; unchanged.
+- cap_used API and import_summary key retained as count only; no limit.
+- contact_cap_exceeded stays in closed outcome decoding for historical data;
+  existing ImportOutcomeTest pins that compatibility.
+- Funding: 100 attempts, failures/uncertainties counted, exclusive expiry
+  2026-11-07T07:00Z; subscription CLI only; capture-only; no outreach.
+- No rebind, raw binding UPDATE, schema reset, authorization bypass or digest
+  change. Removing quota does not provide search or fix hosted Payload ACL.
+
+* ADR and architecture evaluation
+No new ADR required: remove the owner-rescinded admission invariant within
+the existing coordinator; no new technology, boundary, actor or runtime flow.
+D-272 supersedes only D-249 F3's quota, retaining its historical entry bytes.
+Architecture unchanged — no diagram update needed.
+
+* Verification
+RED: c3-20261102T184710Z-26151, manifest checks verified, 41 tests,
+35 passing controls, six intended assertion failures (five admissions plus
+AST no-reader guard), no setup/runtime failures. Isolated database pair
+dropped; leases released. Runner launcher rc is not the verdict.
+GREEN checkpoint request: m_1793645272431436000_4815cd27.
+Claude RED PASS + GREEN GO: m_claude_cap_red_review_20261102, 18:58:59Z.
+GREEN: c3-20261102T190013Z-84268, authoritative verdict PASS, runner rc0,
+manifest verified, 61/61 including import, static no-reader, immutable entry
+goldens and historical ImportOutcome/SafeLog decoding. Isolated DBs dropped.
+Removed only precheck/quota recheck and their now-unused helpers. Each row's
+binding lock/fresh authority check and domain transaction remain. The exact
+historical policy entry and every action/policy are unchanged.
+Compile caught private used/1 becoming unused after quota removal: removed
+it as dead quota-only code. cap_used/1 has its own unchanged count_used/2
+read path (different failure semantics), so summary counts are preserved.
+Independent source PASS r2: m_claude_cap_green_source_review_20261102,
+2026-11-02T19:03:28Z. Conditions met: r2 focused c3-20261102T190239Z-96305
+61/61 PASS; compile --warnings-as-errors, format --check-formatted and Credo
+pass (1116 files, no issues). Earlier-decisions heading intentionally groups
+the historical log separately from the newly recorded owner supersession.
+Exact-head full gate remains pending; not yet deployed.
