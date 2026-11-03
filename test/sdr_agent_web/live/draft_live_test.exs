@@ -27,6 +27,14 @@ defmodule SdrAgentWeb.DraftLiveTest do
       assert has_element?(view, "#binding-hash", hex(ctx.revision.content_sha256))
     end
 
+    # Codex m_1793687196231506833_cd48f2a2: the hosted owner sees the step as
+    # unavailable; a reviewer, who may read it, still sees it.
+    test "a reviewer sees the sequence step, never the unavailable marker", %{conn: conn} = ctx do
+      {:ok, view, _html} = open(conn, :reviewer, ctx.draft)
+      assert has_element?(view, "#draft-header", ~r/step \d+ \(/)
+      refute has_element?(view, "#draft-step-unavailable")
+    end
+
     test "clicking a cited sentence shows its evidence claim and source", %{conn: conn} = ctx do
       [citation | _] = citations!(ctx, ctx.revision)
 
