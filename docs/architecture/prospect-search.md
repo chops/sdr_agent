@@ -12,7 +12,10 @@ The limiter monitors both temporary worker and caller, uses a private completion
 capability, and releases permits only on worker death. Cancel, caller death and
 deadline stop the worker before release. A subtree restart never replays an
 uncertain paid operation. A five-second cooldown follows each terminal action;
-transient state resets on restart, not a durable spending limit.
+transient state resets on restart, not a durable spending limit. The subtree is
+a temporary root child: once its own restart intensity is exhausted it stays
+down and search is unavailable until the SDR service restarts; sign-in and
+intake are unaffected.
 
 Only fixed verified-TLS Exa endpoints receive credentials. Provider bodies are
 byte-bounded before decoding. No redirects, automatic retries, enrichment or

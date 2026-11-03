@@ -66,7 +66,12 @@ defmodule SdrAgent.Application do
   end
 
   defp discovery_children do
-    if SdrAgent.Discovery.Config.enabled?(), do: [SdrAgent.Discovery.Supervisor], else: []
+    # ADR-0027 F1: temporary, so an exhausted subtree stays down (search fails
+    # closed as :unavailable until an SDR restart) and never counts against the
+    # root intensity that keeps sign-in and intake up.
+    if SdrAgent.Discovery.Config.enabled?(),
+      do: [Supervisor.child_spec(SdrAgent.Discovery.Supervisor, restart: :temporary)],
+      else: []
   end
 
   # D-237 (IF-8): with the prototype switch set, the content-free SafeLog is

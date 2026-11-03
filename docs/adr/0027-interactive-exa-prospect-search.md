@@ -91,9 +91,12 @@ There is no durable in-app per-request charge/disclosure ledger in v1; only
 value-free telemetry counters/outcomes. The Exa dashboard remains the billing
 record. Reusing the owner-selected SOPS key shares quota and rotation with
 research_harness; a dedicated SDR key is optional, not a delivery prerequisite.
-One permanent search subtree under the existing top one_for_one owns dedicated
+One temporary search subtree under the existing top one_for_one owns dedicated
 Finch, the monitored owner-keyed limiter and Task.Supervisor (one_for_all, its
-own bounded restart intensity). Disabled search starts no subtree and returns
+own bounded restart intensity of 3 in 10s). After that intensity is exhausted
+the subtree stays down and search returns :unavailable until the SDR service
+restarts; it never counts against the root intensity (implementation
+refinement F1; scope, provider and data unchanged). Disabled search starts no subtree and returns
 :unavailable. Repo/Endpoint remain siblings. A subtree restart terminates in-flight tasks and clears its
 transient limiter state; it never retries an uncertain paid request. Cancellation
 or task failure cannot undo a request already received/billed by Exa.
