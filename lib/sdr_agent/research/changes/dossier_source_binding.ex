@@ -16,6 +16,15 @@ defmodule SdrAgent.Research.Changes.DossierSourceBinding do
        source's `checked_at` (the spot-check), `published_at: nil`,
        `freshness: :unknown`, and exactly the ten metadata keys.
 
+  A lead whose origin is an owner intake (ADR-0026) binds instead to exactly
+  one `OwnerProspectSource` of that lead's intake in the live binding whose
+  `url` equals `source_url`, with the same byte rule; the server-owned
+  fields are `provider: :owner_intake`, `trust_level: :unverified`,
+  `retrieved_at` = the source's `submitted_at`, `published_at: nil`,
+  `freshness: :unknown` and exactly the eight owner metadata keys
+  (`retrieved_at_meaning` is `"owner_submitted"`). An owner excerpt is
+  never independent spot-check evidence.
+
   A refusal is a changeset error whose message is the code.
   """
   use Ash.Resource.Change
@@ -29,6 +38,8 @@ defmodule SdrAgent.Research.Changes.DossierSourceBinding do
     alias SdrAgent.Research.DossierEntry
     alias SdrAgent.Research.DossierSource
     alias SdrAgent.Research.DossierSourceRead
+    alias SdrAgent.Research.OwnerProspectIntake
+    alias SdrAgent.Research.OwnerProspectSource
 
     @impl true
     def change(changeset, _opts, _context) do
@@ -42,16 +53,8 @@ defmodule SdrAgent.Research.Changes.DossierSourceBinding do
       content = Ash.Changeset.get_argument(changeset, :content)
 
       with {:ok, binding_id} <- live_binding(tenant_id),
-           {:ok, source, entry} <- source(tenant_id, lead_id, url, binding_id),
-           :ok <- bytes(source, content) do
-        Ash.Changeset.force_change_attributes(changeset, %{
-          provider: :public_dossier,
-          trust_level: :unverified,
-          retrieved_at: source.checked_at,
-          published_at: nil,
-          freshness: :unknown,
-          metadata: metadata(source, entry)
-        })
+           {:ok, fields} <- bound_fields(tenant_id, lead_id, url, content, binding_id) do
+        Ash.Changeset.force_change_attributes(changeset, fields)
       else
         {:error, code} when is_atom(code) ->
           Ash.Changeset.add_error(changeset, field: :source_url, message: Atom.to_string(code))
@@ -70,6 +73,83 @@ defmodule SdrAgent.Research.Changes.DossierSourceBinding do
     end
 
     defp live_binding(_tenant_id), do: {:error, :forbidden}
+
+    # The lead's origin decides the binding; the single-origin triggers keep
+    # a lead from having both.
+    defp bound_fields(tenant_id, lead_id, url, content, binding_id) do
+      case owner_intake(tenant_id, lead_id) do
+        {:ok, nil} ->
+          with {:ok, source, entry} <- source(tenant_id, lead_id, url, binding_id),
+               :ok <- bytes(source, content) do
+            {:ok,
+             %{
+               provider: :public_dossier,
+               trust_level: :unverified,
+               retrieved_at: source.checked_at,
+               published_at: nil,
+               freshness: :unknown,
+               metadata: metadata(source, entry)
+             }}
+          end
+
+        {:ok, intake} ->
+          with {:ok, source} <- owner_source(intake, url, binding_id),
+               :ok <- bytes(source, content) do
+            {:ok,
+             %{
+               provider: :owner_intake,
+               trust_level: :unverified,
+               retrieved_at: source.submitted_at,
+               published_at: nil,
+               freshness: :unknown,
+               metadata: owner_metadata(source, intake)
+             }}
+          end
+
+        {:error, error} ->
+          {:error, error}
+      end
+    end
+
+    defp owner_intake(tenant_id, lead_id) when is_binary(lead_id) do
+      OwnerProspectIntake
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+      |> Ash.Query.filter(tenant_id == ^tenant_id and lead_id == ^lead_id)
+      |> Ash.read_one()
+    end
+
+    defp owner_intake(_tenant_id, _lead_id), do: {:ok, nil}
+
+    defp owner_source(%{binding_id: binding_id} = intake, url, binding_id) when is_binary(url) do
+      OwnerProspectSource
+      |> Ash.Query.for_read(:read, %{}, Kernel.opts(intake.tenant_id))
+      |> Ash.Query.filter(
+        tenant_id == ^intake.tenant_id and intake_id == ^intake.id and
+          lead_id == ^intake.lead_id and url == ^url
+      )
+      |> Ash.read()
+      |> case do
+        {:ok, [source]} -> {:ok, source}
+        {:ok, []} -> {:error, :owner_source_missing}
+        {:ok, _many} -> {:error, :owner_source_ambiguous}
+        {:error, error} -> {:error, error}
+      end
+    end
+
+    defp owner_source(_intake, _url, _binding_id), do: {:error, :owner_source_missing}
+
+    defp owner_metadata(source, intake) do
+      %{
+        "owner_source_id" => source.id,
+        "owner_intake_id" => intake.id,
+        "source_id" => source.source_key,
+        "submission_sha256" => Base.encode16(intake.submission_sha256, case: :lower),
+        "final_url" => source.url,
+        "source_type" => Atom.to_string(source.source_type),
+        "retrieved_on" => Date.to_iso8601(source.retrieved_on),
+        "retrieved_at_meaning" => "owner_submitted"
+      }
+    end
 
     defp source(tenant_id, lead_id, url, binding_id)
          when is_binary(lead_id) and is_binary(url) do

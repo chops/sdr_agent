@@ -7,9 +7,10 @@ defmodule SdrAgent.SDR.Actions.SearchCompany do
   the "pages" step.
 
   D-237 prototype runtime (supplement 1 r2 section 6a, Codex C1 ruling):
-  no search adapter is called. Every dossier source of the run's lead
-  entry other than the website (already recorded) is read through
-  `SdrAgent.Research.read_dossier_sources/4` and recorded once, unchanged;
+  no search adapter is called. Every source of the run's lead's one
+  origin (dossier entry or owner intake) other than the website (already
+  recorded) is read through
+  `SdrAgent.Research.read_lead_sources/4` and recorded once, unchanged;
   no URL is returned, so the "pages" step records nothing twice.
   """
   use SdrAgent.SDR.Action,
@@ -37,7 +38,7 @@ defmodule SdrAgent.SDR.Actions.SearchCompany do
     end
 
     defp dossier(ctx, lead_id, website_url) do
-      with {:ok, sources} <- Research.read_dossier_sources(ctx.run_id, lead_id, :all, ctx.actor),
+      with {:ok, sources} <- Research.read_lead_sources(ctx.run_id, lead_id, :all, ctx.actor),
            {:ok, recorded} <-
              record_sources(
                ctx,

@@ -24,9 +24,13 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
   use SdrAgent.PrototypeCase, async: false
 
   alias SdrAgent.Actor
+  alias SdrAgent.Agents
+  alias SdrAgent.AgentsFixtures
   alias SdrAgent.Audit.Checks.DossierSourceScope
   alias SdrAgent.Audit.Checks.PrototypeReviewScope
   alias SdrAgent.Audit.Payload
+  alias SdrAgent.DossierFixtures
+  alias SdrAgent.PrototypeOutreachFixtures
 
   defp stored!(fx, content) do
     {:ok, payload} =
@@ -76,6 +80,27 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
     )
   end
 
+  defp imported_source!(fx, agent) do
+    assert match?({:ok, _}, SdrAgent.Prototype.Seed.run(DossierFixtures.seed_read(), fx.actor))
+    [row] = DossierFixtures.route_rows!([DossierFixtures.company(1)], ["row-1"])
+
+    {:ok, :imported, %{lead_id: lead_id, entry_id: entry_id}} =
+      SdrAgent.Prototype.DossierImport.import_row(row, fx.actor)
+
+    attrs =
+      fx.tenant
+      |> AgentsFixtures.definition!()
+      |> AgentsFixtures.run_attrs()
+      |> Map.put(:lead_id, lead_id)
+
+    {:ok, run} = Agents.create_run(attrs, actor: agent)
+    {:ok, run} = Agents.start_run(run, actor: agent)
+    # Setup read only; never the subject.
+    {:ok, sources} = Ash.read(SdrAgent.Research.DossierSource, authorize?: false)
+    source = sources |> Enum.filter(&(&1.entry_id == entry_id)) |> Enum.min_by(& &1.source_id)
+    %{run: run, lead_id: lead_id, entry_id: entry_id, sha: source.content_sha256}
+  end
+
   defp review_scope(fx, sha256s),
     do:
       PrototypeReviewScope.context(%{
@@ -86,15 +111,19 @@ defmodule SdrAgent.Prototype.PayloadReadScopeTest do
 
   describe ":read_dossier_source_content" do
     test "allow: the agent runtime reads a source of its scope; payload_view under its identity" do
+      # The scope names a real running run, its lead's imported entry and
+      # one of that entry's source hashes: the check revalidates all of
+      # them (owner intake T2), so a made-up run/lead/entry would refuse.
       fx = bound!()
-      sha = stored!(fx, "Synthetic company page for acme1.test.")
+      PrototypeOutreachFixtures.enter_window!(fx)
       agent = Actor.system(:agent_runtime, fx.tenant.id)
+      %{run: run, lead_id: lead_id, entry_id: entry_id, sha: sha} = imported_source!(fx, agent)
 
-      result = read(:read_dossier_source_content, sha, agent, source_scope(fx, [sha]))
+      scope =
+        source_scope(fx, [sha], %{agent_run_id: run.id, lead_id: lead_id, entry_id: entry_id})
 
-      assert result == {:ok, "Synthetic company page for acme1.test."},
-             "read: #{inspect(result)}"
-
+      assert {:ok, bytes} = read(:read_dossier_source_content, sha, agent, scope)
+      assert :crypto.hash(:sha256, bytes) == sha
       assert accesses(agent.id, "d237_dossier_source") == 1
     end
 

@@ -45,6 +45,7 @@ defmodule SdrAgentWeb.DraftLive do
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
+  alias SdrAgentWeb.Provenance
   alias SdrAgentWeb.Scope
 
   @impl true
@@ -59,6 +60,7 @@ defmodule SdrAgentWeb.DraftLive do
        citation: nil,
        cited_claim: nil,
        cited_artifact: nil,
+       owner_cited?: false,
        editing?: false,
        review_error: nil,
        newer_revision?: false,
@@ -166,6 +168,7 @@ defmodule SdrAgentWeb.DraftLive do
         citations: Map.new(citations, &{&1.id, &1}),
         claims: Map.new(claims, &{&1.id, &1}),
         artifacts: Map.new(artifacts, &{&1.id, &1}),
+        owner_cited?: owner_cited?(citations, claims, artifacts),
         diff: diff_lines(current.diff_from_ai_baseline),
         contact: contact,
         account: account,
@@ -374,6 +377,18 @@ defmodule SdrAgentWeb.DraftLive do
     end
   end
 
+  # True when any citation of the current revision rests on owner-supplied
+  # evidence (citation -> claim -> artifact provider).
+  defp owner_cited?(citations, claims, artifacts) do
+    claims = Map.new(claims, &{&1.id, &1})
+    artifacts = Map.new(artifacts, &{&1.id, &1})
+
+    citations
+    |> Enum.map(&claims[&1.evidence_claim_id])
+    |> Enum.map(&(&1 && artifacts[&1.research_artifact_id]))
+    |> Provenance.any_owner_supplied?()
+  end
+
   defp cite(socket, nil), do: assign(socket, citation: nil, cited_claim: nil, cited_artifact: nil)
 
   defp cite(socket, citation) do
@@ -455,6 +470,18 @@ defmodule SdrAgentWeb.DraftLive do
       <.loading :if={!@loaded? and !@not_found? and is_nil(@withheld)} />
 
       <div :if={@loaded?} class="space-y-6">
+        <div
+          :if={@owner_cited?}
+          id="owner-supplied-evidence"
+          role="note"
+          class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+        >
+          <.icon name="hero-exclamation-triangle" class="mt-0.5 size-4 shrink-0" />
+          <p>
+            This draft cites evidence the owner typed in. It is owner-supplied and has not been
+            independently verified.
+          </p>
+        </div>
         <.page_header id="draft-header" eyebrow={"#{@account.name} · #{@campaign.name}"}>
           {ConsoleData.contact_name(@contact)}
           <.badge status={@draft.status} class="ml-2 align-middle" />
@@ -795,7 +822,13 @@ defmodule SdrAgentWeb.DraftLive do
                 >
                   {@cited_claim.quote}
                 </blockquote>
-                <dl :if={@cited_artifact} class="divide-y divide-zinc-100">
+                <dl :if={@cited_artifact}
+                  data-provider={@cited_artifact.provider}
+                  class="divide-y divide-zinc-100"
+                >
+                  <div :if={Provenance.owner_supplied?(@cited_artifact)} class="py-2">
+                    <Provenance.label artifact={@cited_artifact} />
+                  </div>
                   <.field label="Source">
                     <a
                       href={@cited_artifact.source_url}

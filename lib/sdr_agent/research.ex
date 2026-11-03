@@ -86,6 +86,18 @@ defmodule SdrAgent.Research do
   def read_dossier_sources(agent_run_id, lead_id, selector, actor),
     do: SdrAgent.Research.DossierSourceRead.read(agent_run_id, lead_id, selector, actor)
 
+  @doc """
+  AGT (ADR-0026): the sources of run `agent_run_id`'s lead, from its ONE
+  input origin (a dossier entry or an owner intake), each read through its
+  scoped, audited Payload action. `selector` is `:all` or
+  `{:final_url, url}`. Prototype runtime only; see
+  `SdrAgent.Research.LeadSourceRead` for the checks and codes.
+  """
+  @spec read_lead_sources(term(), term(), :all | {:final_url, String.t()}, term()) ::
+          {:ok, [map()]} | {:error, term()}
+  def read_lead_sources(agent_run_id, lead_id, selector, actor),
+    do: SdrAgent.Research.LeadSourceRead.read(agent_run_id, lead_id, selector, actor)
+
   @doc "AGT: records a grounded claim; `content` must be the artifact's stored content."
   def record_claim(attrs, opts) do
     GuardedCall.create(EvidenceClaim, :record, attrs, subject(opts, attrs, :research_artifact_id))

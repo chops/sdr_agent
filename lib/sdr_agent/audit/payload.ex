@@ -35,6 +35,11 @@ defmodule SdrAgent.Audit.Payload do
       (`SdrAgent.Audit.Checks.DossierSourceScope`): the sources of its run's
       lead entry. A fail-closed `payload_view` access under AGT's own
       identity, purpose `d237_dossier_source`.
+    * `:read_owner_intake_source_content` — ADR-0026: AGT only, in the live
+      binding, inside the scope `SdrAgent.Research.OwnerIntakeSourceRead`
+      builds (`SdrAgent.Audit.Checks.OwnerIntakeSourceScope`): the exact
+      excerpts of its run's lead intake. A fail-closed `payload_view` access
+      under AGT's own identity, purpose `owner_intake_source`.
     * `:read_prototype_review_content` — D-237: the prototype operator only,
       inside the scope `SdrAgent.Prototype.Output` builds
       (`SdrAgent.Audit.Checks.PrototypeReviewScope`): one receipt's rendered
@@ -214,6 +219,22 @@ defmodule SdrAgent.Audit.Payload do
       end
     end
 
+    # ADR-0026: AGT reads one owner-supplied excerpt of its run's lead intake,
+    # inside the scope `Research.OwnerIntakeSourceRead` builds.
+    action :read_owner_intake_source_content, :binary do
+      description "AGT (ADR-0026): return one scoped owner intake excerpt, recording a payload_view first."
+      transaction? false
+      argument :sha256, :binary, allow_nil?: false
+
+      run fn input, context ->
+        SdrAgent.Audit.Kernel.read_content(
+          input.arguments.sha256,
+          Checks.OwnerIntakeSourceScope.purpose(),
+          context.actor
+        )
+      end
+    end
+
     # D-237 (interfaces r6 R4): the operator reads one receipt's rendered
     # payload, inside the scope `Prototype.Output` builds.
     action :read_prototype_review_content, :binary do
@@ -269,6 +290,10 @@ defmodule SdrAgent.Audit.Payload do
 
     policy action(:read_dossier_source_content) do
       authorize_if Checks.DossierSourceScope
+    end
+
+    policy action(:read_owner_intake_source_content) do
+      authorize_if Checks.OwnerIntakeSourceScope
     end
 
     policy action(:read_prototype_review_content) do
