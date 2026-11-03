@@ -1,6 +1,6 @@
 #+TITLE: Owner self-service prospect intake
 #+DATE: 2026-11-03
-#+STATUS: APPROVED scope; final combined source gate pending
+#+STATUS: DEPLOYED 542fc2f5; qualified gate (14 inherited failures, zero new)
 
 * Summary / owner approval
 Owner-only website form: company/contact + 1..3 source excerpts, preview,
@@ -216,4 +216,29 @@ the passing run. No hosted migration has run.
 - Final combined exact-head gate and independent source verdict remain
   pending. No hosted migration, restart, deployment, intake, assignment,
   model call, outreach, password operation or worker-intake change occurred.
+
+* Hosted deployment completion (2026-11-03)
+The preceding pending status is historical; this section supersedes it.
+- Source/deployed revision542fc2f593eb4729b9237b7a40157777a56581aa.
+  Final gate c6-20261103T064835Z-83695 measured FAIL:6289/6303 passed,
+  14 inherited failures and zero new failure names;1 skipped,42 excluded.
+  Workflow/format/WAE/codegen/configured Credo/audit passed. Not a clean gate PASS.
+- Owner explicitly applied the existing backup exception to Add prospect's
+  database migration, with no new backup prerequisite. Exact-byte independent
+  QUALIFIED GO: m_1793719005313110_df8a8d8e, review34138cda.
+- Existing artifact24eab604 deployed once without a rebuild. Canonical schema
+  migration38->39 and grants/ACL attestation passed (infra06dc940,95 triggers).
+  All67 old table counts and audit heads unchanged during migration/bootcheck;
+  both new owner tables empty. App-role readonly exact27-privilege check passed.
+- Only sdr-agent.service restarted; live revision independently verified,
+  health/sign-in/assets HTTP200, anonymous /leads302 to /sign-in. Accounts5,
+  leads5, agent runs4, remote calls4. No real prospect/model/assignment smoke
+  action; authenticated browser/reconnect flow not live-tested. Source tests
+  provide coverage, not evidence of a live authenticated submission.
+- Prior executable and artifact retained; no rollback needed. Executable rollback
+  on schema39 remains untested/feature-degraded; canonical39/95 remains in force.
+  No down migration, backup change, worker toggle, password action or outreach.
+- Detailed local receipt: /Users/charles/.local/state/sdr-agent/
+  owner-intake-rollout-20261103.NMl5HUoc/receipt.org, with exact input/log hashes.
+- No new architecture changes during rollout; maintained diagrams unchanged.
 
