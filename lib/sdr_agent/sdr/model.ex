@@ -31,7 +31,10 @@ defmodule SdrAgent.SDR.Model do
 
   **Remote calls (S-B4).** Under the `:remote` transport the facade returns
   `%{remote: invocation}` with no output. The output is then only the result
-  gate's own read of the released invocation; an ungated invocation halts
+  gate's own read of the released invocation, re-parsed with the purpose's
+  schema (`reparse_released/3`) so consumers get the same atom-keyed output
+  as in process; a read that fails it fails the run `:invalid_model_output`.
+  An ungated invocation halts
   `:result_not_released`, a withheld one with the gate's stop, and a wait
   past the bound fails the run `:provider_error` (`remote_wait_timeout`).
   A late result is settled once by the RemoteSettler, never used by the run.
@@ -76,7 +79,7 @@ defmodule SdrAgent.SDR.Model do
       ctx
       |> request(run, request_id, purpose, input)
       |> ModelProvider.complete(ctx.model)
-      |> settle(ctx, run)
+      |> settle(ctx, run, purpose)
     end
   end
 
@@ -155,18 +158,21 @@ defmodule SdrAgent.SDR.Model do
   defp exhaust("token_budget_exhausted", ctx, run), do: halt_budget(ctx, run, :run_budget_tokens)
   defp exhaust("daily_budget_exhausted", ctx, run), do: halt_budget(ctx, run, :daily_budget)
 
+  # S-B4: a remote call carries no output. The business output is only the
+  # result gate's own read (`ReleasedOutput.fetch/2` in both gate branches),
+  # re-parsed with the purpose's schema; the other clauses ignore `purpose`.
+  defp settle({:ok, %{remote: invocation}}, ctx, run, purpose) do
+    if ReleasedOutput.gated?(invocation),
+      do: remote_gate(invocation, ctx, run, purpose),
+      else: {:error, {:halt, :result_not_released}}
+  end
+
+  defp settle(result, ctx, run, _purpose), do: settle(result, ctx, run)
+
   defp settle({:ok, %{output: output, invocation: invocation}}, _ctx, run) do
     if ReleasedOutput.gated?(invocation),
       do: gate(invocation, output, run),
       else: {:ok, output, invocation}
-  end
-
-  # S-B4: a remote call carries no output. The business output is only the
-  # result gate's own read (`ReleasedOutput.fetch/2` in both gate branches).
-  defp settle({:ok, %{remote: invocation}}, _ctx, run) do
-    if ReleasedOutput.gated?(invocation),
-      do: remote_gate(invocation, run),
-      else: {:error, {:halt, :result_not_released}}
   end
 
   defp settle({:error, {:budget_exhausted, :daily}}, ctx, run),
@@ -195,11 +201,50 @@ defmodule SdrAgent.SDR.Model do
     end
   end
 
-  defp remote_gate(invocation, run) do
+  # The released read is stored JSON (string keys); consumers get exactly the
+  # atom-keyed shape the in-process path returns, or the run fails closed.
+  defp remote_gate(invocation, ctx, run, purpose) do
     case ResultGate.gate(invocation, %{run_id: run.id, operation_id: run.operation_id}) do
-      {:released, _release, read} -> {:ok, read, invocation}
-      {:withheld, release, stopped} -> {:error, {:halt, stopped.status_reason || release.reason}}
-      {:error, _reason} -> {:error, {:halt, :result_not_released}}
+      {:released, _release, read} ->
+        case reparse_released(purpose, invocation, read) do
+          {:ok, output} ->
+            {:ok, output, invocation}
+
+          {:error, _reason} ->
+            halt_fail(ctx, run, :invalid_model_output, "model output failed schema validation")
+        end
+
+      {:withheld, release, stopped} ->
+        {:error, {:halt, stopped.status_reason || release.reason}}
+
+      {:error, _reason} ->
+        {:error, {:halt, :result_not_released}}
+    end
+  end
+
+  @doc """
+  Internal normalization of a remote output that the result gate has
+  ALREADY released (its `ReleasedOutput.fetch/2` read: stored JSON with
+  string keys) into the atom-keyed output the in-process path returns.
+  Grants no read and bypasses no release or authority check: it only
+  re-parses bytes the caller already holds.
+
+  The invocation's recorded `output_schema_sha256` must equal
+  `Schemas.ref(purpose).sha256`, else `{:error, :schema_mismatch}`. The read
+  is parsed with `Schemas.for_purpose(purpose)` (keys known to that schema
+  only; no generic string-to-atom conversion); anything but a plain map
+  result is `{:error, :invalid_output}`.
+  """
+  @spec reparse_released(atom(), %{output_schema_sha256: binary()}, term()) ::
+          {:ok, map()} | {:error, :schema_mismatch | :invalid_output}
+  def reparse_released(purpose, %{output_schema_sha256: sha256}, read) do
+    if sha256 == Schemas.ref(purpose).sha256 do
+      case Zoi.parse(Schemas.for_purpose(purpose), read) do
+        {:ok, output} when is_map(output) and not is_struct(output) -> {:ok, output}
+        _invalid -> {:error, :invalid_output}
+      end
+    else
+      {:error, :schema_mismatch}
     end
   end
 
