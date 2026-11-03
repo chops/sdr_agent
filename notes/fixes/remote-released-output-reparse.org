@@ -1,0 +1,105 @@
+#+TITLE: Fix: remote model output reaches consumers with string keys
+#+DATE: 2026-11-03
+
+* Summary
+Under the trusted =:remote= model transport, =SdrAgent.SDR.Model.call/4=
+returns the result gate's released read (=row.parsed_output=, jsonb, string
+keys), while every consumer reads atom keys; the fix re-parses the released
+read with the purpose's own Zoi schema after the gate.
+
+Approved plan r1 =T/claude-remote-output-reparse-plan-r1-20261103.org=
+sha256 c77fa9cc83bfdf44a4d85013faf12067f9957b83ba50259092c1f5f9179f773e;
+Codex technical PASS m_codex_reparse_plan_review_20261103; owner GO for
+fix + D-271 deploy + one Rystic capture-only run relayed in
+m_1793678019872586250_60353770.
+
+* Entity Model
+
+#+BEGIN_EXAMPLE
+Entity Model trigger: no
+Reason: no persisted concept, attribute, relationship, policy, lifecycle or
+action contract changes; the facade's in-memory return shape for :remote
+becomes the shape the in-process path already returns.
+#+END_EXAMPLE
+
+ADR: none (bug fix inside the accepted S-B4 boundary). Diagrams: none.
+
+* Root Cause
+=model.ex= =remote_gate/2= returns ={:ok, read, invocation}= where =read= is
+=ReleasedOutput.fetch/2= → =row.parsed_output= (jsonb: string keys). The
+in-process path returns the Zoi-parsed atom-keyed output from
+=ModelProvider.validate_result/3=. All four consumers use atom access:
+- =build_evidence_bundle.ex:78-79= (=output.claims=, then =claim.source= …)
+- =score_lead.ex= (=output.evidence_ids=, …)
+- =draft_email.ex:45=
+- =classify_reply.ex:41=
+Hosted Trope run 01a19f64-90b5-7fbf-84c9-8f71fbb2542c failed =:crash=
+={:exception, KeyError}= at its first model result (receipt
+trope-terminal-20261103.xA9zdXi3/receipt.org 80e3d7cf; root cause
+claude-trope-run-keyerror-rootcause-20261103.org 250b2631). The existing
+remote end-to-end test accepted either key form (=output["score"] ||
+output[:score]=), so it did not catch this.
+
+* Reproduction
+=test/sdr_agent/sdr/remote_output_reparse_test.exs= (RED below).
+
+* Affected Apps
+- [X] Core (=sdr_agent=)
+- [ ] Web (=sdr_agent_web=)
+
+* Affected Modules
+- =lib/sdr_agent/sdr/model.ex= only:
+  1. =call/4= passes =purpose= to =settle= for the remote clause.
+  2. New =reparse_released/3= (=@doc=, public for direct coverage of its
+     two refusals): =invocation.output_schema_sha256 ==
+     Schemas.ref(purpose).sha256= else ={:error, :schema_mismatch}=;
+     =Zoi.parse(Schemas.for_purpose(purpose), read)= → a plain map (not a
+     struct) ={:ok, parsed}= else ={:error, :invalid_output}=. No generic
+     string→atom conversion.
+  3. =remote_gate= after ={:released, _, read}=: ={:ok, parsed, invocation}=,
+     else =halt_fail(ctx, run, :invalid_model_output, "model output failed
+     schema validation")= (same reason/detail as the in-process
+     =validation_failed= settle clause).
+- Unchanged: =ResultGate=, =ReleasedOutput=, the in-process path, the four
+  consumers, =DecisionRules= (JsonPointer over string keys), release
+  authorization, withheld/unreleased handling.
+
+Refinement over r1 (for the 4a review): the reparse is exposed as
+=Model.reparse_released/3= so the schema-mismatch and invalid-map refusals
+are covered directly (Codex condition 2). Neither refusal is reachable end
+to end without tampering an immutable/bound invocation row
+(=output_schema_sha256= is trigger-immutable; =parsed_output= is bound by
+the released scope's record hash), and no trigger-off fixture is allowed.
+
+* Fix Steps
+1. RED: tests below fail for the missing behavior (UndefinedFunctionError
+   for =reparse_released/3=; KeyError at the consumer access for the
+   remote end-to-end tests).
+2. Codex 4a→4b GO.
+3. GREEN: =model.ex= change above only.
+4. Full gate (format, WAE compile, credo, full suite vs baseline), Codex
+   source review, hand to Codex for build/deploy under D-271.
+
+* Required Tests
+- [ ] T1 JSON roundtrip: each of the four purpose schemas, atom output →
+      JSON → string map → =reparse_released/3= = the atom-keyed output.
+- [ ] T1b no atom minting: an unknown string key never becomes an atom.
+- [ ] T2 remote evidence consumer access: =Model.call(:evidence_extraction)=
+      under =:remote=, then the consumer's own access (=output.claims=,
+      =claim.source/quote/quality=) succeeds.
+- [ ] T3 remote qualification consumer access (=score=, =criteria=,
+      =evidence_ids=).
+- [ ] T4 withheld/unreleased stay halts with no output: existing
+      =remote_provider_test.exs= "a withheld result gives the caller no
+      business output" (run in the same lane; must stay green).
+- [ ] T5a schema-sha mismatch → ={:error, :schema_mismatch}=.
+- [ ] T5b invalid released map (out-of-range, missing key, non-map) →
+      ={:error, :invalid_output}=.
+Synthetic completions only; no model, CLI or network.
+
+Deviation from r1 T2 wording ("reaches the evidence_quality Decisions and
+evidence_claims"): T2 asserts the consumer's exact access pattern on the
+facade's remote return, not a full BuildEvidenceBundle run; a full remote
+action run needs SDRCase lead/settings fixtures combined with the hosted
+Mac-worker world, which no existing harness provides. Raised for Codex's
+4a decision.
