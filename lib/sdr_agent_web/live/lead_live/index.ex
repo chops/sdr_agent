@@ -7,6 +7,16 @@ defmodule SdrAgentWeb.LeadLive.Index do
   (`SdrAgentWeb.LeadLive.OwnerIntakePanel`, ADR-0026), which previews and
   saves through `SdrAgent.Prototype.OwnerIntake`. Every event rechecks the
   owner, and the preview stays in server assigns.
+
+  When `SdrAgent.Prototype.ProspectSearch` is available, the owner also gets
+  the company-first "Find prospects" search (ADR-0027,
+  `SdrAgentWeb.LeadLive.ProspectSearchPanel`). Search results arrive as
+  `{:prospect_search_result, id, outcome}`; only the active request's result
+  is used, after a fresh owner check. Cards, the confirmed company and the
+  company page stay in server assigns, and events carry only a card id and
+  explicit owner input. Pre-fill (`SdrAgentWeb.LeadLive.IntakePrefill`) only
+  fills the Add prospect form; saving still needs the owner's preview and
+  save.
   """
   use SdrAgentWeb, :live_view
 
@@ -14,17 +24,20 @@ defmodule SdrAgentWeb.LeadLive.Index do
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LeadLive.OwnerIntakePanel
+  alias SdrAgentWeb.LeadLive.ProspectSearchPanel
   alias SdrAgentWeb.Scope
 
   @filters ~w(new assigned researching qualifying qualified disqualified in_outreach replied stopped blocked)
+  @search_events ~w(search_open search_close search_companies search_cancel select_company change_company confirm_company search_people get_company_page prefill)
 
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
      socket
      |> assign(page_title: "Leads", loaded?: false, withheld: nil, status: nil, filters: @filters)
-     |> assign(owner?: false)
+     |> assign(owner?: false, search_available?: false)
      |> reset_intake(false)
+     |> reset_search(false)
      |> stream(:leads, [])}
   end
 
@@ -64,8 +77,10 @@ defmodule SdrAgentWeb.LeadLive.Index do
           }
         end)
 
+      owner? = Scope.hosted_owner?(scope)
+
       socket
-      |> assign(owner?: Scope.hosted_owner?(scope))
+      |> assign(owner?: owner?, search_available?: owner? and search_available?(scope))
       |> assign(loaded?: true, withheld: nil, count: length(rows))
       |> stream(:leads, rows, reset: true)
     else
@@ -81,6 +96,8 @@ defmodule SdrAgentWeb.LeadLive.Index do
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     alias SdrAgent.Prototype.OwnerIntake
+    alias SdrAgent.Prototype.ProspectSearch
+    alias SdrAgentWeb.LeadLive.IntakePrefill
 
     @impl true
     def handle_event("intake_open", _params, socket),
@@ -147,6 +164,183 @@ defmodule SdrAgentWeb.LeadLive.Index do
       end
     end
 
+    ## Website prospect search (ADR-0027)
+
+    def handle_event(event, params, socket) when event in @search_events do
+      user = socket.assigns.current_scope.user
+
+      if search_api().authorized?(user),
+        do: {:noreply, search_event(event, params, user, socket)},
+        else: {:noreply, refuse_search(socket)}
+    end
+
+    @impl true
+    def handle_info({:prospect_search_result, id, outcome}, socket) do
+      case socket.assigns.search do
+        %{id: ^id, kind: kind} ->
+          if search_api().authorized?(socket.assigns.current_scope.user),
+            do: {:noreply, apply_result(assign(socket, search: nil), kind, outcome)},
+            else: {:noreply, refuse_search(socket)}
+
+        _other ->
+          {:noreply, socket}
+      end
+    end
+
+    def handle_info(_message, socket), do: {:noreply, socket}
+
+    defp search_event("search_open", _params, _user, socket), do: reset_search(socket, true)
+
+    defp search_event("search_close", _params, user, socket),
+      do: socket |> cancel_pending(user) |> reset_search(false)
+
+    defp search_event("search_cancel", _params, user, socket), do: cancel_pending(socket, user)
+
+    defp search_event("search_companies", %{"search" => %{"query" => q}}, user, socket)
+         when is_binary(q) do
+      socket
+      |> cancel_pending(user)
+      |> assign(companies: [], selected: nil, company_context: nil)
+      |> assign(people: [], company_source: nil)
+      |> start(user, %{kind: :company, query: q})
+    end
+
+    defp search_event("select_company", %{"id" => id}, user, socket) when is_binary(id) do
+      case Enum.find(socket.assigns.companies, &(&1.id == id)) do
+        nil ->
+          socket
+
+        company ->
+          socket
+          |> cancel_pending(user)
+          |> assign(selected: company, company_context: nil, people: [], company_source: nil)
+          |> assign(search_error: nil)
+      end
+    end
+
+    defp search_event("change_company", _params, user, socket) do
+      socket
+      |> cancel_pending(user)
+      |> assign(selected: nil, company_context: nil, people: [], company_source: nil)
+    end
+
+    defp search_event("confirm_company", %{"company" => input}, user, socket)
+         when is_map(input) do
+      socket = cancel_pending(socket, user)
+
+      with %{} = selected <- socket.assigns.selected,
+           %{"website_url" => url, "domain" => domain} when is_binary(url) and is_binary(domain) <-
+             input,
+           {:ok, context} <-
+             search_api().company_context(user, selected, %{website_url: url, domain: domain}) do
+        assign(socket,
+          company_context: context,
+          people: [],
+          company_source: nil,
+          search_error: nil
+        )
+      else
+        {:error, code} -> assign(socket, search_error: code)
+        _refused -> assign(socket, search_error: :invalid_input)
+      end
+    end
+
+    defp search_event("search_people", %{"people" => %{"query" => q}}, user, socket)
+         when is_binary(q) do
+      case socket.assigns.company_context do
+        nil ->
+          socket
+
+        context ->
+          socket
+          |> cancel_pending(user)
+          |> assign(people: [])
+          |> start(user, %{kind: :people, query: q, company: context})
+      end
+    end
+
+    defp search_event("get_company_page", _params, user, socket) do
+      case socket.assigns.company_context do
+        nil ->
+          socket
+
+        context ->
+          socket
+          |> cancel_pending(user)
+          |> assign(company_source: nil)
+          |> start(user, %{kind: :contents, company: context})
+      end
+    end
+
+    defp search_event("prefill", %{"id" => id}, _user, socket) when is_binary(id) do
+      %{people: people, company_context: context, company_source: source} = socket.assigns
+
+      with %{} = person <- Enum.find(people, &(&1.id == id)),
+           {:ok, params} <- IntakePrefill.build(person, context, source) do
+        rows = params["sources"] |> Map.keys() |> Enum.map(&String.to_integer/1) |> Enum.sort()
+
+        # A fresh form: any earlier preview is dropped, so only a new preview can be saved.
+        socket
+        |> reset_intake(true)
+        |> assign(intake_form: to_form(params, as: :intake), source_rows: rows)
+        |> assign(search_error: nil)
+      else
+        nil -> socket
+        {:error, code} -> assign(socket, search_error: code)
+      end
+    end
+
+    defp search_event(_event, _params, _user, socket), do: socket
+
+    defp start(socket, user, request) do
+      case search_api().start(user, request) do
+        {:ok, id} -> assign(socket, search: %{id: id, kind: request.kind}, search_error: nil)
+        {:error, code} -> assign(socket, search: nil, search_error: code)
+      end
+    end
+
+    # Cancels the active request; a late result for it no longer matches `search`.
+    defp cancel_pending(socket, user) do
+      case socket.assigns.search do
+        %{id: id} -> search_api().cancel(user, id)
+        nil -> :ok
+      end
+
+      assign(socket, search: nil)
+    end
+
+    defp apply_result(socket, :company, {:ok, %{kind: :company, candidates: candidates}})
+         when is_list(candidates),
+         do: assign(socket, companies: candidates, search_error: nil)
+
+    defp apply_result(socket, :people, {:ok, %{kind: :people, candidates: candidates}})
+         when is_list(candidates),
+         do: assign(socket, people: candidates, search_error: nil)
+
+    defp apply_result(socket, :contents, {:ok, %{kind: :contents, source: %{} = source}}),
+      do: assign(socket, company_source: source, search_error: nil)
+
+    defp apply_result(socket, _kind, {:error, code}) when is_atom(code),
+      do: assign(socket, search_error: code)
+
+    defp apply_result(socket, _kind, _outcome),
+      do: assign(socket, search_error: :invalid_response)
+
+    defp search_available?(scope) do
+      api = search_api()
+
+      # Fail closed when the backend facade is absent from this build.
+      Code.ensure_loaded?(api) and function_exported?(api, :available?, 1) and
+        api.available?(scope.user)
+    end
+
+    if Application.compile_env(:sdr_agent, :claude_cli_test_seams, false) do
+      defp search_api,
+        do: Application.get_env(:sdr_agent, :prospect_search_ui_adapter, ProspectSearch)
+    else
+      defp search_api, do: ProspectSearch
+    end
+
     defp commit(socket, params, preview) do
       case OwnerIntake.commit(params, preview, socket.assigns.current_scope.user) do
         {:ok, mode, %{lead_id: lead_id}} when mode in [:created, :replay] ->
@@ -168,6 +362,34 @@ defmodule SdrAgentWeb.LeadLive.Index do
     def handle_event(event, _params, socket)
         when event in ~w(intake_open intake_close intake_change intake_add_source intake_preview intake_commit),
         do: {:noreply, refuse_intake(socket)}
+
+    def handle_event(event, _params, socket) when event in @search_events,
+      do: {:noreply, refuse_search(socket)}
+
+    @impl true
+    def handle_info(_message, socket), do: {:noreply, socket}
+
+    defp search_available?(_scope), do: false
+  end
+
+  defp refuse_search(socket),
+    do:
+      socket
+      |> reset_search(false)
+      |> reset_intake(false)
+      |> assign(owner?: false, search_available?: false)
+
+  defp reset_search(socket, open?) do
+    assign(socket,
+      search_open?: open?,
+      search: nil,
+      search_error: nil,
+      companies: [],
+      selected: nil,
+      company_context: nil,
+      people: [],
+      company_source: nil
+    )
   end
 
   defp refuse_intake(socket),
@@ -195,8 +417,18 @@ defmodule SdrAgentWeb.LeadLive.Index do
           Owner-entered prospects are owner-supplied and unverified. Open a lead to review
           the evidence behind its qualification.
         </:subtitle>
-        <:actions :if={@owner? and not @intake_open?}>
+        <:actions :if={@owner? and (not @intake_open? or (@search_available? and not @search_open?))}>
           <button
+            :if={@search_available? and not @search_open?}
+            id="find-prospects"
+            type="button"
+            phx-click="search_open"
+            class="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm font-medium text-zinc-800 shadow-sm ring-1 ring-inset ring-zinc-200 transition hover:-translate-y-px hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-teal-600"
+          >
+            <.icon name="hero-magnifying-glass" class="size-4" /> Find prospects
+          </button>
+          <button
+            :if={not @intake_open?}
             id="add-prospect"
             type="button"
             phx-click="intake_open"
@@ -213,6 +445,17 @@ defmodule SdrAgentWeb.LeadLive.Index do
         source_rows={@source_rows}
         preview={@preview}
         error={@intake_error}
+      />
+
+      <ProspectSearchPanel.panel
+        :if={@owner? and @search_available? and @search_open?}
+        search={@search}
+        error={@search_error}
+        companies={@companies}
+        selected={@selected}
+        context={@company_context}
+        people={@people}
+        source={@company_source}
       />
 
       <nav aria-label="Filter by status" class="mb-4 flex flex-wrap gap-1.5">
