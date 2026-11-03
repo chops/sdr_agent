@@ -45,7 +45,11 @@ An explicit Get company page action requests source text via Exa /contents
 for exactly the confirmed website_url, supplying the company_site source.
 
 All egress goes to the fixed TLS api.exa.ai service; the app never directly
-fetches result URLs. A server-only key is provisioned separately through the
+fetches result URLs. Existing Req uses TLS peer verification, redirects/retries
+disabled, raw byte-capped response streaming before JSON parsing and a total
+task deadline. A dedicated Finch pool isolates this provider; the unmerged
+arbitrary-host discovery transport/robots stack is not reused.
+A server-only key is provisioned separately through the
 existing root-private hosted secret mechanism after approval. Query text is
 sent to Exa only by the owner's explicit action; unrelated CRM data is not.
 
@@ -84,10 +88,20 @@ There is no durable in-app per-request charge/disclosure ledger in v1; only
 value-free telemetry counters/outcomes. The Exa dashboard remains the billing
 record. Reusing the owner-selected SOPS key shares quota and rotation with
 research_harness; a dedicated SDR key is optional, not a delivery prerequisite.
-One search supervision subtree owns the monitored owner-keyed limiter and
-Task.Supervisor. A subtree restart terminates in-flight tasks and clears its
+One permanent search subtree under the existing top one_for_one owns dedicated
+Finch, the monitored owner-keyed limiter and Task.Supervisor (one_for_all, its
+own bounded restart intensity). Disabled search starts no subtree and returns
+:unavailable. Repo/Endpoint remain siblings. A subtree restart terminates in-flight tasks and clears its
 transient limiter state; it never retries an uncertain paid request. Cancellation
 or task failure cannot undo a request already received/billed by Exa.
+
+Deployment validation permits at most three backend-only ExaClient requests
+with output limited to status/count/cost, not a fabricated owner session. The
+owner's first browser clicks provide live website proof; up to two additional
+test requests fit the five-request total allowance. No claim that backend smoke
+proves the UI. Secret provisioning uses decrypt-to-stdin, root-private temporary
+file and validated atomic replacement preserving previous entries without
+printing values; prior private env is kept for rollback. Only SDR restarts.
 
 Exa/source terms still apply. API documentation describes company/people search
 and retrieval; this decision is not a blanket license to resell/store arbitrary

@@ -132,11 +132,15 @@ Evaluate/regenerate runtime diagrams for new external provider and web flow.
   pattern); no persistence/domain-write path.
 - New lib/sdr_agent/discovery/{candidate,company_context,exa_client,
   exa_transport,limiter,supervisor}.ex: pure normalized values, fixed provider
-  protocol, bounded pinned TLS POST, supervised request concurrency. Reuse the
-  reviewed PublicAddress/TLS-streaming mechanisms from8839d303 selectively;
-  do not enable its arbitrary PublicWeb crawler or robots workflow for an API.
+  protocol, bounded fixed-host TLS POST, supervised request concurrency. Use
+  existing Req0.7.5/Finch0.24.0/Mint1.11.0; do not copy/cherry-pick the unrelated
+  unmerged8839d303 arbitrary-host DNS/robots stack.
 - lib/sdr_agent/application.ex: search subtree before Endpoint only when the
-  explicit feature config is enabled; disabled ordinary build stays inert.
+  explicit feature config is enabled, as one permanent child of existing top
+  one_for_one. Its own one_for_all children are dedicated Finch, Limiter and
+  Task.Supervisor, with an explicit restart intensity; Repo/Endpoint remain
+  siblings. A subtree failure may escalate once to the top supervisor, not an
+  unbounded restart loop. Disabled flag means no subtree and closed :unavailable.
 - config/runtime.exs, config/test.exs: runtime EXA_API_KEY name and explicit
   feature flag; fixture/test-only transport seam. No secret in compile config.
 - lib/sdr_agent_web/live/lead_live/index.ex plus new prospect_search_panel.ex
@@ -156,6 +160,11 @@ the research providers or connect discovery to assignment/model execution.
    branch. Codex owns backend/config/supervision; Claude owns web/prefill tests.
    Fresh owner check uses existing HumanAuthority/HostedOwners paths; no fake
    delegation. Use the project's Req dependency, no new SDK/package.
+   Req options: fixed api.exa.ai endpoint, redirect:false, retry:false,
+   decode_body:false, byte-capped into: stream before JSON parsing, connect and
+   receive timeouts plus task total deadline. Dedicated Finch pool, TLS
+   verify_peer/system CA; untrusted local TLS certificate must be refused.
+   Only Req.Test plug/config seams in test build; no production endpoint override.
 2. RED backend contract, provider parsing, owner allow/deny, limiter/deadline/
    restart and TLS/streaming tests against fixtures/local TLS only. Confirm
    intended missing-behavior failures before GREEN. No paid API during TDD.
@@ -170,13 +179,22 @@ the research providers or connect discovery to assignment/model execution.
 5. After the bundled owner approval, securely provision only the selected Exa
    key/feature flag through reviewed SDR-only secret ops. Preserve all existing
    hosted env entries; never alter the harness SOPS file, key rotation, service
-   or jobs. Build/stage exact pushed release, review deployment bytes and health
+   or jobs. Root wrapper receives key via decrypt-to-stdin (never argv), builds
+   a mode0600 temporary env and atomically replaces the exact hosted env file.
+   Existing values are handled privately, never printed/cat/grep'ed into tool
+   output. Verify preservation by line counts/names-only diff reduced to counts;
+   keep the previous root-private env for rollback. runtime.exs reads at boot,
+   so SDR-only restart is part of deployment. No other service is restarted.
+   Build/stage exact pushed release, review deployment bytes and health
    rollback; no database migration/grant or backup-state prerequisite.
-6. Execute at most five basic Exa /search or /contents smoke requests (including
-   failed/uncertain attempts), no enrichment/Agent/Websets/plan changes. Retain
-   count/cost and aggregate/source-only evidence without credentials. Demonstrate
-   actual company and person results, unchanged existing business/model counts,
-   and no automatic record save. No claiming live success from fixtures alone.
+6. Backend-only ops smoke: at most three sha-pinned release-eval ExaClient calls
+   (company, people, contents), NOT ProspectSearch and no impersonated user.
+   All failed/uncertain calls count; no retry, enrichment/Agent/Websets/plan change.
+   Output only status/count/cost, no query/key/result text. Proves provider/key/
+   TLS/parse, NOT owner authorization or LiveView UI. Up to two additional test
+   requests are reserved for explicit owner browser clicks; total allowance five.
+   Owner's first website use supplies live end-to-end proof. No automated real
+   record save or model request. Report synthetic UI tests separately from smoke.
 7. Deploy under existing SDR-only authority after readiness, verify revision,
    health/sign-in/assets/anonymous denial and owner-visible search workflow.
    No login-token/password operation or real save without separate owner action.
@@ -187,6 +205,9 @@ the research providers or connect discovery to assignment/model execution.
 Accept ADR-0027 and this plan: Exa-only company/people search, existing SOPS key
 securely provisioned for SDR, existing-account credits/charges for explicit
 owner clicks and at most five basic validation requests, no paid plan change.
+The unattended portion is at most three backend-only client requests; the
+remaining two require owner clicks, not a fabricated signed-in session. Backend
+success alone will not be called a live end-to-end website test.
 Accept transient unsaved results/no durable per-search app ledger and shared
 key quota/rotation consequences. Email remains owner-entered; email enrichment
 is NOT included. Existing SDR deployment authority applies after verification;
@@ -199,3 +220,13 @@ documentation/source feasibility reads and an Exa-key decryptability check.
 The plan skill requires owner acceptance before implementation; the key is not
 a technical blocker. Peer plan review may refine implementation details without
 silently expanding the owner-facing scope above.
+
+* Independent plan direction review
+Claude m_1793730776981512000_793215bf, 2026-11-03T18:32:56Z, direction PASS
+with P1-P4; review sha256
+dcd836f9e21688f5ef21101afa0288de04a84092005192df0a8a230ae01c14f1.
+P1-P4 incorporated above: fixed-host Req/no8839d303 reuse, dedicated Finch and
+bounded permanent subtree, backend-only smoke versus owner browser proof, and
+stdin-fed atomic root-private secret provisioning with preservation checks.
+No entity delta; these refine the existing approved contract/implementation plan.
+Owner acceptance is still pending; ADR remains proposed.
