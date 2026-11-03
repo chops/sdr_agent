@@ -141,6 +141,30 @@ defmodule SdrAgent.Audit.Payload do
       change SdrAgent.Audit.Changes.TraceIds
     end
 
+    create :store_owner_intake_input do
+      description "Store only the current owner's exact intake excerpt bytes."
+      accept [:content, :content_type]
+      upsert? true
+      upsert_fields []
+      upsert_condition Ash.Expr.expr(false)
+      return_skipped_upsert? true
+      change SdrAgent.Audit.Changes.SetTenant
+
+      change fn changeset, _context ->
+        case Ash.Changeset.get_attribute(changeset, :content) do
+          content when is_binary(content) ->
+            changeset
+            |> Ash.Changeset.force_change_attribute(:sha256, :crypto.hash(:sha256, content))
+            |> Ash.Changeset.force_change_attribute(:byte_size, byte_size(content))
+
+          _ ->
+            changeset
+        end
+      end
+
+      change SdrAgent.Audit.Changes.TraceIds
+    end
+
     action :read_content, :binary do
       description "Return a payload's content, recording a payload_view AuditAccess first."
       # The kernel opens (or joins) the transaction itself, so a refusal does
@@ -233,6 +257,10 @@ defmodule SdrAgent.Audit.Payload do
 
     policy action(:read_reconciliation_content) do
       authorize_if Checks.ReconciliationScope
+    end
+
+    policy action(:store_owner_intake_input) do
+      authorize_if Checks.OwnerIntakeWriteScope
     end
 
     policy action(:store_prototype_input) do

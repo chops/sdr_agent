@@ -363,6 +363,95 @@ defmodule SdrAgent.Prototype.HostedOwnerRaceTest do
     end
   end
 
+  test "owner intake same submission racing on independent connections creates once", ctx do
+    loaded!(SdrAgent.Prototype.OwnerIntake)
+    enrolled = H.enrol!(ctx)
+    H.enter!(ctx)
+    input = intake_input("jordan")
+    assert {:ok, preview} = call(SdrAgent.Prototype.OwnerIntake, :preview, [input, enrolled.user])
+
+    results =
+      compete(ctx, fn _ ->
+        H.enter!(ctx)
+        call(SdrAgent.Prototype.OwnerIntake, :commit, [input, preview, enrolled.user])
+      end)
+
+    assert Enum.count(results, &match?({:ok, :created, _}, &1)) == 1
+    assert Enum.count(results, &match?({:ok, :replay, _}, &1)) == 1
+
+    assert %{rows: [[1, 1, 1]]} =
+             SQL.query!(
+               Repo,
+               "SELECT (SELECT count(*) FROM accounts), (SELECT count(*) FROM contacts), (SELECT count(*) FROM owner_prospect_intakes)",
+               []
+             )
+  end
+
+  test "owner intake distinct contacts racing require re-preview then reuse one company", ctx do
+    loaded!(SdrAgent.Prototype.OwnerIntake)
+    enrolled = H.enrol!(ctx)
+    H.enter!(ctx)
+    inputs = Map.new(1..2, fn i -> {i, intake_input("person#{i}")} end)
+
+    previews =
+      Map.new(inputs, fn {i, input} ->
+        assert {:ok, preview} =
+                 call(SdrAgent.Prototype.OwnerIntake, :preview, [input, enrolled.user])
+
+        {i, preview}
+      end)
+
+    results =
+      compete(ctx, fn i ->
+        H.enter!(ctx)
+
+        {i,
+         call(SdrAgent.Prototype.OwnerIntake, :commit, [inputs[i], previews[i], enrolled.user])}
+      end)
+
+    assert Enum.count(results, &match?({_, {:ok, :created, _}}, &1)) == 1
+
+    assert [{loser, {:error, :preview_stale}}] =
+             Enum.filter(results, &match?({_, {:error, _}}, &1))
+
+    assert {:ok, refreshed} =
+             call(SdrAgent.Prototype.OwnerIntake, :preview, [inputs[loser], enrolled.user])
+
+    assert {:ok, :created, _} =
+             call(SdrAgent.Prototype.OwnerIntake, :commit, [
+               inputs[loser],
+               refreshed,
+               enrolled.user
+             ])
+
+    assert %{rows: [[1, 2, 2]]} =
+             SQL.query!(
+               Repo,
+               "SELECT (SELECT count(*) FROM accounts), (SELECT count(*) FROM contacts), (SELECT count(*) FROM owner_prospect_intakes)",
+               []
+             )
+  end
+
+  defp intake_input(person) do
+    %{
+      "company_name" => "Race Company",
+      "domain" => "intake-race.test",
+      "website_url" => "https://intake-race.test",
+      "first_name" => person,
+      "last_name" => "Synthetic",
+      "title" => "Founder",
+      "email" => person <> "@intake-race.test",
+      "sources" => [
+        %{
+          "url" => "https://intake-race.test",
+          "source_type" => "company_site",
+          "retrieved_on" => "2026-11-01",
+          "excerpt" => "Synthetic company team evidence"
+        }
+      ]
+    }
+  end
+
   defp await_head_holder(backend, holder, attempts \\ 400)
 
   defp await_head_holder(_backend, _holder, 0),

@@ -1,0 +1,458 @@
+{
+  "attributes": [
+    {
+      "allow_nil?": false,
+      "default": "fragment(\"uuidv7()\")",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": true,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "submission_sha256",
+      "type": "binary"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"owner-intake/1\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "format_version",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "\"unverified\"",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "classification",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "imported_at",
+      "type": "utc_datetime_usec"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "trace_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": null,
+      "scale": null,
+      "size": null,
+      "source": "span_id",
+      "type": "text"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_tenant_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "tenants"
+      },
+      "scale": null,
+      "size": null,
+      "source": "tenant_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_binding_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_database_bindings"
+      },
+      "scale": null,
+      "size": null,
+      "source": "binding_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_relocation_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "prototype_relocations"
+      },
+      "scale": null,
+      "size": null,
+      "source": "relocation_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_owner_user_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "users"
+      },
+      "scale": null,
+      "size": null,
+      "source": "owner_user_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_account_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "accounts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "account_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_contact_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "contacts"
+      },
+      "scale": null,
+      "size": null,
+      "source": "contact_id",
+      "type": "uuid"
+    },
+    {
+      "allow_nil?": false,
+      "default": "nil",
+      "generated?": false,
+      "precision": null,
+      "primary_key?": false,
+      "references": {
+        "deferrable": false,
+        "destination_attribute": "id",
+        "destination_attribute_default": null,
+        "destination_attribute_generated": null,
+        "index?": false,
+        "index_where": null,
+        "match_tenant?": false,
+        "match_type": null,
+        "match_with": null,
+        "multitenancy": {
+          "attribute": null,
+          "global": null,
+          "strategy": null
+        },
+        "name": "owner_prospect_intakes_lead_id_fkey",
+        "on_delete": "restrict",
+        "on_update": null,
+        "primary_key?": true,
+        "schema": "public",
+        "table": "leads"
+      },
+      "scale": null,
+      "size": null,
+      "source": "lead_id",
+      "type": "uuid"
+    }
+  ],
+  "base_filter": null,
+  "check_constraints": [
+    {
+      "attribute": [
+        "submission_sha256"
+      ],
+      "base_filter": null,
+      "check": "octet_length(submission_sha256) = 32",
+      "name": "owner_intakes_digest"
+    },
+    {
+      "attribute": [
+        "classification"
+      ],
+      "base_filter": null,
+      "check": "classification = 'unverified' AND format_version = 'owner-intake/1'",
+      "name": "owner_intakes_unverified"
+    },
+    {
+      "attribute": [
+        "trace_id"
+      ],
+      "base_filter": null,
+      "check": "trace_id ~ '^[0-9a-f]{32}$' AND trace_id <> repeat('0', 32) AND span_id ~ '^[0-9a-f]{16}$' AND span_id <> repeat('0', 16)",
+      "name": "owner_intakes_trace_ids"
+    }
+  ],
+  "create_table_options": null,
+  "custom_indexes": [],
+  "custom_statements": [
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP FUNCTION owner_prospect_intakes_append_only()",
+      "global?": false,
+      "name": "owner_prospect_intakes_guard_function",
+      "up": "CREATE FUNCTION owner_prospect_intakes_append_only() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION '% is append-only: % rejected', TG_TABLE_NAME, TG_OP\n    USING ERRCODE = 'restrict_violation';\nEND;\n$$\n"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER owner_prospect_intakes_guard_row ON owner_prospect_intakes",
+      "global?": false,
+      "name": "owner_prospect_intakes_guard_row",
+      "up": "CREATE TRIGGER owner_prospect_intakes_guard_row BEFORE UPDATE OR DELETE ON owner_prospect_intakes FOR EACH ROW EXECUTE FUNCTION owner_prospect_intakes_append_only()"
+    },
+    {
+      "after_tables": [],
+      "code?": false,
+      "down": "DROP TRIGGER owner_prospect_intakes_guard_truncate ON owner_prospect_intakes",
+      "global?": false,
+      "name": "owner_prospect_intakes_guard_truncate",
+      "up": "CREATE TRIGGER owner_prospect_intakes_guard_truncate BEFORE TRUNCATE ON owner_prospect_intakes FOR EACH STATEMENT EXECUTE FUNCTION owner_prospect_intakes_append_only()"
+    },
+    {
+      "after_tables": [
+        "dossier_entries",
+        "leads",
+        "contacts",
+        "accounts",
+        "prototype_relocations",
+        "users"
+      ],
+      "code?": false,
+      "down": "DROP FUNCTION owner_prospect_origin_guard()",
+      "global?": false,
+      "name": "owner_prospect_origin_guard",
+      "up": "CREATE FUNCTION owner_prospect_origin_guard() RETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n  PERFORM id FROM leads WHERE id = NEW.lead_id FOR UPDATE;\n  IF TG_TABLE_NAME = 'owner_prospect_intakes' THEN\n    IF EXISTS (SELECT 1 FROM dossier_entries WHERE lead_id = NEW.lead_id) THEN\n      RAISE EXCEPTION 'lead_origin_ambiguous' USING ERRCODE = 'check_violation';\n    END IF;\n    IF NOT EXISTS (\n      SELECT 1 FROM leads l JOIN contacts c ON c.id=l.contact_id\n      JOIN accounts a ON a.id=l.account_id\n      JOIN prototype_database_bindings b ON b.id=NEW.binding_id\n      JOIN prototype_relocations r ON r.id=NEW.relocation_id AND r.binding_id=b.id\n      JOIN users u ON u.id=NEW.owner_user_id\n      WHERE l.id=NEW.lead_id AND l.tenant_id=NEW.tenant_id\n        AND c.id=NEW.contact_id AND c.tenant_id=NEW.tenant_id\n        AND c.account_id=a.id AND a.id=NEW.account_id AND a.tenant_id=NEW.tenant_id\n        AND b.tenant_id=NEW.tenant_id AND u.tenant_id=NEW.tenant_id\n    ) THEN\n      RAISE EXCEPTION 'intake_relationship_mismatch' USING ERRCODE = 'check_violation';\n    END IF;\n  ELSIF EXISTS (SELECT 1 FROM owner_prospect_intakes WHERE lead_id=NEW.lead_id) THEN\n    RAISE EXCEPTION 'lead_origin_ambiguous' USING ERRCODE = 'check_violation';\n  END IF;\n  RETURN NEW;\nEND;\n$$;\n"
+    },
+    {
+      "after_tables": [
+        "dossier_entries"
+      ],
+      "code?": false,
+      "down": "DROP TRIGGER owner_intake_single_origin ON owner_prospect_intakes",
+      "global?": false,
+      "name": "owner_intake_origin_trigger",
+      "up": "CREATE TRIGGER owner_intake_single_origin BEFORE INSERT ON owner_prospect_intakes FOR EACH ROW EXECUTE FUNCTION owner_prospect_origin_guard()"
+    },
+    {
+      "after_tables": [
+        "dossier_entries"
+      ],
+      "code?": false,
+      "down": "DROP TRIGGER dossier_intake_single_origin ON dossier_entries",
+      "global?": false,
+      "name": "dossier_intake_origin_trigger",
+      "up": "CREATE TRIGGER dossier_intake_single_origin BEFORE INSERT ON dossier_entries FOR EACH ROW EXECUTE FUNCTION owner_prospect_origin_guard()"
+    }
+  ],
+  "has_create_action": true,
+  "hash": "EE3D5C7F8A49D11C354977595BAE9A88DE3E841AEAFF1D4FCB5A77BD3607D1A4",
+  "identities": [
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "owner_prospect_intakes_unique_input_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "submission_sha256"
+        }
+      ],
+      "name": "unique_input",
+      "nils_distinct?": true,
+      "where": null
+    },
+    {
+      "all_tenants?": false,
+      "base_filter": null,
+      "index_name": "owner_prospect_intakes_unique_lead_index",
+      "keys": [
+        {
+          "type": "atom",
+          "value": "tenant_id"
+        },
+        {
+          "type": "atom",
+          "value": "lead_id"
+        }
+      ],
+      "name": "unique_lead",
+      "nils_distinct?": true,
+      "where": null
+    }
+  ],
+  "multitenancy": {
+    "attribute": null,
+    "global": null,
+    "strategy": null
+  },
+  "repo": "Elixir.SdrAgent.Repo",
+  "schema": null,
+  "table": "owner_prospect_intakes",
+  "temporal": null
+}

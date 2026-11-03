@@ -64,6 +64,19 @@ defmodule SdrAgent.Sales.Contact do
       change {AppendEvent, event_type: "sales.contact.created", category: :domain_change}
     end
 
+    create :record_owner_intake do
+      description "The hosted owner's scoped intake creates a named work contact."
+      accept [:account_id, :first_name, :last_name, :title, :email]
+
+      validate {Validations.ImportTenant, refs: [account_id: SdrAgent.Sales.Account]},
+        before_action?: true
+
+      validate {Validations.DatasetDomain, attribute: :email, kind: :email}, before_action?: true
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {SdrAgent.Audit.Changes.OwnerIntakeEvent, event_type: "sales.contact.created"}
+    end
+
     create :import_prototype do
       description """
       OPR (D-237 prototype runtime, from the above-domain dossier import):
@@ -139,6 +152,10 @@ defmodule SdrAgent.Sales.Contact do
 
     policy action([:create, :update, :change_email, :archive]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:record_owner_intake) do
+      authorize_if SdrAgent.Audit.Checks.OwnerIntakeWriteScope
     end
 
     policy action(:import_prototype) do

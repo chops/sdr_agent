@@ -44,6 +44,29 @@ defmodule SdrAgent.Research do
     # D-237 (interfaces r6 IF-6): imported prototype dossier rows and sources.
     resource SdrAgent.Research.DossierEntry
     resource SdrAgent.Research.DossierSource
+    resource SdrAgent.Research.OwnerProspectIntake
+    resource SdrAgent.Research.OwnerProspectSource
+  end
+
+  @doc "Owner-intake coordinator only: persist its immutable provenance through the scoped action."
+  def record_owner_intake(attrs, opts),
+    do: owner_intake_create(SdrAgent.Research.OwnerProspectIntake, attrs, opts)
+
+  @doc "Owner-intake coordinator only: persist one exact excerpt source under its scoped action."
+  def record_owner_intake_source(attrs, opts),
+    do: owner_intake_create(SdrAgent.Research.OwnerProspectSource, attrs, opts)
+
+  defp owner_intake_create(resource, attrs, opts) do
+    meta = %{resource: resource, action: :record, guarded?: true, subject_id: nil}
+
+    Guard.run(meta, opts[:actor], fn ->
+      resource
+      |> Ash.Changeset.for_create(:record, attrs,
+        actor: opts[:actor],
+        context: opts[:context] || %{}
+      )
+      |> Ash.create()
+    end)
   end
 
   @doc "AGT: records a retrieved source; `content` is stored in full as a Payload."

@@ -156,7 +156,14 @@ defmodule SdrAgent.Research.ResearchArtifact do
     attribute :provider, :atom do
       allow_nil? false
       # D-237 (interfaces r6 IF-6): `:public_dossier` is the prototype dossier adapter.
-      constraints one_of: [:fake_crm, :fixture_search, :fixture_web, :public_dossier]
+      constraints one_of: [
+                    :fake_crm,
+                    :fixture_search,
+                    :fixture_web,
+                    :public_dossier,
+                    :owner_intake
+                  ]
+
       public? true
     end
 

@@ -89,6 +89,28 @@ defmodule SdrAgent.Sales do
   @doc "SEED: creates a contact with a fixture `id`."
   def seed_contact(attrs, opts), do: GuardedCall.create(Contact, :seed, attrs, opts)
 
+  @doc "Owner-intake coordinator only: create a manual company under its exact transaction scope."
+  def intake_account(attrs, opts), do: owner_intake_create(Account, attrs, opts)
+
+  @doc "Owner-intake coordinator only: create a named contact under its exact transaction scope."
+  def intake_contact(attrs, opts), do: owner_intake_create(Contact, attrs, opts)
+
+  @doc "Owner-intake coordinator only: create a new manual lead, never assign it."
+  def intake_lead(attrs, opts), do: owner_intake_create(Lead, attrs, opts)
+
+  defp owner_intake_create(resource, attrs, opts) do
+    meta = %{resource: resource, action: :record_owner_intake, guarded?: true, subject_id: nil}
+
+    Guard.run(meta, opts[:actor], fn ->
+      resource
+      |> Ash.Changeset.for_create(:record_owner_intake, attrs,
+        actor: opts[:actor],
+        context: opts[:context] || %{}
+      )
+      |> Ash.create()
+    end)
+  end
+
   @doc "ADM: creates a draft sequence."
   def create_sequence(attrs, opts), do: GuardedCall.create(Sequence, :create, attrs, opts)
 

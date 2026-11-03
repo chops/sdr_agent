@@ -128,6 +128,21 @@ defmodule SdrAgent.Sales.Lead do
       change {AppendEvent, event_type: "sales.lead.created", category: :domain_change}
     end
 
+    create :record_owner_intake do
+      description "The hosted owner's scoped intake creates a new manual lead without assignment."
+      accept [:contact_id, :account_id]
+      change set_attribute(:source, :manual)
+
+      validate {SdrAgent.Sales.Validations.ImportTenant,
+                refs: [contact_id: SdrAgent.Sales.Contact, account_id: SdrAgent.Sales.Account]},
+               before_action?: true
+
+      change SdrAgent.Sales.Changes.LeadAccount
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {SdrAgent.Audit.Changes.OwnerIntakeEvent, event_type: "sales.lead.created"}
+    end
+
     create :import_prototype do
       description """
       OPR (D-237 prototype runtime, from the above-domain dossier import):
@@ -336,6 +351,10 @@ defmodule SdrAgent.Sales.Lead do
 
     policy action([:create, :retry, :reopen]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:record_owner_intake) do
+      authorize_if SdrAgent.Audit.Checks.OwnerIntakeWriteScope
     end
 
     policy action(:import_prototype) do
