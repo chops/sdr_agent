@@ -1,6 +1,6 @@
 #+TITLE: Owner self-service prospect intake
 #+DATE: 2026-11-03
-#+STATUS: APPROVED scope; source implementation in progress
+#+STATUS: APPROVED scope; final combined source gate pending
 
 * Summary / owner approval
 Owner-only website form: company/contact + 1..3 source excerpts, preview,
@@ -168,4 +168,52 @@ the passing run. No hosted migration has run.
   owners and the existing page withholds everything. Source fix remains
   Claude-owned; use explicit unavailable presentation, not a policy widening.
   Also preserve owner_cited? with the displayed revision during stale refresh.
+
+2026-11-03 final integration corrections:
+- Claude step-unavailable fix f4a43c0d and frozen disclosure fix71a97016 are
+  pushed for integration. SequenceStep policies are unchanged: only its
+  optional position/channel display degrades on a filtered NotFound; other
+  errors and required reads still withhold. Hosted owners gain no approval
+  affordance. The original positive T3 assertions remain intact.
+- Independently verified interim c6-20261103T063434Z-27209 exposed the frozen
+  banner failure at223. The incorrect positive approve-form expectation was
+  replaced by revision-body presence plus explicit approve-form denial:
+  existing Scope.reviewer? deliberately does not include hosted owners.
+  c6-20261103T063558Z-33482 is72/72 across the positive pipeline, draft/review,
+  refresh, provenance, banner and intake controls. MANIFESTs verified.
+  B was measured before its distinct GO; this was disclosed and accepted as
+  evidence, not retroactive process compliance (m_codex_frozen_b_go_20261103).
+- Real ordinary-production WAE found two intake coordinator type warnings
+  from constant refusing prototype facades; partitioning the coordinator then
+  exposed two dependent LeadLive intake-handler warnings. Under independent
+  plan/RED GO, both use the established prototype_authority_compiled boundary.
+  The ordinary API retains preview/2, commit/3 and valid_write_scope?/2 as
+  forbidden/false stubs, with no persistence, Ash or authority access. The six
+  known intake events reset stale presentation without a domain call; all
+  other lead UI and authority-build behavior remains unchanged.
+- Entity Model trigger: no for these compilation/presentation corrections;
+  no new entity, attribute, lifecycle, backend contract or grant. No ADR
+  required: existing build boundary. Architecture unchanged by these fixes;
+  the maintained owner-intake diagrams remain applicable.
+- RED branch controls c4-20261103T063446Z-28235 (1/2) and
+  c4-20261103T064143Z-56523 (17/19) expose missing ordinary beam/event isolation,
+  while the three ordinary browser roles already hide the panel and refuse
+  forged preview/commit with unchanged prospect/operation/model counts.
+  Independent GO: m_claude_build_compat_green_go_20261103 and
+  m_claude_index_partition_green_go_20261103. GREEN
+  c4-20261103T064358Z-64674 is66/66; MANIFEST verified.
+- Real MIX_ENV=prod compile --warnings-as-errors PASS, test-build
+  format/WAE/configured Credo PASS. Separate Elixir VM loaded the actual
+  ordinary beam using project MIX_BUILD_ROOT: all three API entries refuse,
+  application not started. First probe used an incorrect conventional _build
+  path and failed nofile; corrected probe passes without altering build paths.
+  Logs: handoff tmp/codex-owner-intake-ordinary-prod-compile-r2-20261103.log,
+  codex-owner-intake-build-compat-checks-20261103.log and
+  codex-owner-intake-ordinary-no-start-r2-20261103.log.
+- Stale local untracked T3 draft preserved, not deleted, at handoff tmp/
+  codex-preserved-owner-cited-draft-premerge-20261103.exs, sha256774b6190;
+  integration uses Claude's final reviewed/committed version instead.
+- Final combined exact-head gate and independent source verdict remain
+  pending. No hosted migration, restart, deployment, intake, assignment,
+  model call, outreach, password operation or worker-intake change occurred.
 

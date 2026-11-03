@@ -11,6 +11,35 @@ defmodule SdrAgentWeb.LeadsLiveTest do
   alias SdrAgent.Research
 
   describe "leads list" do
+    test "ordinary roles never see intake and forged preview or commit writes nothing", %{
+      conn: conn
+    } do
+      counts = fn ->
+        Map.new(
+          ~w(accounts contacts leads owner_prospect_intakes operations model_invocations),
+          fn table ->
+            %{rows: [[count]]} = SdrAgent.Repo.query!("SELECT count(*) FROM " <> table)
+            {table, count}
+          end
+        )
+      end
+
+      for role <- [:admin, :reviewer, :auditor] do
+        {:ok, view, _html} = conn |> sign_in(role) |> live(~p"/leads")
+        refute has_element?(view, "#add-prospect")
+        refute has_element?(view, "#owner-intake-form")
+        before = counts.()
+
+        render_hook(view, "intake_open", %{})
+        render_hook(view, "intake_preview", %{"intake" => %{"company_name" => "forged.test"}})
+        render_hook(view, "intake_commit", %{})
+
+        refute has_element?(view, "#owner-intake-form")
+        refute has_element?(view, "#intake-preview")
+        assert counts.() == before
+      end
+    end
+
     test "lists every seeded lead with company, contact and status", %{conn: conn} do
       {:ok, view, _html} = conn |> sign_in(:reviewer) |> live(~p"/leads")
 

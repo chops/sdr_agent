@@ -10,7 +10,6 @@ defmodule SdrAgentWeb.LeadLive.Index do
   """
   use SdrAgentWeb, :live_view
 
-  alias SdrAgent.Prototype.OwnerIntake
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
@@ -80,86 +79,96 @@ defmodule SdrAgentWeb.LeadLive.Index do
 
   ## Owner intake (ADR-0026)
 
-  @impl true
-  def handle_event("intake_open", _params, socket),
-    do: {:noreply, if(owner_now?(socket), do: reset_intake(socket, true), else: socket)}
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    alias SdrAgent.Prototype.OwnerIntake
 
-  def handle_event("intake_close", _params, socket), do: {:noreply, reset_intake(socket, false)}
+    @impl true
+    def handle_event("intake_open", _params, socket),
+      do: {:noreply, if(owner_now?(socket), do: reset_intake(socket, true), else: socket)}
 
-  def handle_event("intake_change", %{"intake" => form}, socket) when is_map(form),
-    do:
+    def handle_event("intake_close", _params, socket), do: {:noreply, reset_intake(socket, false)}
+
+    def handle_event("intake_change", %{"intake" => form}, socket) when is_map(form),
+      do:
+        {:noreply,
+         assign(socket,
+           intake_form: to_form(form, as: :intake),
+           preview: nil,
+           intake_params: nil,
+           intake_error: nil
+         )}
+
+    def handle_event("intake_change", _params, socket), do: {:noreply, socket}
+
+    def handle_event("intake_add_source", _params, socket) do
+      rows = socket.assigns.source_rows
+
+      rows =
+        if length(rows) < OwnerIntakePanel.max_sources(), do: rows ++ [length(rows)], else: rows
+
       {:noreply,
-       assign(socket,
-         intake_form: to_form(form, as: :intake),
-         preview: nil,
-         intake_params: nil,
-         intake_error: nil
-       )}
+       assign(socket, source_rows: rows, preview: nil, intake_params: nil, intake_error: nil)}
+    end
 
-  def handle_event("intake_change", _params, socket), do: {:noreply, socket}
+    def handle_event("intake_preview", %{"intake" => form}, socket) when is_map(form) do
+      socket =
+        assign(socket, intake_form: to_form(form, as: :intake), preview: nil, intake_params: nil)
 
-  def handle_event("intake_add_source", _params, socket) do
-    rows = socket.assigns.source_rows
+      if owner_now?(socket) do
+        params = OwnerIntakePanel.params(form)
 
-    rows =
-      if length(rows) < OwnerIntakePanel.max_sources(), do: rows ++ [length(rows)], else: rows
+        case OwnerIntake.preview(params, socket.assigns.current_scope.user) do
+          {:ok, preview} ->
+            {:noreply, assign(socket, preview: preview, intake_params: params, intake_error: nil)}
 
-    {:noreply,
-     assign(socket, source_rows: rows, preview: nil, intake_params: nil, intake_error: nil)}
-  end
+          {:error, code} ->
+            {:noreply, assign(socket, intake_error: code)}
+        end
+      else
+        {:noreply, refuse_intake(socket)}
+      end
+    end
 
-  def handle_event("intake_preview", %{"intake" => form}, socket) when is_map(form) do
-    socket =
-      assign(socket, intake_form: to_form(form, as: :intake), preview: nil, intake_params: nil)
+    def handle_event("intake_preview", _params, socket), do: {:noreply, refuse_intake(socket)}
 
-    if owner_now?(socket) do
-      params = OwnerIntakePanel.params(form)
+    # Any client "preview" is ignored: only the server-held preview counts.
+    def handle_event("intake_commit", _params, socket) do
+      %{preview: preview, intake_params: params} = socket.assigns
 
-      case OwnerIntake.preview(params, socket.assigns.current_scope.user) do
-        {:ok, preview} ->
-          {:noreply, assign(socket, preview: preview, intake_params: params, intake_error: nil)}
+      cond do
+        not owner_now?(socket) ->
+          {:noreply, refuse_intake(socket)}
+
+        is_nil(preview) or is_nil(params) ->
+          {:noreply, assign(socket, intake_error: :no_preview)}
+
+        true ->
+          commit(socket, params, preview)
+      end
+    end
+
+    defp commit(socket, params, preview) do
+      case OwnerIntake.commit(params, preview, socket.assigns.current_scope.user) do
+        {:ok, mode, %{lead_id: lead_id}} when mode in [:created, :replay] ->
+          flash =
+            if mode == :created, do: "Prospect saved.", else: "This prospect was already saved."
+
+          {:noreply,
+           socket |> put_flash(:info, flash) |> push_navigate(to: ~p"/leads/#{lead_id}")}
 
         {:error, code} ->
-          {:noreply, assign(socket, intake_error: code)}
+          {:noreply, assign(socket, intake_error: code, preview: nil, intake_params: nil)}
       end
-    else
-      {:noreply, refuse_intake(socket)}
     end
+
+    # The owner check is re-run on every event; socket assigns may be stale.
+    defp owner_now?(socket), do: Scope.hosted_owner?(socket.assigns.current_scope)
+  else
+    @impl true
+    def handle_event(event, _params, socket)
+        when event in ~w(intake_open intake_close intake_change intake_add_source intake_preview intake_commit),
+        do: {:noreply, refuse_intake(socket)}
   end
-
-  def handle_event("intake_preview", _params, socket), do: {:noreply, refuse_intake(socket)}
-
-  # Any client "preview" is ignored: only the server-held preview counts.
-  def handle_event("intake_commit", _params, socket) do
-    %{preview: preview, intake_params: params} = socket.assigns
-
-    cond do
-      not owner_now?(socket) ->
-        {:noreply, refuse_intake(socket)}
-
-      is_nil(preview) or is_nil(params) ->
-        {:noreply, assign(socket, intake_error: :no_preview)}
-
-      true ->
-        commit(socket, params, preview)
-    end
-  end
-
-  defp commit(socket, params, preview) do
-    case OwnerIntake.commit(params, preview, socket.assigns.current_scope.user) do
-      {:ok, mode, %{lead_id: lead_id}} when mode in [:created, :replay] ->
-        flash =
-          if mode == :created, do: "Prospect saved.", else: "This prospect was already saved."
-
-        {:noreply, socket |> put_flash(:info, flash) |> push_navigate(to: ~p"/leads/#{lead_id}")}
-
-      {:error, code} ->
-        {:noreply, assign(socket, intake_error: code, preview: nil, intake_params: nil)}
-    end
-  end
-
-  # The owner check is re-run on every event; socket assigns may be stale.
-  defp owner_now?(socket), do: Scope.hosted_owner?(socket.assigns.current_scope)
 
   defp refuse_intake(socket),
     do: socket |> reset_intake(false) |> assign(owner?: false, intake_error: nil)
