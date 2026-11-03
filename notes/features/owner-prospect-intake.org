@@ -152,4 +152,20 @@ the passing run. No hosted migration has run.
   assertions use the stable leads-header id rather than logging full HTML.
   This repaired a selector error (initial GREEN29/30), not a weakened claim.
   Architecture unchanged by these presentation fixes (existing flow only).
+- Superseded clean full gate c6-20261103T055321Z-42724 at79749137 retained
+  measured FAIL6251/6282,31 failures, not a final candidate verdict; MANIFEST
+  verified. Besides the known baseline and missing inventories already fixed,
+  it caught two SchemaTest exact pins and a SafeLog source-scan false positive:
+  the normalizer's prose contained the output-call pattern. Reworded only the
+  moduledoc, not the enforcement test. SchemaTest now pins the third dossier
+  trigger and exact appended migration while preserving all old names/order.
+  Focused c4-20261103T062252Z-74046:68/69, sole inherited credential failure;
+  all SetupIntegration cases and Schema/SafeLog cases pass. Format/WAE/Credo pass.
+- Claude positive T3 draft is staged but not committed or claimed passing.
+  First run compilation was INCOMPLETE (missing fixture import); corrected
+  draft runs the complete hermetic pipeline, then fails on owner draft view.
+  Diagnosis: optional SequenceStep metadata read is unavailable to hosted
+  owners and the existing page withholds everything. Source fix remains
+  Claude-owned; use explicit unavailable presentation, not a policy widening.
+  Also preserve owner_cited? with the displayed revision during stale refresh.
 

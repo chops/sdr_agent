@@ -2,7 +2,7 @@ defmodule SdrAgent.Prototype.OwnerIntakeInput do
   @moduledoc """
   Bounded, pure owner-intake/1 normalization. Identity fields normalize;
   validated source URLs and excerpt UTF-8 bytes remain exact. Existing dossier
-  host rules admit reserved test hosts only in hermetic builds. No IO.
+  host rules admit reserved test hosts only in hermetic builds. Performs no input or output.
   """
   alias SdrAgent.Audit.Canonical
   alias SdrAgent.Prototype.DossierParser.Rules

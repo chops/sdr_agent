@@ -527,7 +527,7 @@ defmodule SdrAgent.Prototype.SchemaTest do
       end
 
       assert triggers("dossier_entries") ==
-               ~w(dossier_entries_guard_row dossier_entries_guard_truncate)
+               ~w(dossier_entries_guard_row dossier_entries_guard_truncate dossier_intake_single_origin)
 
       assert triggers("dossier_sources") ==
                ~w(dossier_sources_guard_row dossier_sources_guard_truncate)
@@ -536,17 +536,18 @@ defmodule SdrAgent.Prototype.SchemaTest do
 
   ## 8. migration order
 
-  test "8. the seven d237 migrations precede S-B1, S-B2 and S-B5 migrations, in the IF-2 order" do
+  test "8. d237 and offline-Mac migrations precede the appended owner intake migration" do
     names = applied_migrations() |> Enum.sort() |> Enum.map(&elem(&1, 1))
 
-    assert Enum.take(names, -4) == [
+    assert Enum.take(names, -5) == [
              "d270_01_relocation_chain",
              "d270_02_relocation_event_position",
              "d270_03_remote_calls",
-             "d270_10_hosted_owner"
+             "d270_10_hosted_owner",
+             "owner_prospect_intake"
            ]
 
-    assert Enum.slice(names, -11, 7) == ~w(d237_01_users d237_02_actor_types
+    assert Enum.slice(names, -12, 7) == ~w(d237_01_users d237_02_actor_types
              d237_03_prototype_database_bindings d237_04_prototype_delegations
              d237_05_release_decisions d237_06_sources d237_07_dossier)
   end
