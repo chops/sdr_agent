@@ -13,6 +13,32 @@ defmodule SdrAgent.Discovery.Candidate do
 
   @directories ~w(linkedin.com crunchbase.com x.com twitter.com facebook.com github.com wikipedia.org wikidata.org exa.ai wellfound.com ycombinator.com bloomberg.com pitchbook.com)
 
+  @doc "Validate the closed server-side action shape before any paid egress."
+  def request(%{kind: :company, query: query} = request) when map_size(request) == 2 do
+    if query?(query), do: {:ok, request}, else: {:error, :invalid_input}
+  end
+
+  def request(%{kind: :people, query: query, company: company} = request)
+      when map_size(request) == 3 do
+    with true <- query?(query),
+         {:ok, company} <- validate_context(company) do
+      {:ok, %{request | company: company}}
+    else
+      _ -> {:error, :invalid_input}
+    end
+  end
+
+  def request(%{kind: :contents, company: company} = request) when map_size(request) == 2 do
+    with {:ok, company} <- validate_context(company), do: {:ok, %{request | company: company}}
+  end
+
+  def request(_), do: {:error, :invalid_input}
+
+  defp query?(query) when is_binary(query) and byte_size(query) in 1..500,
+    do: String.valid?(query) and String.trim(query) != "" and not String.contains?(query, <<0>>)
+
+  defp query?(_), do: false
+
   @doc "A bounded public HTTPS source URL using existing intake rules."
   def safe_url?(url) when is_binary(url),
     do: String.valid?(url) and Rules.url(url, "") == :ok

@@ -7,6 +7,50 @@ defmodule SdrAgent.Discovery.ExaClient do
   """
 
   alias SdrAgent.Discovery.Candidate
+  alias SdrAgent.Discovery.Config
+  alias SdrAgent.Discovery.ExaTransport
+
+  @doc "Execute one validated fixed-endpoint operation; no retries or persistent effects."
+  def execute(request) do
+    with {:ok, request} <- Candidate.request(request),
+         key when is_binary(key) and byte_size(key) > 0 <- Config.key() do
+      execute_valid(request, key)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :unavailable}
+    end
+  end
+
+  defp execute_valid(%{kind: :contents, company: company}, key) do
+    with {:ok, body} <-
+           ExaTransport.post(
+             "/contents",
+             %{
+               "urls" => [company.website_url],
+               "text" => %{"maxCharacters" => 4000}
+             },
+             key
+           ) do
+      normalize_contents(body, company, Date.utc_today())
+    end
+  end
+
+  defp execute_valid(%{kind: kind, query: query} = request, key) do
+    company = Map.get(request, :company)
+    query = if kind == :people, do: query <> " at " <> company.name, else: query
+
+    payload = %{
+      "query" => query,
+      "category" => Atom.to_string(kind),
+      "type" => "auto",
+      "numResults" => 10,
+      "contents" => %{"text" => %{"maxCharacters" => 4000}}
+    }
+
+    with {:ok, body} <- ExaTransport.post("/search", payload, key) do
+      normalize_search(body, kind, company, Date.utc_today())
+    end
+  end
 
   @doc "Normalize one bounded search response; malformed individual findings are dropped."
   def normalize_search(%{"results" => rows} = body, kind, context, %Date{} = date)

@@ -55,11 +55,18 @@ defmodule SdrAgent.Application do
         SdrAgent.LiveEvents.Relay,
         # Sign-in and enrollment attempt counters (fixed windows in ETS),
         # before the endpoint.
-        SdrAgent.RateLimiter,
+        SdrAgent.RateLimiter
+      ] ++
+      discovery_children() ++
+      [
         # Start to serve requests, typically the last entry
         SdrAgentWeb.Endpoint,
         {AshAuthentication.Supervisor, [otp_app: :sdr_agent]}
       ]
+  end
+
+  defp discovery_children do
+    if SdrAgent.Discovery.Config.enabled?(), do: [SdrAgent.Discovery.Supervisor], else: []
   end
 
   # D-237 (IF-8): with the prototype switch set, the content-free SafeLog is

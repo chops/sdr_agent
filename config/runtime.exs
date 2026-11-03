@@ -2,6 +2,10 @@ import Config
 
 hosted? = config_env() == :hosted_prototype
 
+# ADR-0027: explicit hosted activation; no secret is compiled or exposed to web.
+config :sdr_agent,
+  prospect_search_enabled: hosted? and System.get_env("SDR_PROSPECT_SEARCH") == "exa"
+
 # ADR-0024: hosted startup must be explicit and remote-only. Refusals carry
 # fixed codes, never operator-supplied values or secrets. This is config
 # admission, not binding activation, model-call permission or a boot-check

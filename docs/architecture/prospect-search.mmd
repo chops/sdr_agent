@@ -1,0 +1,35 @@
+flowchart LR
+    Owner[Fresh hosted owner]
+    Web[Existing Leads LiveView<br/>ephemeral server-held cards and context]
+    Gate[ProspectSearch facade<br/>fresh owner and closed request validation]
+    Limit[Limiter<br/>one action per owner across tabs, cooldown]
+    Task[Temporary supervised task<br/>receiver monitor, 30s deadline]
+    HTTP[ExaClient and ExaTransport<br/>fixed paths, bounded JSON, no retries]
+    Finch[Dedicated Finch<br/>verified TLS to api.exa.ai]
+    Exa[Exa search and contents API]
+    Normalize[Pure normalization<br/>literal text, unknowns remain unknown]
+    Prefill[IntakePrefill<br/>email blank, previous preview cleared]
+    Intake[Existing OwnerIntake<br/>explicit owner preview and save]
+
+    Owner -- explicit paid click --> Web
+    Web --> Gate
+    Gate --> Limit
+    Limit --> Task
+    Task --> HTTP --> Finch --> Exa
+    Exa --> Normalize
+    Normalize -- private worker completion exit --> Limit
+    Limit -- monitored DOWN then async result --> Web
+    Web -- fresh owner, current request and card --> Prefill
+    Prefill --> Intake
+
+    subgraph SearchTree[Discovery Supervisor: one_for_all]
+      Limit
+      Task
+      Finch
+    end
+
+    %% Hosted authority compilation plus explicit SDR_PROSPECT_SEARCH=exa only.
+    %% Task.Supervisor owns temporary tasks; subtree failure stops them without replay.
+    %% Cancel, receiver death and deadline kill the task; DOWN releases its permit.
+    %% Search writes no business state and triggers no model, assignment or outreach.
+    %% Results and cooldowns are transient; Exa is the authoritative billing record.
