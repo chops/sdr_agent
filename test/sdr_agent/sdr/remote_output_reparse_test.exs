@@ -13,9 +13,16 @@ defmodule SdrAgent.SDR.RemoteOutputReparseTest do
 
   @purposes [:evidence_extraction, :qualification, :outreach_proposal, :reply_classification]
 
-  # Dynamic: the function is the missing behavior under test.
-  defp reparse(purpose, invocation, read),
-    do: Function.capture(Model, :reparse_released, 3).(purpose, invocation, read)
+  # Dynamic: the function is the missing behavior under test, so its absence
+  # fails as an assertion rather than an UndefinedFunctionError.
+  defp reparse(purpose, invocation, read) do
+    assert Code.ensure_loaded?(Model)
+
+    assert function_exported?(Model, :reparse_released, 3),
+           "SdrAgent.SDR.Model.reparse_released/3 is not exported"
+
+    Function.capture(Model, :reparse_released, 3).(purpose, invocation, read)
+  end
 
   defp invocation(purpose), do: %{output_schema_sha256: Schemas.ref(purpose).sha256}
 
