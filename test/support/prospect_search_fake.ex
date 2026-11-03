@@ -29,20 +29,18 @@ defmodule SdrAgentWeb.ProspectSearchFake do
   def authorized?(actor), do: HumanAuthority.hosted_owner?(actor)
 
   def start(actor, request) do
-    if authorized?(actor) do
-      case state().start do
-        :ok ->
-          n = Agent.get_and_update(__MODULE__, fn s -> {s.n + 1, %{s | n: s.n + 1}} end)
-          id = "fake-request-#{n}"
-          send(state().test_pid, {:fake_search_started, id, request, self()})
-          {:ok, id}
-
-        {:error, code} ->
-          {:error, code}
-      end
-    else
-      {:error, :forbidden}
+    cond do
+      not authorized?(actor) -> {:error, :forbidden}
+      state().start == :ok -> started(request)
+      true -> state().start
     end
+  end
+
+  defp started(request) do
+    n = Agent.get_and_update(__MODULE__, fn s -> {s.n + 1, %{s | n: s.n + 1}} end)
+    id = "fake-request-#{n}"
+    send(state().test_pid, {:fake_search_started, id, request, self()})
+    {:ok, id}
   end
 
   def cancel(actor, request_id) do

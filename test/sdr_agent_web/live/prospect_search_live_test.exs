@@ -317,7 +317,7 @@ defmodule SdrAgentWeb.ProspectSearchLiveTest do
     test "a revoked owner's pending result is withheld and the search closes", ctx do
       view = ctx |> open() |> open_search()
       {id, _} = search_companies(view)
-      assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id)
+      assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id, actor: ctx.user)
       html = deliver(view, id, result(:company, [company_candidate()]))
       refute has_element?(view, "#candidate-c1")
       refute has_element?(view, "#prospect-search")
@@ -386,9 +386,77 @@ defmodule SdrAgentWeb.ProspectSearchLiveTest do
       refute has_element?(view, "#candidate-p1")
       refute has_element?(view, "#company-source")
     end
+
+    test "changing company cancels pending people work, and its late result is not attached",
+         ctx do
+      birch =
+        company_candidate(%{
+          id: "c2",
+          name: "Birch Labs",
+          url: "https://birch-search.test/",
+          website_url: "https://birch-search.test/",
+          domain: "birch-search.test"
+        })
+
+      view =
+        ctx |> open() |> open_search() |> companies_shown([company_candidate(), birch])
+
+      view = confirm_company(view)
+      view |> form("#people-search-form", people: %{query: "founder"}) |> render_submit()
+      assert_receive {:fake_search_started, pending, %{kind: :people}, _caller}
+
+      view |> element("#change-company") |> render_click()
+      assert_receive {:fake_search_cancelled, ^pending, _caller}
+      view |> element("#select-company-c2") |> render_click()
+
+      view
+      |> form("#company-confirm-form",
+        company: %{website_url: "https://birch-search.test/", domain: "birch-search.test"}
+      )
+      |> render_submit()
+
+      assert has_element?(view, "#company-context", "Birch Labs")
+      deliver(view, pending, result(:people, [person_candidate()]))
+      refute has_element?(view, "#candidate-p1")
+    end
   end
 
   describe "pre-fill into Add prospect" do
+    test "pre-fill clears an earlier valid preview, so a stale commit saves nothing", ctx do
+      view = open(ctx)
+      view |> element("#add-prospect") |> render_click()
+
+      earlier = %{
+        "company_name" => "Acme Intake",
+        "domain" => "acme-intake.test",
+        "website_url" => "https://www.acme-intake.test/",
+        "first_name" => "Avery",
+        "last_name" => "Intake",
+        "title" => "VP Operations",
+        "email" => "avery@acme-intake.test",
+        "sources" => %{
+          "0" => %{
+            "url" => "https://www.acme-intake.test/",
+            "source_type" => "company_site",
+            "retrieved_on" => Date.to_iso8601(today()),
+            "excerpt" => "Acme Intake builds warehouse robots."
+          }
+        }
+      }
+
+      view |> form("#owner-intake-form", intake: earlier) |> render_submit()
+      assert has_element?(view, "#intake-preview")
+
+      view = view |> open_search() |> companies_shown() |> confirm_company() |> people_shown()
+      company_page(view)
+      view |> element("#prefill-p1") |> render_click()
+
+      refute has_element?(view, "#intake-preview")
+      render_hook(view, "intake_commit", %{})
+      assert has_element?(view, "#intake-error", "Preview the prospect before saving it.")
+      assert count("owner_prospect_intakes") == 0
+    end
+
     test "pre-fill needs the company page first", ctx do
       view =
         ctx |> open() |> open_search() |> companies_shown() |> confirm_company() |> people_shown()
@@ -526,10 +594,10 @@ defmodule SdrAgentWeb.ProspectSearchLiveTest do
         ctx |> open() |> open_search() |> companies_shown() |> confirm_company() |> people_shown()
 
       company_page(view)
-      assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id)
-      render_hook(view, "prefill", %{"id" => "p1"})
-      refute has_element?(view, "#owner-intake-form")
-      refute has_element?(view, "#prospect-search")
+      assert {:ok, _} = H.disable(ctx, ctx.enrolled.owner.id, actor: ctx.user)
+      # The existing session guard ends a revoked owner's view on any event.
+      assert {:error, {:redirect, %{to: "/sign-in"}}} =
+               render_hook(view, "prefill", %{"id" => "p1"})
     end
   end
 end
