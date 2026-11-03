@@ -249,13 +249,15 @@ defmodule SdrAgent.SDR.RemoteOutputConsumerTest do
       H.enter!(ctx)
 
       safely(fn ->
-        case Model.call(sdr(ctx), purpose, input, Ecto.UUID.generate()) do
-          {:ok, output, invocation} -> {:ok, safely(fn -> access.(output) end), invocation}
-          other -> other
-        end
+        consume(Model.call(sdr(ctx), purpose, input, Ecto.UUID.generate()), access)
       end)
     end)
   end
+
+  defp consume({:ok, output, invocation}, access),
+    do: {:ok, safely(fn -> access.(output) end), invocation}
+
+  defp consume(other, _access), do: other
 
   defp drive!(ctx, output) do
     _call = await_pending!(ctx)
