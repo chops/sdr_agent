@@ -297,6 +297,18 @@ defmodule SdrAgentWeb.ProspectSearchLiveTest do
       refute has_element?(view, "#candidate-c1")
     end
 
+    test "a repeated open cancels the pending request, and its late result is ignored", ctx do
+      view = ctx |> open() |> open_search()
+      {id, _} = search_companies(view)
+      render_hook(view, "search_open", %{})
+      assert_receive {:fake_search_cancelled, ^id, caller}
+      assert caller == view.pid
+      refute has_element?(view, "#search-running")
+
+      deliver(view, id, result(:company, [company_candidate()]))
+      refute has_element?(view, "#candidate-c1")
+    end
+
     test "a provider error shows a fixed message without the query", ctx do
       view = ctx |> open() |> open_search()
       {id, _} = search_companies(view, "SENTINEL-QUERY-91b2")

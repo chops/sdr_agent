@@ -189,7 +189,8 @@ defmodule SdrAgentWeb.LeadLive.Index do
 
     def handle_info(_message, socket), do: {:noreply, socket}
 
-    defp search_event("search_open", _params, _user, socket), do: reset_search(socket, true)
+    defp search_event("search_open", _params, user, socket),
+      do: socket |> cancel_pending(user) |> reset_search(true)
 
     defp search_event("search_close", _params, user, socket),
       do: socket |> cancel_pending(user) |> reset_search(false)
