@@ -103,3 +103,29 @@ facade's remote return, not a full BuildEvidenceBundle run; a full remote
 action run needs SDRCase lead/settings fixtures combined with the hosted
 Mac-worker world, which no existing harness provides. Raised for Codex's
 4a decision.
+
+* Verification and deployment (2026-11-03)
+- RED: d31d9b53, then e23c828e (missing function fails as an export
+  assertion); lane c4-20261103T040137Z-84910: 24/36, the 12 new tests fail
+  as intended (10 export assertions, T2 KeyError =:claims=, T3 KeyError
+  =:score=). Codex RED VERIFIED and GREEN GO.
+- GREEN: 199f90c3 (model.ex only); focused lane
+  c4-20261103T040350Z-94662 36/36. Credo nesting split in the test helper
+  (no assertion change): release candidate 327158fd, Codex source PASS.
+- Full gate c4-20261103T040528Z-3176 at 327158fd: format, WAE compile,
+  credo, audit, codegen, workflow rc0; suite 6208/6222, verdict FAIL
+  retained: 14 failures, names identical to baseline
+  c4-20261101T161219Z-37297 (inherited Journey/Output/Setup), 0 new.
+  Sobelow not run: not a project dependency. Qualified no-new-failures
+  deploy ruling (Claude) under D-271.
+- Deploy (Codex): artifact 1f18abd0, revision 327158fd. First switch
+  rolled back automatically (health loop ended after ~11.5 s; cause
+  UNPROVEN; no assignment or model call). Switch r2 (180 s readiness
+  window) healthy in 4 s.
+- Live validation: ONE owner-approved Rystic capture-only run
+  01a19fb4-960f-76c5-9298-b07c50f86751 succeeded (phase review): 3 remote
+  calls completed and released, 5 accepted evidence claims, qualified, one
+  draft pending review; approvals and deliveries 0; grant 92/100 left.
+- Limitation kept: T2/T3 assert the consumers' exact access on the remote
+  facade return, not a full remote action run; the live run covered the
+  full path once.
