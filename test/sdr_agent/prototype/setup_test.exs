@@ -348,7 +348,8 @@ defmodule SdrAgent.Prototype.SetupTest do
       assert is_list(pinned), "pinned_migrations/0 returned #{inspect(pinned)}"
       assert pinned == migration_files()
       assert pinned == Enum.sort(pinned)
-      assert length(pinned) == 38
+      assert length(pinned) == 39
+      assert List.last(pinned) == {20261103053320, "owner_prospect_intake"}
 
       %{rows: rows} =
         Repo.query!("SELECT version FROM schema_migrations ORDER BY version", [])
@@ -392,6 +393,8 @@ defmodule SdrAgent.Prototype.SetupTest do
       pinned = call(@authority, :public_tables, [])
       observed = observed_public_tables()
       assert pinned == observed, "pinned #{inspect(pinned)}; observed #{inspect(observed)}"
+      assert "owner_prospect_intakes" in pinned
+      assert "owner_prospect_sources" in pinned
     end
 
     test "F1: a missing non-named table refuses both, with exact version rows" do
