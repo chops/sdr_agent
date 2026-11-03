@@ -129,7 +129,12 @@ defmodule SdrAgentWeb.OwnerCitedDraftTest do
 
     %{id: run_id} =
       op!(
-        %{command: :assign, agent: :claude_code, lead: ctx.ids.lead_id, campaign: ctx.campaign_id},
+        %{
+          command: :assign,
+          agent: :claude_code,
+          lead: ctx.ids.lead_id,
+          campaign: ctx.campaign_id
+        },
         ctx.actor
       )
 
@@ -222,11 +227,13 @@ defmodule SdrAgentWeb.OwnerCitedDraftTest do
     send(view.pid, :live_refresh)
 
     assert has_element?(view, "#newer-revision")
+
     assert has_element?(view, "#owner-supplied-evidence"),
            "a newer revision cleared the banner of the revision on screen"
 
     view |> element("#show-latest-revision") |> render_click()
     refute has_element?(view, "#newer-revision")
+
     refute has_element?(view, "#owner-supplied-evidence"),
            "the latest revision cites no owner evidence but still shows the banner"
   end
