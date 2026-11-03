@@ -1,0 +1,201 @@
+#+TITLE: Website prospect search using Exa
+#+DATE: 2026-11-03
+#+STATUS: ENTITY PASS; plan and ADR-0027 proposed, awaiting owner acceptance
+
+* Request and minimum useful outcome
+Owner: "it needs to be able to search for new companies and contacts ... get it
+done right now." Owner has Brave/Exa keys and directed a read-only lookup in
+research_harness. EXA_API_KEY is present/decryptable in that project's SOPS
+secrets/collector-search.yaml; no plaintext value displayed, copied or sent.
+
+Deliver a real owner-only search in sdr.a-z.bot, not another manual sourcing
+procedure. Search company criteria, select/confirm a company's official website,
+then explicitly search for people at that company by role. Inspect cited cards,
+request the company-page excerpt, and select a person to prefill the existing
+Add prospect form. Owner reviews/completes fields, previews and
+saves via unchanged OwnerIntake. Search alone creates no Account/Contact/Lead.
+No lifetime company/contact quotas; result batches and request limits bound
+one paid operation, not stored records. Unknown email remains unknown.
+
+* Entity Model
+Entity Model trigger: yes
+Reason: new external-search/backend event contracts and owner-scoped ephemeral
+request/candidate lifecycle, even though no persisted domain schema changes.
+
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+|--------+----------------+---------+------------+---------------+------------------------+--------------+----------------|
+| ProspectSearchRequest | New ephemeral value/action contract | One explicitly requested paid search | opaque request id; server owner/tenant; query required UTF-8 <=500 bytes; category company/people; batch10; server start time; no caller endpoint/key | server-resolved live User/tenant; candidates belong to this request; people search requires selected CompanyContext; no persisted FK | idle->running->complete/refused/cancelled; terminal results cannot overwrite a newer request; owner-wide monitored limiter as below; total deadline30s; no automatic retry/fallback | Fresh hosted owner before egress and before displaying result; ordinary build, auditor, nonowner, stale/revoked owner denied | Owner acceptance of API/provider usage |
+| ProspectSearchCandidate | New ephemeral value contract | A sourced finding, not a saved prospect | opaque server id; kind company/person; provider id; safe HTTPS source URL; provider title; optional structured company/person/role fields; bounded exact provider text/highlights; received_at, provider date if supplied; unverified | exactly one request/owner/tenant; optional reference to a source employer, never inferred Account ownership | receive->shown->selected/discarded; stale request/card refused; URL dedup within batch; no lifetime dedup cap; missing fields stay nil; provider relevance is not verified ICP fit/current employment/deliverability | Only requesting fresh owner; never accept client-submitted card fields as authority | None |
+| CompanyContext | New ephemeral value contract | Selected company before people search | company name/domain/site only when explicitly supplied by provider or confirmed by owner; role filter optional; website_url owner-confirmed | search request/card context only; existing Account lookup remains OwnerIntake's | Never identify company domain from profile/directory host; company-first flow, owner confirms public HTTPS website/domain; person employment match only when provider history has to=null and exact NFC/trim/casefold company name equality; nonmatch labelled employer-unconfirmed and not used for prefill; never overwrite existing Account | Same owner; fresh validation at intake preview/save | None |
+| IntakePrefill | Existing OwnerIntake input dependency; new handoff event | Reviewable suggestions, not a new write path | Existing form fields plus literal per-source excerpts; no new persisted fields; query/result text is data, never instructions | selected current matched person + CompanyContext + explicit Exa contents of confirmed website_url -> existing OwnerIntake.preview/commit; existing source1..3/request byte bounds unchanged | prefill clears old preview; website_url exactly equals company_site source URL; source/date rules below; no auto-save/assignment; email intentionally blank in v1; owner completes required work email; no invented excerpt/name/employer | Existing fresh owner/domain policy rechecks unchanged | Owner accepts API-derived text under existing account terms; no resale/bulk cache |
+| ProviderCredential | New runtime configuration boundary | Authorize only Exa search/contents requests | EXA_API_KEY, server secret only; enabled flag false by default; fixed api.exa.ai TLS endpoint; never in browser/argv/logs/telemetry/fixtures | SOPS origin -> explicitly approved root-only SDR secret provisioning; no reference to harness runtime | Missing/invalid key -> closed unavailable result; no signup/plan changes or Brave key access; no automatic API fallback/spend; existing shared key couples billing/rotation with research_harness, which is not modified | Provisioning only by reviewed owner-authorized ops; runtime reads selected secret only | Owner acceptance of existing/shared key or optional dedicated key, not mandatory new account |
+| ProspectSearchLimiter | New ephemeral runtime state | Bound concurrent paid actions across owner tabs | owner id -> monitored holder/ref + monotonic cooldown expiry; five-second cooldown after completion; no query/key/result values | dedicated search supervision subtree: Limiter + Task.Supervisor, one_for_all | One paid action per owner; task exit releases permit; subtree restart terminates in-flight tasks and clears transient lock/cooldown state; no retry after crash/uncertain send; cancellation cannot undo vendor charges | Internal search API only; no client-owned permit id | None |
+| SearchUsageObservation | New value-free telemetry contract, NOT a persisted ledger | Count requested/outcome operations without storing search data | request id, operation company_search/people_search/contents, result count, closed outcome, provider-reported cost if returned; no input/output text | no new AuditEntry schema/action, no Operation or model charge | No durable per-request usage/disclosure record in v1; provider dashboard is billing record; counters reset on runtime restart; no claim of in-app monthly spending enforcement | Internal telemetry, not exposed as credentials/content | Owner explicitly accepts lack of durable app-level reconciliation |
+| User/HostedOwner | Existing read dependency | Gate new paid read actions | no attribute changes | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Recheck owner on every search/select/prefill event and result completion | No operator impersonation, delegation mint or generic reviewer access | None |
+| Account/Contact/Lead/OwnerProspectIntake/OwnerProspectSource/Payload | Existing persistence dependencies | Explicit owner save only | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | Search never writes them; existing preview/commit/replay/conflict behavior preserved | Existing OwnerIntake authorization | None |
+
+Capabilities: ai_pair=true, codex_review=true. Reviewer: Claude via correlated
+ap consultation. r1 verdict NEEDS-REVIEW m_1793730418623398000_db45d27d,
+review1eee0972; E1-E6 addressed in r2 below. r2 verdict: PASS, Claude via
+m_1793730594465143000_8b39726e, 2026-11-03T18:29:54Z, review sha256
+96604a6573d855c2267c026147a295e3129ad81a9c8bedbba230d73c025e6ebb.
+No production implementation until owner plan/ADR acceptance. Affected modules
+below were explored only after this PASS.
+
+* Candidate decisions for bundled owner acceptance
+- Exa only for v1, category company/people through /search. No Brave fallback,
+  Exa Agent/Websets/enrichment, deep synthesis, direct LLM API, or Claude call.
+- Server requests fixed api.exa.ai only. Never fetch result URLs directly.
+  Optional explicit card open retrieves bounded source text via Exa /contents;
+  it is a separate visible paid operation, not automatic per-result crawling.
+- Results live in the owner's LiveView session, not new database tables/jobs.
+  Disconnect/restart discards unsaved findings. This is interactive discovery,
+  not scheduled/unattended discovery or a durable queued search.
+- Plain-text query is disclosed as being sent to Exa. No CRM rows, campaign
+  secrets, user email, model prompt or automatic whole-ICP upload.
+- Search returns unverified company/person findings, not guaranteed work emails.
+  Source text is provider-indexed content; unknown indexing/role dates stay
+  unknown. Owner must complete unavailable required fields before saving.
+- Company-first source path: select/confirm the company's official HTTPS URL
+  and domain, then an explicit people search at that company; provider employment
+  match is exact normalized company name and to=null, not proof of a current job.
+  Explicit Get company page invokes /contents for exactly that confirmed URL,
+  which must pass the existing public/company host rules. A directory/profile
+  result never silently supplies the company domain. No global people mode in v1.
+- Source map: confirmed website_url /contents text -> company_site; person
+  profile text/highlights -> directory; company directory result -> directory.
+  retrieved_on is provider-response receipt UTC date, not publishedDate.
+  Excerpts are UTF-8-safe literal prefixes/slices <=2000 bytes for that source
+  URL; no JSON-to-prose synthesis. Entity fields are separately labelled
+  "Exa provider data, unverified"; excerpts never falsely substantiate all fields.
+- Email is deliberately not extracted/prefilled in v1 (search person entities
+  have no email field). Owner enters the required personal work address.
+  This finds real companies/named people; it is not automatic email enrichment.
+- Provision only EXA_API_KEY securely into the SDR service's root-only secret
+  mechanism; no key in repository, browser, tool output, or process arguments.
+  Do not modify research_harness or its running jobs.
+- No automatic requests on page load/change, retries, fallback, paid enrichment,
+  outreach or model spend. Owner clicks each paid operation. Provider dashboard
+  spending limits remain authoritative; no new plan or account changes.
+- No new durable app ledger for search disclosures/charges. Value-free counters
+  aid diagnostics; Exa dashboard records billing. Sharing the existing key also
+  shares quota/rotation with research_harness. Dedicated SDR key is optional.
+- Account terms remain applicable; source excerpts are retained only when the
+  owner submits the existing intake form, never bulk cached/resold. Exa terms
+  sections1.1/4.1 tie API use to documentation, and4.2(a) restricts copying except
+  as permitted. This is not a blanket third-party-content license or legal
+  certification. Owner acceptance covers normal account use, not a waiver of
+  Exa/source rights; any account-specific restriction must be honored.
+
+* Required acceptance checks (before implementation)
+1. Fixture company and person API responses become cited cards; missing fields
+   remain blank, duplicate URLs collapse, source/profile host not misused as a
+   company domain, old request results cannot overwrite a newer search.
+   Nonmatched/ambiguous employer cannot prefill. Contents source URL equals the
+   owner-confirmed website_url; directory/profile host never becomes domain.
+   Entity facts and literal excerpts are visibly distinct; dates follow receipt.
+   Provider /contents response host must match the confirmed website host;
+   mismatch refuses with no excerpt/source URL substitution (review N1).
+2. Unauthorized/auditor/ordinary/stale owner cannot trigger egress or see cards;
+   owner revocation after request start withholds results. Selection ownership
+   and request id enforced server-side; forged/stale card ids refused.
+3. One in-flight paid operation per owner across tabs; explicit cancellation,
+   disconnect and total deadline release it. Rate/timeout/auth/quota/oversize/
+   malformed response errors produce closed UI outcomes; no automatic retries.
+   Search subtree restart terminates all outstanding tasks, resets only ephemeral
+   limiter state and never resends an uncertain request; charges may still occur.
+   Late task messages are dropped by request id. Only a holder monitor releases
+   the permit; a forged/stale result message cannot release another task (N2).
+4. Fixed endpoint, TLS verification, no redirected credential forwarding, bounded
+   request/response bytes and time. No caller-controlled headers/endpoints.
+   Unsafe result URLs dropped; third-party images/favicon never auto-loaded.
+5. Prefill changes clear old preview; existing OwnerIntake save success/deny/
+   conflict/replay tests pass. Search/open/prefill alone leaves existing business,
+   model, remote-call and operation counts unchanged.
+6. Logs/telemetry/crash/error paths never expose API key/query/result/email/text;
+   scoped sensitive metadata and closed errors, including provider HTTP bodies.
+7. Browser rendering: loading/empty/error/cancelled/result states, escaped hostile
+   source text, responsive cards; browser refresh loses unsaved findings honestly.
+8. After activation approval, a small explicit live Exa smoke proves non-fixture
+   company and person retrieval. Report actual results/charged requests, not
+   guaranteed email or full ICP coverage. No real record save during smoke.
+
+* ADR and architecture
+Required: YES, ADR-0027 (proposed): paid external search/data boundary and
+interactive ephemeral lifecycle versus durable background discovery. Extends
+ADR-0026 input workflow only; does not accept the old unimplemented ADR-0025.
+Evaluate/regenerate runtime diagrams for new external provider and web flow.
+
+* Affected modules (post-ENTITY-PASS exploration)
+- New lib/sdr_agent/prototype/prospect_search.ex: public fresh-owner search API
+  with the established compile-time prototype refusal boundary (OwnerIntake
+  pattern); no persistence/domain-write path.
+- New lib/sdr_agent/discovery/{candidate,company_context,exa_client,
+  exa_transport,limiter,supervisor}.ex: pure normalized values, fixed provider
+  protocol, bounded pinned TLS POST, supervised request concurrency. Reuse the
+  reviewed PublicAddress/TLS-streaming mechanisms from8839d303 selectively;
+  do not enable its arbitrary PublicWeb crawler or robots workflow for an API.
+- lib/sdr_agent/application.ex: search subtree before Endpoint only when the
+  explicit feature config is enabled; disabled ordinary build stays inert.
+- config/runtime.exs, config/test.exs: runtime EXA_API_KEY name and explicit
+  feature flag; fixture/test-only transport seam. No secret in compile config.
+- lib/sdr_agent_web/live/lead_live/index.ex plus new prospect_search_panel.ex
+  and intake_prefill.ex helpers: owner-only company-first search within /leads,
+  per-request async state, cancellation, stale result suppression, existing
+  OwnerIntakePanel form reuse. No new URL or route authentication boundary.
+- Focused tests for all new pure/runtime/provider/UI paths; regression tests
+  for the unchanged OwnerIntake normalize/preview/commit boundary and ordinary
+  production refusal. docs/architecture runtime flow and feature notes.
+
+Existing SearchProvider behaviour is for the research-agent path (url/title/
+snippet only), not owner-interactive typed candidates; do not silently replace
+the research providers or connect discovery to assignment/model execution.
+
+* Implementation plan and ownership
+1. Pin the Candidate/CompanyContext/closed-error API contract in the feature
+   branch. Codex owns backend/config/supervision; Claude owns web/prefill tests.
+   Fresh owner check uses existing HumanAuthority/HostedOwners paths; no fake
+   delegation. Use the project's Req dependency, no new SDK/package.
+2. RED backend contract, provider parsing, owner allow/deny, limiter/deadline/
+   restart and TLS/streaming tests against fixtures/local TLS only. Confirm
+   intended missing-behavior failures before GREEN. No paid API during TDD.
+3. RED web company->people->company-page->prefill tests, labels/unknowns, stale
+   cards and revoke/cancel/disconnect tests. Independent peer RED ruling, then
+   smallest GREEN implementation. Intake save policy is never relaxed.
+4. Merge backend/UI; run focused tests, ordinary-production refusal/WAE, hosted
+   authority build/WAE, format, configured Credo/codegen/audit/workflow and
+   mix precommit using isolated project verification lanes. Compare exact full
+   failure names to the known14 baseline; retain measured FAIL if inherited.
+   Peer source review; runtime diagram update for new supervision/provider flow.
+5. After the bundled owner approval, securely provision only the selected Exa
+   key/feature flag through reviewed SDR-only secret ops. Preserve all existing
+   hosted env entries; never alter the harness SOPS file, key rotation, service
+   or jobs. Build/stage exact pushed release, review deployment bytes and health
+   rollback; no database migration/grant or backup-state prerequisite.
+6. Execute at most five basic Exa /search or /contents smoke requests (including
+   failed/uncertain attempts), no enrichment/Agent/Websets/plan changes. Retain
+   count/cost and aggregate/source-only evidence without credentials. Demonstrate
+   actual company and person results, unchanged existing business/model counts,
+   and no automatic record save. No claiming live success from fixtures alone.
+7. Deploy under existing SDR-only authority after readiness, verify revision,
+   health/sign-in/assets/anonymous denial and owner-visible search workflow.
+   No login-token/password operation or real save without separate owner action.
+   Report any untested authenticated browser action and inherited test failures.
+   Commit/push maintained docs and receipt; preserve previous release/artifacts.
+
+* Bundled owner approval requested
+Accept ADR-0027 and this plan: Exa-only company/people search, existing SOPS key
+securely provisioned for SDR, existing-account credits/charges for explicit
+owner clicks and at most five basic validation requests, no paid plan change.
+Accept transient unsaved results/no durable per-search app ledger and shared
+key quota/rotation consequences. Email remains owner-entered; email enrichment
+is NOT included. Existing SDR deployment authority applies after verification;
+no outreach/model/automatic prospect save is authorized.
+
+* Current execution status
+No production source changes, API consumption, key provisioning, deployment,
+real data mutation or research_harness modifications have occurred. Only public
+documentation/source feasibility reads and an Exa-key decryptability check.
+The plan skill requires owner acceptance before implementation; the key is not
+a technical blocker. Peer plan review may refine implementation details without
+silently expanding the owner-facing scope above.
