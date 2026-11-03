@@ -4,10 +4,12 @@ defmodule SdrAgent.SDR.Actions.ReadCompanyPage do
   page through the configured `SdrAgent.Integrations.WebFetch` adapter and
   records it with the source type and trust level the adapter reports.
 
-  D-237 prototype runtime (supplement 1 r2 section 6a): the page is the
-  dossier source whose `final_url` is the URL, read only through
-  `SdrAgent.Research.read_dossier_sources/4`; its bytes are recorded
-  unchanged (`ResearchArtifact :record` binds them to the source).
+  D-237 prototype runtime (supplement 1 r2 section 6a; ADR-0026): the page
+  is the source of the lead's one origin (dossier entry or owner intake)
+  whose `final_url` is the URL, read only through
+  `SdrAgent.Research.read_lead_sources/4`; its bytes are recorded unchanged
+  (`ResearchArtifact :record` binds them to the source). Owner sources are
+  recorded as provider `:owner_intake`, trust `:unverified`.
   """
   use SdrAgent.SDR.Action,
     name: "sdr_read_company_page",
@@ -30,15 +32,15 @@ defmodule SdrAgent.SDR.Actions.ReadCompanyPage do
   def read(ctx, lead_id, url), do: dispatch(ctx, lead_id, url)
 
   @doc """
-  Records one source returned by `SdrAgent.Research.read_dossier_sources/4`
+  Records one source returned by `SdrAgent.Research.read_lead_sources/4`
   (shared with `SearchCompany`): its bytes unchanged, its `final_url` as the
   source URL, a company-site source as `:company_website`, any other as
-  `:web_page`.
+  `:web_page`, and the provider of its origin.
   """
   def record_source(ctx, lead_id, source) do
     Support.record_artifact(ctx, lead_id, %{
       source_type: page_type(source.source_type),
-      provider: :public_dossier,
+      provider: provider(source),
       source_url: source.final_url,
       title: nil,
       content: source.content,
@@ -54,13 +56,13 @@ defmodule SdrAgent.SDR.Actions.ReadCompanyPage do
 
     defp dispatch(ctx, lead_id, url) do
       if SdrAgent.Prototype.runtime() == :prototype,
-        do: read_dossier(ctx, lead_id, url),
+        do: read_source(ctx, lead_id, url),
         else: fetch(ctx, lead_id, url)
     end
 
-    defp read_dossier(ctx, lead_id, url) do
+    defp read_source(ctx, lead_id, url) do
       with {:ok, [source]} <-
-             Research.read_dossier_sources(ctx.run_id, lead_id, {:final_url, url}, ctx.actor) do
+             Research.read_lead_sources(ctx.run_id, lead_id, {:final_url, url}, ctx.actor) do
         record_source(ctx, lead_id, source)
       end
     end
@@ -84,6 +86,9 @@ defmodule SdrAgent.SDR.Actions.ReadCompanyPage do
       })
     end
   end
+
+  defp provider(%{origin: :owner_intake}), do: :owner_intake
+  defp provider(_source), do: :public_dossier
 
   defp page_type(:company_site), do: :company_website
   defp page_type(_other), do: :web_page

@@ -111,6 +111,13 @@ defmodule SdrAgent.Prototype.LeadSourceReadTest do
     |> Ash.run_action()
   end
 
+  # The action returns the model-facing summary; provider and trust are
+  # read from the stored artifact row.
+  defp stored!(ctx, summary) do
+    {:ok, artifact} = Ash.get(SdrAgent.Research.ResearchArtifact, summary.id, H.kernel(ctx))
+    artifact
+  end
+
   defp sdr_ctx(ctx, run) do
     %SdrAgent.SDR.Context{
       actor: ctx.agent,
@@ -123,6 +130,8 @@ defmodule SdrAgent.Prototype.LeadSourceReadTest do
 
   describe "owner intake origin" do
     setup ctx do
+      # Agent runs need the seeded settings (offering profile).
+      assert match?({:ok, _}, call(@seed, :run, [D.seed_read(), ctx.fx.actor]))
       ids = intake!(ctx, params())
       Map.merge(ctx, %{ids: ids, run: running_run!(ctx, ids.lead_id)})
     end
@@ -225,8 +234,12 @@ defmodule SdrAgent.Prototype.LeadSourceReadTest do
       page = SdrAgent.SDR.Actions.ReadCompanyPage
       assert {:ok, artifact, _ref} = page.read(sdr_ctx(ctx, ctx.run), ctx.ids.lead_id, url)
 
-      assert {artifact.provider, artifact.trust_level, artifact.source_type} ==
+      stored = stored!(ctx, artifact)
+
+      assert {stored.provider, stored.trust_level, stored.source_type} ==
                {:owner_intake, :unverified, :company_website}
+
+      assert stored.metadata["retrieved_at_meaning"] == "owner_submitted"
 
       assert {artifact.content, artifact.source_url} == {@site_excerpt, url}
     end
@@ -238,7 +251,13 @@ defmodule SdrAgent.Prototype.LeadSourceReadTest do
                  sdr_ctx(ctx, ctx.run)
                )
 
-      assert Enum.map(artifacts, &{&1.source_url, &1.provider, &1.trust_level, &1.content}) == [
+      recorded =
+        Enum.map(artifacts, fn summary ->
+          stored = stored!(ctx, summary)
+          {summary.source_url, stored.provider, stored.trust_level, summary.content}
+        end)
+
+      assert recorded == [
                {"https://www.acme-intake.test/team", :owner_intake, :unverified, @team_excerpt}
              ]
     end
