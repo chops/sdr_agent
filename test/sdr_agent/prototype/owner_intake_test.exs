@@ -281,7 +281,7 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
     admin = human(:admin, ctx.fx.tenant)
 
     assert {:ok, _} =
-             SdrAgent.Outreach.suppress(%{scope: :domain, value: "intake.test", reason: :manual},
+             SdrAgent.Outreach.suppress(%{scope: :domain, value: "intake.test"},
                actor: admin
              )
 
