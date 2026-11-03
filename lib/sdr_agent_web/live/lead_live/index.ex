@@ -101,7 +101,8 @@ defmodule SdrAgentWeb.LeadLive.Index do
   end
 
   def handle_event("intake_preview", %{"intake" => form}, socket) when is_map(form) do
-    socket = assign(socket, intake_form: to_form(form, as: :intake), preview: nil, intake_params: nil)
+    socket =
+      assign(socket, intake_form: to_form(form, as: :intake), preview: nil, intake_params: nil)
 
     if owner_now?(socket) do
       params = OwnerIntakePanel.params(form)
@@ -139,7 +140,9 @@ defmodule SdrAgentWeb.LeadLive.Index do
   defp commit(socket, params, preview) do
     case OwnerIntake.commit(params, preview, socket.assigns.current_scope.user) do
       {:ok, mode, %{lead_id: lead_id}} when mode in [:created, :replay] ->
-        flash = if mode == :created, do: "Prospect saved.", else: "This prospect was already saved."
+        flash =
+          if mode == :created, do: "Prospect saved.", else: "This prospect was already saved."
+
         {:noreply, socket |> put_flash(:info, flash) |> push_navigate(to: ~p"/leads/#{lead_id}")}
 
       {:error, code} ->
