@@ -81,19 +81,19 @@ the released scope's record hash), and no trigger-off fixture is allowed.
    source review, hand to Codex for build/deploy under D-271.
 
 * Required Tests
-- [ ] T1 JSON roundtrip: each of the four purpose schemas, atom output →
+- [X] T1 JSON roundtrip: each of the four purpose schemas, atom output →
       JSON → string map → =reparse_released/3= = the atom-keyed output.
-- [ ] T1b no atom minting: an unknown string key never becomes an atom.
-- [ ] T2 remote evidence consumer access: =Model.call(:evidence_extraction)=
+- [X] T1b no atom minting: an unknown string key never becomes an atom.
+- [X] T2 remote evidence consumer access: =Model.call(:evidence_extraction)=
       under =:remote=, then the consumer's own access (=output.claims=,
       =claim.source/quote/quality=) succeeds.
-- [ ] T3 remote qualification consumer access (=score=, =criteria=,
+- [X] T3 remote qualification consumer access (=score=, =criteria=,
       =evidence_ids=).
-- [ ] T4 withheld/unreleased stay halts with no output: existing
+- [X] T4 withheld/unreleased stay halts with no output: existing
       =remote_provider_test.exs= "a withheld result gives the caller no
       business output" (run in the same lane; must stay green).
-- [ ] T5a schema-sha mismatch → ={:error, :schema_mismatch}=.
-- [ ] T5b invalid released map (out-of-range, missing key, non-map) →
+- [X] T5a schema-sha mismatch → ={:error, :schema_mismatch}=.
+- [X] T5b invalid released map (out-of-range, missing key, non-map) →
       ={:error, :invalid_output}=.
 Synthetic completions only; no model, CLI or network.
 
@@ -116,7 +116,7 @@ Mac-worker world, which no existing harness provides. Raised for Codex's
   credo, audit, codegen, workflow rc0; suite 6208/6222, verdict FAIL
   retained: 14 failures, names identical to baseline
   c4-20261101T161219Z-37297 (inherited Journey/Output/Setup), 0 new.
-  Sobelow not run: not a project dependency. Qualified no-new-failures
+  Sobelow not run: not a project dependency (attempted mix sobelow --config: rc1 task not found; N/A, never PASS). Qualified no-new-failures
   deploy ruling (Claude) under D-271.
 - Deploy (Codex): artifact 1f18abd0, revision 327158fd. First switch
   rolled back automatically (health loop ended after ~11.5 s; cause
