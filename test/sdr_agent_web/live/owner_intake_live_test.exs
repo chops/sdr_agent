@@ -211,4 +211,59 @@ defmodule SdrAgentWeb.OwnerIntakeLiveTest do
     refute log =~ "SENTINEL-EXCERPT-7f3a"
     refute log =~ "sentinel-7f3a"
   end
+
+  describe "preview edit safety and effective reused company" do
+    test "editing after preview requires a fresh preview before saving", ctx do
+      view = ctx |> open() |> open_panel() |> preview(form_params())
+      assert has_element?(view, "#intake-preview")
+      edited = form_params(%{"company_name" => "Acme Edited"})
+      view |> form("#owner-intake-form", intake: edited) |> render_change()
+      refute has_element?(view, "#intake-preview"), "an edit retained the old preview"
+
+      before = counts()
+      render_hook(view, "intake_commit", %{})
+      assert has_element?(view, "#intake-error", "Preview the prospect before saving it.")
+      assert counts() == before
+      preview(view, edited)
+      assert has_element?(view, "#intake-preview", "Acme Edited")
+    end
+
+    test "adding a source row invalidates the preview without saving", ctx do
+      view = ctx |> open() |> open_panel() |> preview(form_params())
+      assert has_element?(view, "#intake-preview")
+      view |> element("#intake-add-source") |> render_click()
+      refute has_element?(view, "#intake-preview")
+      before = counts()
+      render_hook(view, "intake_commit", %{})
+      assert has_element?(view, "#intake-error", "Preview the prospect before saving it.")
+      assert counts() == before
+    end
+
+    test "the subtitle accurately describes owner-supplied prospects", ctx do
+      view = open(ctx)
+      refute has_element?(view, "p", "Fictional accounts and contacts")
+      assert has_element?(view, "p", "owner-supplied")
+    end
+
+    test "reuse previews the unchanged company's real name and website", ctx do
+      view = ctx |> open() |> open_panel() |> preview(form_params())
+      view |> element("#intake-commit") |> render_click()
+      assert_redirect(view)
+
+      second =
+        form_params(%{
+          "company_name" => "Ignored replacement name",
+          "website_url" => "https://acme-intake.test/",
+          "first_name" => "Riley",
+          "email" => "riley@acme-intake.test"
+        })
+
+      view = ctx |> open() |> open_panel() |> preview(second)
+      assert has_element?(view, "#intake-preview-mode", "Existing company")
+      assert has_element?(view, "#intake-preview-website", "https://www.acme-intake.test/")
+      refute has_element?(view, "#intake-preview-website", "https://acme-intake.test/")
+      assert has_element?(view, "#intake-preview-company", "Acme Intake")
+      refute has_element?(view, "#intake-preview-company", "Ignored replacement name")
+    end
+  end
 end
