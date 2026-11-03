@@ -1,0 +1,98 @@
+#+TITLE: Exa website search shared implementation contract v1
+#+DATE: 2026-11-03
+#+STATUS: Proposed implementation contract within accepted ADR-0027; peer ACK pending
+
+* Ownership
+Codex: lib/sdr_agent/discovery/**, prototype/prospect_search.ex, config,
+application.ex, backend tests. Claude: lead_live/index.ex, search panel,
+pure IntakePrefill and web tests. No overlapping writes. Use maps rather
+than structs so web RED compiles before backend GREEN. No new persisted entity.
+
+* Public facade: SdrAgent.Prototype.ProspectSearch
+- available?(actor) :: boolean (enabled, key configured, fresh hosted owner).
+- start(actor, request) :: {:ok, request_id} | {:error, code}. Async, receiver
+  is always the calling process, never a browser-supplied pid. request:
+  %{kind: :company, query: utf8_string} OR
+  %{kind: :people, query: role_string, company: CompanyContext} OR
+  %{kind: :contents, company: CompanyContext}.
+- cancel(actor, request_id) :: :ok | {:error, code}; same owner and calling
+  process only. Permit released by worker-monitor DOWN, never a result message.
+- authorized?(actor) :: boolean: fresh owner check without feature/key check,
+  used before handling any result, context selection or prefill event.
+- Result message: {:prospect_search_result, request_id, outcome} where outcome
+  is {:ok, Result} or {:error, code}. UI accepts only the active request id and
+  rechecks authorized? before using any data. No data ever sent to browser for
+  a revoked/non-owner. cancel/disconnect clears current request; late data ignored.
+- Ordinary production build: available?/authorized? false, start/cancel refused.
+- UI test adapter (test build only): app env :prospect_search_ui_adapter, default
+  real facade. Backend provider fake (test build only): :prospect_search_client,
+  default SdrAgent.Discovery.ExaClient; callback execute(request) returns outcome.
+  No test adapter or endpoint override is respected in production.
+
+* Maps (atom keys, nullable fields present)
+Candidate = %{id: opaque_string, kind: :company | :person,
+  provider_id: string | nil, url: safe_https_url, title: page_title,
+  name: company_or_person_name | nil, first_name: string | nil,
+  last_name: string | nil, role: string | nil, company_name: string | nil,
+  website_url: safe_https_url | nil, domain: string | nil,
+  employee_count: integer | nil, location: string | nil,
+  employer_match?: boolean, excerpt: literal_utf8_string | nil,
+  retrieved_on: Date, provider_date: string | nil}.
+Structured entity fields are suggestions, separately labelled Exa data/unverified.
+No email key/prefill; owner must supply it. title is page title, role is job title.
+Website/domain are only suggestions and always require explicit owner confirmation;
+known profile/directory hosts never suggest a company website/domain.
+
+CompanyContext = %{id: company_candidate_id, name: confirmed_company_name,
+  domain: confirmed_ascii_domain, website_url: confirmed_public_https_url}.
+Pure Candidate.company_context(candidate, %{website_url: string, domain: string})
+returns {:ok, CompanyContext} | {:error, :invalid_input}; name must be a provider
+company name, never inferred from a profile host/title. UI holds this server-side.
+Backend validates the context again. Candidate ids and contexts never accepted
+from event params as complete objects; event sends only id and explicit inputs.
+
+Result for company/people = %{kind: :company | :people, candidates: [Candidate],
+  cost_dollars: finite_nonnegative_number | nil}.
+Result for contents = %{kind: :contents, source: Source,
+  cost_dollars: finite_nonnegative_number | nil}.
+Source = %{url: confirmed_website_url, source_type: :company_site,
+  retrieved_on: Date, excerpt: literal_utf8_string}.
+Contents reported URL host must equal confirmed website host, both must satisfy
+public/company rules. No substituted URL. UTF-8-safe exact excerpt <=2000 bytes.
+
+* Client and pure normalization
+ExaClient.execute(request) reads the selected key server-side and calls only
+fixed api.exa.ai. No owner actor: it is internal transport, not web authority.
+ExaClient.normalize_search(decoded_response, kind, company_or_nil, received_on)
+  :: {:ok, Result} | {:error, code}.
+ExaClient.normalize_contents(decoded_response, CompanyContext, received_on)
+  :: {:ok, Result} | {:error, code}.
+Companies use entity type company/properties.name (no company-name-from-title).
+People use entity type person/properties.firstName,lastName,workHistory. A role
+and employer are selected only for one exact normalized company-name match with
+to=nil; ambiguous multiple matches or absent match yield employer_match? false
+and nil role. This is provider evidence, never verification of current employment.
+No synthesized source excerpt: use text if nonempty, else one highlight; prefix
+<=2000 bytes at UTF-8 boundary. Retain provider date separately; receipt UTC date
+is retrieved_on. Duplicate source URLs within the response collapse.
+Unsafe/malformed individual results dropped; malformed top-level response closed.
+
+* Bounds and errors
+Owner query <=500 UTF-8 bytes, company/name/site/domain input bounds match intake.
+Batch10; response <=524288 bytes; connect/receive timeout10s, total action30s.
+One active paid action per owner across tabs, cooldown5s; subtree crash stops all
+tasks with no resend. No active action is restarted after crash/cancel/timeout.
+Closed codes: :forbidden, :unavailable, :invalid_input, :busy, :cooldown,
+:timeout, :cancelled, :rate_limited, :quota_exceeded, :provider_auth,
+:provider_unavailable, :invalid_response, :too_large, :unsafe_url,
+:source_mismatch, :internal. Never display/log provider error bodies.
+
+* Web prefill builder (Claude)
+SdrAgentWeb.LeadLive.IntakePrefill.build(person, company, source)
+  :: {:ok, form_params} | {:error, code}.
+Uses matched person only, confirmed company + company_site source above and
+optional literal person excerpt as directory source. Form is existing string-key
+intake format with sources indexed as form map. Email="". UI resets preview,
+intake_params and errors, opens existing form. No auto-preview/commit.
+Build itself is pure; UI fresh-owner check on prefill and existing domain checks
+remain mandatory. No Exa result becomes a persisted prospect until owner save.

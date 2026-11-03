@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-03
 supersedes: null
 ---
@@ -8,10 +8,13 @@ supersedes: null
 
 ## Status
 
-Proposed. Owner requested real website prospect search, identified existing
-Brave/Exa API keys, and authorized locating them in research_harness SOPS.
-Specific implementation/provider activation acceptance is pending. No paid
-request or secret provisioning has occurred.
+Accepted by Charles: "Approve the Exa plan and existing key/credit use"
+(2026-11-03, following the bundled plan/provider/key/credit/deployment ask).
+Entity r2 PASS and plan direction PASS/P1-P4 are recorded in the feature plan.
+This accepts the scoped implementation, selected key provisioning, existing
+account usage and reviewed SDR-only deployment after verification. It does not
+authorize enrichment, automatic save, assignment, model calls or outreach.
+At acceptance, no paid request or secret provisioning had occurred.
 
 ## Context
 

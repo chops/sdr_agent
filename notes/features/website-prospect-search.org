@@ -1,6 +1,6 @@
 #+TITLE: Website prospect search using Exa
 #+DATE: 2026-11-03
-#+STATUS: ENTITY PASS; plan and ADR-0027 proposed, awaiting owner acceptance
+#+STATUS: APPROVED; ADR-0027 accepted; implementation starting with synthetic RED tests
 
 * Request and minimum useful outcome
 Owner: "it needs to be able to search for new companies and contacts ... get it
@@ -229,4 +229,11 @@ P1-P4 incorporated above: fixed-host Req/no8839d303 reuse, dedicated Finch and
 bounded permanent subtree, backend-only smoke versus owner browser proof, and
 stdin-fed atomic root-private secret provisioning with preservation checks.
 No entity delta; these refine the existing approved contract/implementation plan.
-Owner acceptance is still pending; ADR remains proposed.
+This review preceded owner acceptance below.
+
+* Owner acceptance (2026-11-03)
+Charles: "Approve the Exa plan and existing key/credit use". This follows the
+bundled Exa/key/credits/smoke/deployment ask and accepts ADR-0027 and this plan.
+Earlier pending/proposed paragraphs above are historical, not current holds.
+Proceed with synthetic TDD and peer gates, then the reviewed scoped activation.
+No additional model allowance, enrichment, auto-save, assignment or outreach.
