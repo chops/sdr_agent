@@ -1,0 +1,71 @@
+#+TITLE: Authentication 4.15.1 session-revocation security patch
+#+DATE: 2026-11-03
+#+STATUS: APPROVED; RED verified, awaiting peer GREEN GO
+
+* Summary and authority
+Patch ash_authentication 4.15.0 to 4.15.1 for EEF-CVE-2026-110826 /
+GHSA-j6f8-qcj9-gh4r, verify revocation, rebuild and deploy with the approved
+Exa search feature. Owner explicitly approved this scope: "approve. contniue."
+This is not an audit waiver or permission for unrelated dependency upgrades.
+
+* Entity Model
+Entity Model trigger: no
+Reason: dependency bug fix restores an already documented session-revocation
+invariant. No persisted concept, attribute, relationship, ownership, policy,
+action contract or lifecycle is added or changed. Existing explicit User
+OnPasswordChange hooks remain untouched. Public password reset stays disabled.
+
+* Affected files
+- mix.exs, mix.lock: exact ash_authentication 4.15.1 pin; one lock-entry delta.
+- docs/adr/0008-dependency-security-baseline.md: narrow accepted amendment.
+- test/sdr_agent/accounts/password_revocation_dependency_test.exs: upstream
+  global-hook contract, measured RED against 4.15.0.
+- test/sdr_agent/accounts/password_session_revocation_test.exs: real domain
+  multi-session change/admin-set and failed-change preservation controls.
+- Generated usage rules: sync after upgrade; inspect, do not hand-edit.
+
+* Steps
+1. Preserve compensations; write library-contract RED and application behavior
+   controls. Existing app controls may pass on 4.15.0: do not claim a demonstrated
+   app exploit or remove hooks to manufacture a failure.
+2. Obtain independent peer RED review, then update only ash_authentication.
+3. Verify one lock entry, sync usage rules; run auth/enrollment/reissue/intake/
+   search regressions, WAE, format, configured static checks, ordinary controls.
+4. Freeze/push exact combined source, obtain peer source review and full gate.
+   Retain FAIL if known inherited failures remain; compare exact failure names.
+5. Build a new patched inactive artifact. Never activate the old 55c91e0f build.
+   Repin/review deployment bytes, stage/provision/roll out SDR only, then run
+   the existing maximum-three-request backend smoke, stopping on error.
+6. Record evidence, live revision, API attempts and limitations; push receipt.
+
+* Required tests
+- [ ] Generated OnPasswordChange global hook checks hashed_password after hooks,
+  without the early where changing(hashed_password) condition (RED then GREEN).
+- [ ] Own password change invalidates multiple earlier sessions, permits a new
+  sign-in and leaves another user's session valid.
+- [ ] Admin password set invalidates multiple target sessions, not the admin's.
+- [ ] Wrong-current-password refusal preserves sessions and old credentials.
+- [ ] Non-password update preserves sessions; each password action audits once.
+- [ ] Existing hosted enrollment/reissue, owner-intake and search regressions.
+- [ ] Exact-head full gate including blocking audit; names compared to baseline.
+
+* Risks and ADR
+Existing compensating hooks must remain effective under the new library; test
+actual Accounts APIs and current_operator, not truthiness of error tuples.
+No real account/session mutation during verification. Shared assent override
+and other pins unchanged. No new ADR: amend accepted ADR-0008 for the approved
+dependency exception scope. Architecture unchanged; no diagram trigger.
+
+* Verification
+Independent plan PASS / RED GO: Claude m_1793739344358612273_4988606c,
+with non-password preservation and exactly-once audit controls incorporated.
+Upstream fix 954697f168d55112b5050acddcd936b8bc1fba2b read: moves global
+hash check to after_action, preserves unconditional explicit hooks and moves
+library password-reset token spending into its before_action transaction.
+No public reset strategy or library reset caller exists in this app.
+First RED c3-20261103T205559Z-13162: intended global watcher assertion failed;
+3/3 real app compensation controls passed on 4.15.0. Additions rerun next.
+Final RED c3-20261103T205657Z-17606: 1 intended assertion failure, 4 behavior
+controls PASS on 4.15.0, including non-password preservation and once-only
+audit. Both owned database pairs dropped; evidence manifest verified.
+No deployment or Exa requests made for this patch.
