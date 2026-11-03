@@ -286,3 +286,13 @@ No generic second deployment approval is needed for the approved sequence;
 material departures or destructive operations outside it require direction.
 New live imports/assignments retain their separately scoped controls; this
 amendment grants no extra model calls and does not reset prior usage.
+
+## Amendment 4 (2026-11-03): owner-supplied prospect intake
+
+Accepted by Charles: "approve that scope", in response to the explicit
+proposal for a signed-in owner to save owner-supplied, unverified prospects
+before independent dossier spot-check. ADR-0026 records the bounded path.
+These records may be stored in the existing dedicated hosted SDR database;
+their origin remains distinguishable through research and draft review.
+No operator delegation is impersonated. No automatic discovery, assignment,
+model calls or outreach; legacy dossier admission meanings remain unchanged.

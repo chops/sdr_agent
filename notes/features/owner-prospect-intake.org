@@ -1,0 +1,84 @@
+#+TITLE: Owner self-service prospect intake
+#+DATE: 2026-11-03
+#+STATUS: APPROVED scope; source implementation in progress
+
+* Summary / owner approval
+Owner-only website form: company/contact + 1..3 source excerpts, preview,
+atomic save of owner-supplied/unverified provenance. Multiple contacts per
+company, unlimited stored records. No automatic assignment/model/outreach.
+Owner: "approve that scope", after the explicit unverified-intake proposal.
+The bounded architectural decision is accepted in ADR-0026; no discovery approval.
+
+* Entity Model
+Entity Model trigger: yes
+Reason: new provenance records, owner actions, ownership and research source contract.
+| Entity | New/existing | Purpose/attributes | Relationships | Invariants/lifecycle | Policy/actor | Open questions |
+| HostedOwner | Existing policy delta | May preview/commit intake, no new fields | Current user+tenant+binding+relocation checked fresh; existing links unchanged | Binding lock then fresh owner row recheck at commit, revoked/stale owner refused | Only fresh active hosted owner, not generic reviewer | Human amendment required |
+| OwnerProspectIntake | New | Immutable owner-supplied provenance: UUIDv7 id, server timestamp, format owner-intake/1, canonical submission hash 32 bytes, attribution owner_supplied/unverified | Required tenant/binding/relocation/owner-user/account/contact/lead FKs RESTRICT, all same tenant; UNIQUE lead; UNIQUE tenant+submission hash | Atomic all-or-nothing, immutable; identical replay no write; lead cannot have BOTH this and DossierEntry, enforced by both write paths under shared binding lock + transactional check | Dedicated scoped actions, fresh owner on commit, kernel internal reads, owner-scoped UI read; no forged operator | Human amendment required |
+| OwnerProspectSource | New | Immutable source key, URL, declared retrieved date, source type and exact excerpt Payload hash | Required intake FK RESTRICT, 1..3 sources per intake; unique intake+source key | HTTPS validation, URL <=2048 bytes, exact UTF-8 excerpt <=2000 bytes, no trim/NFC on excerpt, total serialized submission <=16 KiB; no network/filesystem upload | Same private owner intake transaction scope, research gets run-bound reads only | None |
+| Account | Existing action/policy delta | Dedicated owner intake create; source manual on NEW rows; no industry/size/geography promotion | Existing tenant+domain identity and 1:N contacts retained | Create absent; REUSE active same-tenant account by normalized domain, NEVER update existing account or replace its provenance/name/site. Preview existing account fields server-side read-only; commit fresh resolves domain and revalidates preview outcome; changed outcome requires re-preview. No lifetime/company/contact-count bound | Owner scope, domain action only | S1 dissent below |
+| Contact/Lead | Existing action/policy delta | New named personal-work contact + new manual lead only; owner not claiming independently verified employment | Existing tenant+email identity, same-tenant account and contact links; open-lead identity unchanged | Existing email conflict unless exact full replay; per-commit uniqueness+binding lock races; new lead only, no assign/run. Reusing account permits multiple distinct contacts in ONE company, preserving user no-limits instruction | Owner scope, existing synthetic/admin and operator paths unchanged | None |
+| Payload | Existing scoped action/policy delta | Exact input excerpt hash bytes, purpose owner_intake_source | Existing Payload hash store reused; authoritative intake/source/lead/run scope | Store only bounded submitted hashes, read audited under actual agent run; no generalized arbitrary payload read | Private owner scoped store, run-bound agent read | None |
+| ResearchArtifact/evidence bundle/review | Existing provider+contract delta | NEW provider owner_intake; trust unverified, freshness unknown, submitted_at distinct from declared retrieval; exact source hash/origin ids | Lead-keyed exactly ONE origin legacy dossier OR owner intake; no origin inferred just from source existence | Keep legacy dossier path unchanged; owner inputs rank last; provider+origin ids retained in bundles/decisions and draft/review shows owner-supplied unverified when any cited evidence originates here. Excerpts are data, no free-form instruction/note field in prompt | Existing agent actions with new authoritative source binding | Human amendment required |
+| User/PrototypeDelegation/worker/allowance/outreach | Existing dependencies | existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found | unchanged | No model spend, live import/run, intake toggle or outreach authorized by dev | unchanged | None |
+Reviewer Claude via ap; capabilities ai_pair=true, codex_review=true.
+PASS 2026-11-03T05:07:38Z m_claude_intake_entity_r2_pass_20261103,
+reply to m_codex_owner_intake_entity_r2_20261103.
+Review SHA256 ac00f7afb37a56cff38b7a5dd2dc0617372b5b09c97fdcc4b3a239d03295265b.
+P1-P6 and R1-R8 retained below. Codex author; no self-review.
+
+* Affected modules / ownership
+Codex: Prototype.OwnerIntake, validation/coordinator, Research.OwnerProspectIntake
+and OwnerProspectSource, domain APIs, Sales owner actions, Payload store,
+migrations/snapshots. Claude: LiveView form, source reader/Payload read scope,
+SDR source adapter/evidence bundle, draft/review disclosure. Codex owns shared
+research.ex/payload.ex integration; no concurrent edits. Legacy dossier unchanged.
+
+* Implementation steps
+1. Record approval and accepted ADR; freeze preview/commit/source interfaces.
+2. RED domain success/refusal/replay/reuse/stale-preview tests.
+3. Independent RED gate; GREEN smallest domain/schema implementation.
+4. Claude form + source-to-evidence/review RED/GREEN, reciprocal review.
+5. Review generated migrations/diagrams and integration; focused and full gate.
+6. Existing SDR-only deployment authority after readiness, migration/ACL review,
+   pinned artifact/bootcheck. No live prospect import or model validation implied.
+
+* Required tests
+- [ ] Fresh current owner allowed; generic reviewer/auditor/anonymous/stale/disabled/
+  wrong tenant/relocation refused at API and UI, including fresh commit recheck.
+- [ ] Preview read-only, kept in socket assigns; commit recomputes hash and outcome.
+- [ ] Binding lock, atomic rollback, exact replay zero writes, closed conflicts.
+- [ ] Concurrent same email and distinct emails/same domain, no partial rows.
+- [ ] P1 both directions: same Account's owner/dossier leads access only their own
+  lead-keyed sources; mixed-origin writes and reads refused.
+- [ ] P2 Account reuse leaves all existing row bytes unchanged.
+- [ ] P3 Archived Account refused, no reactivation/duplication.
+- [ ] P4 ASCII-only domain; non-ASCII/IDN explicitly refused (ADR frozen rule).
+- [ ] P5 create/reuse preview outcome drift => preview_stale, zero writes.
+- [ ] P6 correction unsupported disclosed; no nonexistent archive control.
+- [ ] Exact excerpt bytes (no trim/NFC); source/URL/date/type/email/role-mail bounds.
+- [ ] New owner_intake provider unverified/unknown and last-ranked; origin preserved
+  in evidence/decisions; owner-supplied warning in draft and review when cited.
+- [ ] Suppression refusal; output/claim validation, no owner note prompt channel.
+- [ ] Synthetic sentinel values absent from logs/events/span status/stdout/stderr.
+- [ ] No auto assign/model/outreach; legacy synthetic/operator regression controls.
+- [ ] Format/WAE/Credo/workflow/codegen/focused/full and mix precommit.
+  Full baseline has 14 known failures; never relabel unchanged FAIL as PASS.
+
+* Risks / limitations
+Owner input can be false/adversarial and is NOT independently verified, mailbox
+validated or qualified. No automatic fetch, uploads, caller paths, correction UI,
+discovery or failed-run recovery. One contact/three sources per request bounds
+request size, NOT stored record count. Existing email conflicts except replay.
+
+* ADR
+Required YES: new owner write boundary and durable provenance.
+Accepted decision: docs/adr/0026-owner-supplied-prospect-intake.md.
+Canonical input owner-intake/1 over existing sdr-canonical-json/1: string-key
+normalized values; source order stable; ASCII lower domain/email; trimmed NFC
+names/title. Validated source URL and excerpt exact bytes, dates ISO, no server
+times/ids. SHA256 freezes version; never re-encode historical submissions.
+
+* Implementation notes
+2026-11-03: source-only from 9b695111 in isolated worktrees; no live changes.
+
