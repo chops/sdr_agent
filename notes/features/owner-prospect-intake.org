@@ -82,3 +82,19 @@ times/ids. SHA256 freezes version; never re-encode historical submissions.
 * Implementation notes
 2026-11-03: source-only from 9b695111 in isolated worktrees; no live changes.
 
+Domain RED confirmed by Claude in m_claude_domain_green_go_530c96c2,
+review 63939789020b6b70d97166aa0788d5a4b928c7df1d32d588b8f710f393beced7.
+Final RED 24 intended missing-contract assertions plus 6 existing controls.
+GREEN c4-20261103T054204Z-92523: 34/34, including independent connections,
+domain/email suppression, failed suppression-read refusal, legacy domain conflict,
+single-origin database refusal, exact replay and no Account writes on reuse.
+Warnings-as-errors compilation and normal-priority Credo pass. Strict all-priority
+Credo also reports inherited low-priority design/style suggestions; no blanket
+baseline waiver is inferred. Full integration, diagrams and full gate pending.
+Owner suppression check uses the existing matching action with private,
+tenant-filtered kernel read opts: owners deliberately have no generic ActorRole
+grant on Suppression. No policy was widened; no rows leave the coordinator.
+Generated migration uses one prepared SQL command per function/trigger statement;
+the first disposable setup caught a multi-command declaration, corrected before
+the passing run. No hosted migration has run.
+

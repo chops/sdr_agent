@@ -72,6 +72,16 @@ defmodule SdrAgent.Sales.Account do
       change {AppendEvent, event_type: "sales.account.created", category: :domain_change}
     end
 
+    create :record_owner_intake do
+      description "The hosted owner's scoped prospect intake creates a manual company."
+      accept [:name, :domain, :website_url]
+      change set_attribute(:source, :manual)
+      validate {SdrAgent.Sales.Validations.DatasetDomain, attribute: :domain, kind: :domain}
+      change SdrAgent.Audit.Changes.SetTenant
+      change SdrAgent.Audit.Changes.TraceIds
+      change {SdrAgent.Audit.Changes.OwnerIntakeEvent, event_type: "sales.account.created"}
+    end
+
     create :import_prototype do
       description """
       OPR (D-237 prototype runtime, from the above-domain dossier import):
@@ -128,6 +138,10 @@ defmodule SdrAgent.Sales.Account do
 
     policy action([:create, :update, :archive]) do
       authorize_if {Checks.ActorRole, roles: [:admin]}
+    end
+
+    policy action(:record_owner_intake) do
+      authorize_if SdrAgent.Audit.Checks.OwnerIntakeWriteScope
     end
 
     policy action(:import_prototype) do

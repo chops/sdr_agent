@@ -101,6 +101,7 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
     ids = save!(params(), ctx.user)
     before = counts()
     assert {:ok, p} = preview(params(), ctx.user)
+    assert p.mode == :replay
     assert {:ok, :replay, ^ids} = commit(params(), p, ctx.user)
     assert counts() == before
     assert count("owner_prospect_intakes") == 1
@@ -174,7 +175,7 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
 
   test "owner revoked after preview cannot commit", ctx do
     assert {:ok, p} = preview(params(), ctx.user)
-    assert {:ok, _} = H.disable(ctx, ctx.owner.id)
+    assert {:ok, _} = H.disable(ctx, ctx.owner.id, actor: ctx.user)
     before = Map.drop(counts(), ["audit_events"])
     assert {:error, :forbidden} = commit(params(), p, ctx.user)
     assert Map.drop(counts(), ["audit_events"]) == before
@@ -254,10 +255,24 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
 
   test "direct owner resource create without coordinator context is forbidden", ctx do
     loaded!(SdrAgent.Research.OwnerProspectIntake)
+    ids = save!(params(), ctx.user)
+
+    assert {:ok, entry} =
+             Ash.get(SdrAgent.Research.OwnerProspectIntake, ids.entry_id, H.kernel(ctx))
+
+    attrs =
+      Map.take(entry, [
+        :account_id,
+        :contact_id,
+        :lead_id,
+        :binding_id,
+        :relocation_id,
+        :submission_sha256
+      ])
 
     assert {:error, %Ash.Error.Forbidden{}} =
              SdrAgent.Research.OwnerProspectIntake
-             |> Ash.Changeset.for_create(:record, %{}, actor: ctx.user)
+             |> Ash.Changeset.for_create(:record, attrs, actor: ctx.user)
              |> Ash.create()
   end
 
@@ -267,7 +282,9 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
 
     assert {:ok, account} =
              SdrAgent.Sales.create_account(
-               %{name: "Archived", domain: "intake.test", source: :manual}, actor: admin)
+               %{name: "Archived", domain: "intake.test", source: :manual},
+               actor: admin
+             )
 
     assert {:ok, _} = SdrAgent.Sales.update(account, :archive, %{}, actor: admin)
     H.enter!(ctx)
@@ -280,12 +297,13 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
     assert :ok = PrototypeFixtures.leave_runtime()
     admin = human(:admin, ctx.fx.tenant)
 
-    assert {:ok, _} =
+    assert {:ok, suppression} =
              SdrAgent.Outreach.suppress(%{scope: :domain, value: "intake.test"},
                actor: admin
              )
 
     H.enter!(ctx)
+    assert SdrAgent.Outreach.SuppressionMatch.covers?(suppression, params()["email"])
     before = counts()
     assert {:error, :suppressed} = preview(params(), ctx.user)
     assert counts() == before
@@ -300,5 +318,72 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
     assert count("accounts") == 1
     assert count("contacts") == 4
     assert count("leads") == 4
+  end
+
+  test "existing email suppression also prevents owner intake", ctx do
+    assert :ok = PrototypeFixtures.leave_runtime()
+    admin = human(:admin, ctx.fx.tenant)
+
+    assert {:ok, _} =
+             SdrAgent.Outreach.suppress(%{scope: :email, value: params()["email"]}, actor: admin)
+
+    H.enter!(ctx)
+    before = counts()
+    assert {:error, :suppressed} = preview(params(), ctx.user)
+    assert counts() == before
+  end
+
+  test "a failed authoritative suppression read is not mistaken for no match", ctx do
+    before = counts()
+    Repo.query!("ALTER TABLE suppressions RENAME TO intake_test_hidden_suppressions")
+
+    try do
+      assert {:error, :intake_failed} = preview(params(), ctx.user)
+    after
+      Repo.query!("ALTER TABLE intake_test_hidden_suppressions RENAME TO suppressions")
+    end
+
+    assert counts() == before
+  end
+
+  test "a later legacy dossier import still refuses an owner-created company domain", ctx do
+    input =
+      params()
+      |> Map.put("domain", "acme1.test")
+      |> Map.put("website_url", "https://acme1.test")
+      |> Map.put("email", "newperson@acme1.test")
+      |> put_in(["sources", Access.at(0), "url"], "https://acme1.test")
+
+    save!(input, ctx.user)
+    [row] = SdrAgent.DossierFixtures.route_rows!([SdrAgent.DossierFixtures.company(1)], ["row-1"])
+    before = counts()
+
+    assert {:error, :dossier_conflict} =
+             call(SdrAgent.Prototype.DossierImport, :import_row, [row, ctx.fx.actor])
+
+    assert counts() == before
+  end
+
+  test "the database refuses dossier provenance on an owner-intake lead", ctx do
+    ids = save!(params(), ctx.user)
+    content_hash = :crypto.hash(:sha256, hd(params()["sources"])["excerpt"])
+
+    attrs = %{
+      lead_id: ids.lead_id,
+      account_id: ids.account_id,
+      contact_id: ids.contact_id,
+      dossier_sha256: String.duplicate("0", 64),
+      row_id: "other-origin",
+      spotcheck_sha256: String.duplicate("1", 64),
+      email_kind: :personal_work,
+      contact_classification: :unverified,
+      contact_confidence: :low,
+      claims_sha256: content_hash,
+      notes_sha256: content_hash
+    }
+
+    assert {:error, _} = SdrAgent.Research.record_dossier_entry(attrs, actor: ctx.fx.actor)
+    assert count("dossier_entries") == 0
+    assert count("owner_prospect_intakes") == 1
   end
 end
