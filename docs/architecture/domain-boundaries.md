@@ -6,6 +6,9 @@ Project shape: single
 
 This diagram shows Ash domains and their resources, representing bounded contexts in the system.
 
+Owner provenance resources added 2026-11-03; runtime conditions and the
+separate save/research workflows are in [owner prospect intake](owner-prospect-intake.md).
+
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#e1f5fe', 'primaryBorderColor': '#01579b'}}}%%
 graph TB
@@ -22,6 +25,8 @@ graph TB
         ReplyAssessment[ReplyAssessment]
     end
     subgraph Research["Research Domain"]
+        OwnerProspectIntake[OwnerProspectIntake<br/>owner-supplied, unverified]
+        OwnerProspectSource[OwnerProspectSource<br/>immutable excerpt provenance]
         ResearchArtifact[ResearchArtifact]
         EvidenceClaim[EvidenceClaim]
         Qualification[Qualification]
@@ -135,6 +140,15 @@ graph TB
     EvidenceClaim -. extraction decision FK .-> Decision
     Qualification -. decision / run FK .-> Decision
     ResearchArtifact -. content sha256 FK .-> Payload
+    OwnerProspectIntake --> OwnerProspectSource
+    OwnerProspectIntake -. lead_id FK .-> Lead
+    OwnerProspectIntake -. account_id FK .-> Account
+    OwnerProspectIntake -. contact_id FK .-> Contact
+    OwnerProspectIntake -. owner_user_id FK .-> User
+    OwnerProspectIntake -. binding_id FK .-> PrototypeDatabaseBinding
+    OwnerProspectIntake -. relocation_id FK .-> Relocation
+    OwnerProspectSource -. exact content sha256 FK .-> Payload
+    OwnerProspectSource -. server-bound provenance metadata .-> ResearchArtifact
     User -. tenant_id FK .-> Tenant
     Sales -. tenant_id FK .-> Tenant
     Research -. tenant_id FK .-> Tenant

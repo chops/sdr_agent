@@ -1,0 +1,41 @@
+flowchart LR
+    Owner[Fresh hosted owner]
+    Form[Existing Leads LiveView<br/>company, contact, 1-3 exact source excerpts]
+    Preview[OwnerIntake.preview<br/>read-only normalized preview]
+    Commit[Explicit save<br/>binding then head lock, fresh owner and preview recheck]
+    Sales[Sales scoped actions<br/>new Account or unchanged active Account<br/>new Contact and manual Lead]
+    Origin[(Research OwnerProspectIntake<br/>OwnerProspectSource, append-only)]
+    Payload[(Exact excerpt Payload)]
+    Ledger[(Value-free Audit events)]
+    Later[Separate existing assignment workflow<br/>not triggered by intake save]
+    Reader[Research lead-source dispatcher<br/>one origin per lead, not per Account]
+    Legacy[Legacy DossierSourceRead]
+    Scoped[OwnerIntakeSourceRead<br/>running run, lead, live intake, exact hashes]
+    Read[Scoped Payload action<br/>AGT identity, audited access, fail closed]
+    Artifact[ResearchArtifact<br/>owner_intake, unverified, unknown freshness]
+    Evidence[Claims and evidence bundle<br/>stable artifact lineage]
+    Draft[Draft and review<br/>owner-supplied unverified disclosure when cited]
+
+    Owner --> Form
+    Form --> Preview
+    Preview -- explicit confirmation --> Commit
+    Commit -- atomic --> Sales
+    Commit -- atomic --> Origin
+    Commit -- scoped store --> Payload
+    Commit -- same transaction --> Ledger
+    Sales -. later explicit action only .-> Later
+    Later --> Reader
+    Reader -- dossier origin --> Legacy
+    Reader -- owner origin --> Scoped
+    Origin --> Scoped
+    Scoped --> Read
+    Read --> Payload
+    Read -- payload_view access --> Ledger
+    Read --> Artifact
+    Artifact --> Evidence
+    Evidence --> Draft
+
+    %% Authority-compiled prototype runtime only. Ordinary builds refuse owner intake.
+    %% Source-only feature diagram; it does not assert deployment or authorize a run.
+    %% Intake performs no fetch, assignment, model invocation, or outreach.
+    %% Mixed/missing origins and read failures refuse; sources never cross leads.
