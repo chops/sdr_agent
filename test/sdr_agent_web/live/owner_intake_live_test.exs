@@ -241,8 +241,8 @@ defmodule SdrAgentWeb.OwnerIntakeLiveTest do
 
     test "the subtitle accurately describes owner-supplied prospects", ctx do
       view = open(ctx)
-      refute has_element?(view, "p", "Fictional accounts and contacts")
-      assert has_element?(view, "p", "owner-supplied")
+      refute has_element?(view, "#leads-header", "Fictional accounts and contacts")
+      assert has_element?(view, "#leads-header", "owner-supplied")
     end
 
     test "reuse previews the unchanged company's real name and website", ctx do

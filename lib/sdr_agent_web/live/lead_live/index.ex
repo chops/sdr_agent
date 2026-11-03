@@ -87,7 +87,14 @@ defmodule SdrAgentWeb.LeadLive.Index do
   def handle_event("intake_close", _params, socket), do: {:noreply, reset_intake(socket, false)}
 
   def handle_event("intake_change", %{"intake" => form}, socket) when is_map(form),
-    do: {:noreply, assign(socket, intake_form: to_form(form, as: :intake))}
+    do:
+      {:noreply,
+       assign(socket,
+         intake_form: to_form(form, as: :intake),
+         preview: nil,
+         intake_params: nil,
+         intake_error: nil
+       )}
 
   def handle_event("intake_change", _params, socket), do: {:noreply, socket}
 
@@ -97,7 +104,8 @@ defmodule SdrAgentWeb.LeadLive.Index do
     rows =
       if length(rows) < OwnerIntakePanel.max_sources(), do: rows ++ [length(rows)], else: rows
 
-    {:noreply, assign(socket, source_rows: rows)}
+    {:noreply,
+     assign(socket, source_rows: rows, preview: nil, intake_params: nil, intake_error: nil)}
   end
 
   def handle_event("intake_preview", %{"intake" => form}, socket) when is_map(form) do
@@ -171,11 +179,12 @@ defmodule SdrAgentWeb.LeadLive.Index do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:leads}>
-      <.page_header eyebrow="Pipeline">
+      <.page_header id="leads-header" eyebrow="Pipeline">
         Leads
         <:subtitle>
-          Fictional accounts and contacts (synthetic <code class="font-mono text-xs">.test</code>
-          domains). Open a lead to see the research evidence behind its qualification.
+          Fixture data uses synthetic <code class="font-mono text-xs">.test</code> domains.
+          Owner-entered prospects are owner-supplied and unverified. Open a lead to review
+          the evidence behind its qualification.
         </:subtitle>
         <:actions :if={@owner? and not @intake_open?}>
           <button

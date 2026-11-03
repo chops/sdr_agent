@@ -242,12 +242,18 @@ defmodule SdrAgentWeb.LeadLive.OwnerIntakePanel do
         <dl class="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
           <div>
             <dt class="text-xs text-zinc-500">Company</dt>
-            <dd class="text-zinc-900">{@preview.input["company_name"]}</dd>
+            <dd id="intake-preview-company" class="text-zinc-900">{company_name(@preview)}</dd>
           </div>
           <div>
             <dt class="text-xs text-zinc-500">Domain</dt>
             <dd id="intake-preview-domain" class="font-mono text-zinc-900">
               {@preview.input["domain"]}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs text-zinc-500">Website</dt>
+            <dd id="intake-preview-website" class="break-all font-mono text-zinc-900">
+              {website_url(@preview)}
             </dd>
           </div>
           <div>
@@ -290,6 +296,14 @@ defmodule SdrAgentWeb.LeadLive.OwnerIntakePanel do
     </section>
     """
   end
+
+  # Reuse never changes the existing Account. Show its server-read values,
+  # not ignored replacements typed into the form. Create uses normalized input.
+  defp company_name(%{mode: :reuse, account: %{name: name}}), do: name
+  defp company_name(%{input: input}), do: input["company_name"]
+
+  defp website_url(%{mode: :reuse, account: %{website_url: url}}), do: to_string(url)
+  defp website_url(%{input: input}), do: input["website_url"]
 
   defp source_value(form, index, key) do
     case form.params do

@@ -141,4 +141,15 @@ the passing run. No hosted migration has run.
   event writes, exact replay writes nothing, and one Account's distinct lead
   cannot substitute the other contact's excerpt. Format/WAE/configured Credo
   pass. No production code changed for these regression controls.
+- Codex took R1/R2/N1 from Claude with explicit no-overlap handoff
+  m_claude_r1_handoff_20261103; RED c4-20261103T061133Z-27589 has four
+  intended assertions failing and26 controls passing; independent GREEN GO
+  m_claude_r1_green_go_20261103. GREEN c4-20261103T061442Z-41124 PASS30/30,
+  MANIFEST checked, format/WAE/configured Credo pass. Editing or adding a source
+  clears preview/params; accurate shared subtitle; reuse displays saved Account
+  name/site, create displays normalized input, no commit/replay changes.
+  Test refinement disclosed: subtitle is a div in UI.page_header, not a p;
+  assertions use the stable leads-header id rather than logging full HTML.
+  This repaired a selector error (initial GREEN29/30), not a weakened claim.
+  Architecture unchanged by these presentation fixes (existing flow only).
 
