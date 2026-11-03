@@ -34,7 +34,8 @@ defmodule SdrAgent.Audit.Checks.OwnerIntakeSourceScope do
 
   @impl true
   def describe(_opts),
-    do: "the agent runtime reads an owner source hash of its run's lead intake in the live binding"
+    do:
+      "the agent runtime reads an owner source hash of its run's lead intake in the live binding"
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     require Ash.Query

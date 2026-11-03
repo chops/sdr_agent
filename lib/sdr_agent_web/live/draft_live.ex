@@ -822,7 +822,8 @@ defmodule SdrAgentWeb.DraftLive do
                 >
                   {@cited_claim.quote}
                 </blockquote>
-                <dl :if={@cited_artifact}
+                <dl
+                  :if={@cited_artifact}
                   data-provider={@cited_artifact.provider}
                   class="divide-y divide-zinc-100"
                 >

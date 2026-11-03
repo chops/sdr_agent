@@ -93,7 +93,9 @@ defmodule SdrAgent.Prototype.SourceScopeHardeningTest do
   test "another entry's hash under a real run, lead and entry is refused", ctx do
     %{a: a, b: b} = ctx
     result = scoped_read(ctx, sha(b), scope(ctx, a.run, a, a, [sha(b)]))
-    assert match?({:error, _}, result), "read another entry's source: #{inspect(result, limit: 4)}"
+
+    assert match?({:error, _}, result),
+           "read another entry's source: #{inspect(result, limit: 4)}"
   end
 
   test "another lead's entry named with this lead's run is refused", ctx do
