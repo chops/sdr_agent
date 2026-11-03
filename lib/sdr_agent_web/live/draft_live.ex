@@ -84,6 +84,7 @@ defmodule SdrAgentWeb.DraftLive do
     :current,
     :segments,
     :citations,
+    :owner_cited?,
     :diff,
     :contact,
     :approve_form,
