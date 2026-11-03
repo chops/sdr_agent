@@ -1,0 +1,125 @@
+#+TITLE: Deployed website prospect search -- qualified delivery receipt
+#+DATE: 2026-11-03
+#+STATUS: INITIAL RELEASE DEPLOYED; matcher schema fix in progress; browser E2E not performed
+
+* Delivered and owner workflow
+https://sdr.a-z.bot/leads -> Find prospects -> Search companies -> Use this
+company -> confirm official website/domain -> Search people and Get company
+page -> select an eligible matched person to prefill Add prospect -> complete
+missing fields -> preview -> explicitly save. Email is deliberately blank.
+Search alone never saves a record, assigns work, invokes a model or sends outreach.
+Search is hosted on ch-web-prod and does not require the Mac worker to be online.
+
+Results are unverified findings, not guaranteed current employment or deliverable
+work email. The live smoke returned10 named people but0 exact current-employer
+matches. Those cards must remain unconfirmed, with prefill unavailable; the
+matcher was not relaxed. A real matched-person prefill was NOT demonstrated.
+Matched-prefill behavior is covered by synthetic tests, separately from smoke.
+Authenticated real-owner browser validation is user-operated and still owed;
+no real owner session was minted or impersonated. No prospect was saved in smoke.
+
+* Exact source and independent reviews
+Deployed executable: 0edfb9f73e8a2fb4e7ffb319aaaa5a8f3f144051.
+Both codex/website-prospect-search and claude/website-prospect-search-ui pushed
+that exact source. This receipt and maintained-status updates are docs only.
+ADR-0027 and the Exa plan/key/credit use accepted by Charles; the narrow
+ash_authentication4.15.0->4.15.1 patch additionally approved: "approve. contniue."
+Existing explicit User revocation compensations remain byte-unchanged.
+Source+driver PASS m_1793739875664101943_7afd481c.
+Ops bytes conditional GO m_1793740338647807265_e561f7bb.
+Final qualified gate/rollout GO m_1793741516474027397_77c45dd9.
+
+* Verification -- full gate FAIL retained
+Focused auth/enrollment/intake/search: c3-20261103T210135Z-37803 PASS218/218.
+Hosted owner/disable: c3-20261103T210243Z-42784 PASS11/11.
+Ordinary production WAE and local no-start refusal/test-seam absence controls PASS.
+The first no-start diagnostic lacked a synthetic DATABASE_URL and refused at
+configuration load; corrected invocation used dummy-only environment and passed,
+with no app, network or DB startup in either attempt.
+
+Exact-head full gate: c6-20261103T210503Z-53972 at0edfb9f7.
+Workflow/format/WAE/codegen/Credo/audit rc0; audit clean with4.15.1.
+Suite6385/6399,14failed,1skipped,42excluded. Full gate verdict remains FAIL.
+Exactly the inherited14 names:12 OutputTest,1 JourneyTest,1 SetupTest;0new,
+0resolved versus baseline c6-20261103T064835Z-83695. Sorted-name SHA256
+79ae83a88403cd3e0f58104a8068639a97990fb870f5dbebce9c70198ed2d2b1.
+Root's first name parser omitted double-digit headers due to a fixed-space
+prefix; immediately corrected to arbitrary leading whitespace, extracting all14
+and confirming an empty exact-name diff. No assertion/source changes.
+Evidence manifests verified; owned database pair dropped; leases released.
+Runner rc0 means execution/disposal completed, NOT test PASS.
+Initial peer run c6-20261103T210426Z-50409 STOP at probe before DB effect:
+stale cached4.15.0 dependency; peer fetched locked4.15.1 with unchanged lock/source
+then relaunched the final gate. No security-check exclusion or audit waiver.
+
+* Artifact and ordered production rollout
+Host ch-web-prod; only sdr-agent.service changed, no AgentBuilder changes.
+Artifact /root/sdr_agent-build.aLcoGc1c/release.tar.gz.
+SHA25605f6b1a788cfee3b57dbec5a26826a8d7ed33c5daeb3e24155fde30b2b2ad2c9.
+Driver SHA256f7bcdd79d73a08057c6f7a5c9af9863bbe132ce1bf77a4fb47ee8b7898f74d5e.
+Build WAE/assets/release,24ELF/library checks, exactly1 embedded authentication
+app at4.15.1 and authority/search BEAM checks PASS, no app startup during build.
+Root shared tool metadata unchanged; lock SHA256
+1aa772b974ca7ea7cd32eb52877b9c07c871294229a92ee94316e14bb9db6153 unchanged.
+Old55c91e0f/S2reMrIY artifact is superseded and MUST NOT activate.
+
+Ops /Users/charles/.local/state/sdr-agent/exa-search-rollout-20261103.qCyLwIZJ;
+seven-file SHA256SUMSfa8601ddbd2bcc261ac775562748e2983b073cf4d453783e1309d947ee1033ba.
+1. Fresh live542fc2f5 confirmed2026-11-03T21:32:15Z; no conflicting locks/paths;
+   replacement artifact hash confirmed.
+2. Stage rc0: EXA_SEARCH_OPERATION_FILES_STAGED_NO_SECRET_NO_RESTART.
+3. Selected EXA_API_KEY only from research_harness SOPS file to SSH stdin:
+   provision rc0, original10 lines preserved, exactly2 names appended (12total),
+   root root0600, old root-private env retained, no restart at provision.
+   No plaintext key in argv, local files, logs, evidence, repository or browser.
+   research_harness unchanged (encrypted file SHA5a76862a).
+4. Rollout rc0: app-role READ ONLY bootcheck schema39/exact privileges PASS;
+   runtime CA count148; schema39 unchanged; SDR-only executable swap;
+   SDR_HEALTH_PASS and RELEASE_ACTIVE_SIGNIN_HEALTH_ANON_DENIAL_PASS.
+   No migration, grant, account/password action or real-data copy/write.
+5. Postcheck2026-11-03T21:33:41Z: live0edfb9f7 active, healthok, sign-in200,
+   anonymous/leads302 to sign-in. Previous542fc2f5 release retained, locks absent.
+
+* Paid backend smoke -- not browser E2E
+One run, ledger written/synced before each send;3attempts exactly, no retries.
+All3 statusok; final BACKEND_SMOKE_THREE_COMPLETE_NOT_BROWSER_E2E.
+| Attempt | Operation | Findings | Named | Exact current-employer matches | Provider cost USD |
+|---------+-----------+----------+-------+--------------------------------+-------------------|
+| 1 | company search | 10 | 10 | 0 (not applicable) | 0.007 |
+| 2 | people search | 10 | 10 | 0 | 0.007 |
+| 3 | company contents | 1 source | 0 (not applicable) | 0 (not applicable) | 0.001 |
+Provider-reported total0.015USD, not an independently reconciled invoice.
+Unattended backend allowance3/3 consumed, including failed/uncertain attempts
+had any occurred; no more unattended API requests authorized in this slice.
+Two explicit owner-browser validation requests reserved; no paid plan change.
+These are held for Charles's own explicit browser actions, not an agent-minted
+session or unattended retries.
+No model call, real record save, assignment, outreach or email enrichment.
+
+* Evidence hashes
+All paths below are under
+/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/.
+| Log | SHA256 |
+|-----+--------|
+| exa-hosted-build-auth4151-0edfb9f7-20261103.log | 110ae1594d85c62c63e66cdad692eeab0f4896d4dc77a8d3a6380d960ff94dad |
+| exa-stage-auth4151-20261103.log | 1f08e4c5ac4692148a29356c1616f341bd908edacec6246917b9c4f55d651872 |
+| exa-provision-auth4151-20261103.log | 028bffe6d1f2d3240c74a1b6eea9aaecac47d3db4e69437e0ee7603f7be7a897 |
+| exa-rollout-auth4151-20261103.log | d3d57db10398171dc1423710048ef3c18f18888d98d88ecb2ae125dff20da0ff |
+| exa-smoke-auth4151-20261103.log | 4081272d3b785bbbe22a0dc645e6c54c26544075b445be8fdbbc9923af9f99b7 |
+| exa-postrollout-auth4151-20261103.log | 8c9d572412421eeafe7d6f9b5b017c0de1a2e84bacd0d53d46236586d3f9bd18 |
+
+* Remaining work and constraints
+- Matcher schema bug confirmed against official SDKs: code/fixtures used flat
+  workHistory[].to instead of workHistory[].dates.to. Codex owns the narrow
+  RED/GREEN correction, independent review and redeployment with no extra paid
+  calls. The prior smoke's0/10 cannot be treated as only a provider-data fact.
+  SDK Optional dates cannot establish whether real current roles use explicit
+  null or an omitted end date; retain explicit-null-only behavior until evidence.
+- Owner browser validation, including a matched-person prefill if a source
+  supplies an exact current-employer match. Unknown details stay unknown.
+- Inherited14 full-suite failures remain unresolved; no new failures introduced.
+- Codex owns a separately scoped generated-guidance refresh: usage_rules.sync
+  preview proposed auth example changes plus pre-existing Jido drift, so generated
+  writes deferred with independent agreement; workflow gate itself passes.
+- No general automated discovery, guaranteed current-employment/email coverage,
+  enrichment, recurring spend, autonomous save/run/outreach added by this slice.

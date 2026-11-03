@@ -1,6 +1,6 @@
 #+TITLE: Authentication 4.15.1 session-revocation security patch
 #+DATE: 2026-11-03
-#+STATUS: IMPLEMENTED; focused GREEN, final gate and deployment pending
+#+STATUS: DEPLOYED; focused GREEN; inherited-only full-gate FAIL retained
 
 * Summary and authority
 Patch ash_authentication 4.15.0 to 4.15.1 for EEF-CVE-2026-110826 /
@@ -47,7 +47,7 @@ OnPasswordChange hooks remain untouched. Public password reset stays disabled.
 - [X] Wrong-current-password refusal preserves sessions and old credentials.
 - [X] Non-password update preserves sessions; each password action audits once.
 - [X] Existing hosted enrollment/reissue, owner-intake and search regressions.
-- [ ] Exact-head full gate including blocking audit; names compared to baseline.
+- [X] Exact-head full gate including blocking audit; names compared to baseline.
 
 * Risks and ADR
 Existing compensating hooks must remain effective under the new library; test
@@ -91,3 +91,10 @@ gate: bin/verify-workflow passed after the dry-run. Preview+workflow log:
 SHA256 fcbe56fadfe9b1f0858efe92bb001bb48c7aa770b09c082a12784834191240c9.
 The earlier noninteractive sync preview refused its prompt without writing.
 Architecture unchanged by this patch; existing Exa diagram remains current.
+
+Final gate c6-20261103T210503Z-53972 at0edfb9f7: static/audit rc0,
+6385/6399 passed, exactly inherited14 failures,0new; measured FAIL retained.
+Claude qualified rollout GO m_1793741516474027397_77c45dd9. Replacement artifact
+05f6b1a7 includes embedded4.15.1, deployed with unchanged schema39. Site health,
+sign-in and anonymous denial pass;3Exa backend checks pass (no owner-browser E2E).
+Full receipt: notes/features/website-prospect-search-receipt-20261103.org.

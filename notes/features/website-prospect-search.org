@@ -1,6 +1,6 @@
 #+TITLE: Website prospect search using Exa
 #+DATE: 2026-11-03
-#+STATUS: IMPLEMENTED; authentication patch approved and focused GREEN; final gate and activation pending
+#+STATUS: DEPLOYED; backend smoke PASS; qualified inherited-only gate FAIL; owner browser validation pending
 
 * Request and minimum useful outcome
 Owner: "it needs to be able to search for new companies and contacts ... get it
@@ -299,3 +299,15 @@ Focused auth/enrollment/intake/search c3-20261103T210135Z-37803 PASS218/218;
 hosted owner/disable c3-20261103T210243Z-42784 PASS11/11. Static WAE/format/
 Credo/audit pass. No Exa request/provisioning/activation at source freeze.
 Final exact-head full gate, replacement artifact and reviewed ops follow.
+
+* Delivery (2026-11-03)
+Deployed0edfb9f73e8a2fb4e7ffb319aaaa5a8f3f144051 with auth4.15.1;
+source/driver PASS, qualified exact-head gate ruling and fresh ops bytes GO.
+Full suite6385/6399, exactly inherited14,0new (FAIL retained); focused229/229.
+Ordered stage/provision/readonly-bootcheck/SDR-only-rollout all succeeded.
+Live3-request backend smoke PASS:10named companies,10named people,1company page;
+provider-reported0.015USD,3/3 unattended attempts consumed. People had0 exact
+current-employer matches, so those results stay unconfirmed and cannot prefill.
+No live matched-person prefill or authenticated owner browser E2E claimed.
+No real save, assignment, model invocation or outreach; research_harness unchanged.
+Receipt: notes/features/website-prospect-search-receipt-20261103.org.
