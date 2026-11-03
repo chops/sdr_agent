@@ -10,10 +10,12 @@ defmodule SdrAgentWeb.ReviewLive do
   use SdrAgentWeb, :live_view
 
   alias SdrAgent.Outreach
+  alias SdrAgent.Research
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
   alias SdrAgentWeb.LiveRefresh
+  alias SdrAgentWeb.Provenance
 
   @recent 10
 
@@ -47,6 +49,7 @@ defmodule SdrAgentWeb.ReviewLive do
          {:ok, revisions} <- ConsoleData.current_revisions(scope, queue ++ recent),
          {:ok, contacts} <- ConsoleData.index(scope, Sales.Contact),
          {:ok, accounts} <- ConsoleData.index(scope, Sales.Account),
+         {:ok, owner_cited} <- owner_cited(scope, queue),
          :ok <-
            AuditedView.record(
              scope,
@@ -62,7 +65,8 @@ defmodule SdrAgentWeb.ReviewLive do
           draft: draft,
           revision: revisions[draft.current_revision_id],
           contact: contact,
-          account: contact && accounts[contact.account_id]
+          account: contact && accounts[contact.account_id],
+          owner_cited?: MapSet.member?(owner_cited, draft.id)
         }
       end
 
@@ -72,6 +76,47 @@ defmodule SdrAgentWeb.ReviewLive do
       |> stream(:recent_drafts, Enum.map(recent, row), reset: true)
     else
       {:error, reason} -> withhold(socket, reason)
+    end
+  end
+
+  # The ids of queued drafts whose current revision cites owner-supplied
+  # evidence (citation -> claim -> artifact provider), read as the viewer.
+  defp owner_cited(scope, queue) do
+    opts = [actor: scope.user]
+
+    Enum.reduce_while(queue, {:ok, MapSet.new()}, fn draft, {:ok, acc} ->
+      case draft_owner_cited?(draft, opts) do
+        {:ok, true} -> {:cont, {:ok, MapSet.put(acc, draft.id)}}
+        {:ok, false} -> {:cont, {:ok, acc}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp draft_owner_cited?(draft, opts) do
+    with {:ok, citations} <-
+           Outreach.list_records(
+             Outreach.RevisionCitation,
+             Keyword.put(opts, :filter, draft_revision_id: draft.current_revision_id)
+           ),
+         {:ok, claims} <-
+           Research.list_records(
+             Research.EvidenceClaim,
+             Keyword.put(opts, :filter, lead_id: draft.lead_id)
+           ),
+         {:ok, artifacts} <-
+           Research.list_records(
+             Research.ResearchArtifact,
+             Keyword.put(opts, :filter, lead_id: draft.lead_id)
+           ) do
+      claims = Map.new(claims, &{&1.id, &1})
+      artifacts = Map.new(artifacts, &{&1.id, &1})
+
+      {:ok,
+       citations
+       |> Enum.map(&claims[&1.evidence_claim_id])
+       |> Enum.map(&(&1 && artifacts[&1.research_artifact_id]))
+       |> Provenance.any_owner_supplied?()}
     end
   end
 
@@ -115,7 +160,11 @@ defmodule SdrAgentWeb.ReviewLive do
               </.empty>
             </.card>
           </li>
-          <li :for={{dom_id, row} <- @streams.review_queue} id={dom_id}>
+          <li
+            :for={{dom_id, row} <- @streams.review_queue}
+            id={dom_id}
+            data-owner-supplied={to_string(row.owner_cited?)}
+          >
             <.link
               navigate={~p"/drafts/#{row.id}"}
               class="group flex flex-col gap-3 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-600/40 hover:shadow-md focus-visible:outline-2 focus-visible:outline-teal-600 sm:flex-row sm:items-center"
@@ -126,6 +175,13 @@ defmodule SdrAgentWeb.ReviewLive do
               <div class="min-w-0 flex-1">
                 <p class="truncate font-medium text-zinc-900 group-hover:text-teal-800">
                   {row.revision && row.revision.subject}
+                </p>
+                <p
+                  :if={row.owner_cited?}
+                  data-provenance="owner_intake"
+                  class="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200"
+                >
+                  Cites owner-supplied, unverified evidence
                 </p>
                 <p class="mt-0.5 truncate text-xs text-zinc-500">
                   to {ConsoleData.contact_name(row.contact)}

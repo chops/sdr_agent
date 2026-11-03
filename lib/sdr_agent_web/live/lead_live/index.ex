@@ -2,13 +2,20 @@ defmodule SdrAgentWeb.LeadLive.Index do
   @moduledoc """
   Leads list (S10a): every lead of the tenant with its company, contact and
   lifecycle status, filterable by status through the URL (`?status=`).
-  Read-only; an auditor's view is recorded with the ids of the leads shown.
+  An auditor's view is recorded with the ids of the leads shown. The current
+  hosted owner also gets the "Add prospect" panel
+  (`SdrAgentWeb.LeadLive.OwnerIntakePanel`, ADR-0026), which previews and
+  saves through `SdrAgent.Prototype.OwnerIntake`. Every event rechecks the
+  owner, and the preview stays in server assigns.
   """
   use SdrAgentWeb, :live_view
 
+  alias SdrAgent.Prototype.OwnerIntake
   alias SdrAgent.Sales
   alias SdrAgentWeb.AuditedView
   alias SdrAgentWeb.ConsoleData
+  alias SdrAgentWeb.LeadLive.OwnerIntakePanel
+  alias SdrAgentWeb.Scope
 
   @filters ~w(new assigned researching qualifying qualified disqualified in_outreach replied stopped blocked)
 
@@ -17,6 +24,8 @@ defmodule SdrAgentWeb.LeadLive.Index do
     {:ok,
      socket
      |> assign(page_title: "Leads", loaded?: false, withheld: nil, status: nil, filters: @filters)
+     |> assign(owner?: false)
+     |> reset_intake(false)
      |> stream(:leads, [])}
   end
 
@@ -57,6 +66,7 @@ defmodule SdrAgentWeb.LeadLive.Index do
         end)
 
       socket
+      |> assign(owner?: Scope.hosted_owner?(scope))
       |> assign(loaded?: true, withheld: nil, count: length(rows))
       |> stream(:leads, rows, reset: true)
     else
@@ -68,6 +78,92 @@ defmodule SdrAgentWeb.LeadLive.Index do
   defp withhold(socket, reason),
     do: assign(socket, loaded?: false, withheld: AuditedView.error_message(reason))
 
+  ## Owner intake (ADR-0026)
+
+  @impl true
+  def handle_event("intake_open", _params, socket),
+    do: {:noreply, if(owner_now?(socket), do: reset_intake(socket, true), else: socket)}
+
+  def handle_event("intake_close", _params, socket), do: {:noreply, reset_intake(socket, false)}
+
+  def handle_event("intake_change", %{"intake" => form}, socket) when is_map(form),
+    do: {:noreply, assign(socket, intake_form: to_form(form, as: :intake))}
+
+  def handle_event("intake_change", _params, socket), do: {:noreply, socket}
+
+  def handle_event("intake_add_source", _params, socket) do
+    rows = socket.assigns.source_rows
+
+    rows =
+      if length(rows) < OwnerIntakePanel.max_sources(), do: rows ++ [length(rows)], else: rows
+
+    {:noreply, assign(socket, source_rows: rows)}
+  end
+
+  def handle_event("intake_preview", %{"intake" => form}, socket) when is_map(form) do
+    socket = assign(socket, intake_form: to_form(form, as: :intake), preview: nil, intake_params: nil)
+
+    if owner_now?(socket) do
+      params = OwnerIntakePanel.params(form)
+
+      case OwnerIntake.preview(params, socket.assigns.current_scope.user) do
+        {:ok, preview} ->
+          {:noreply, assign(socket, preview: preview, intake_params: params, intake_error: nil)}
+
+        {:error, code} ->
+          {:noreply, assign(socket, intake_error: code)}
+      end
+    else
+      {:noreply, refuse_intake(socket)}
+    end
+  end
+
+  def handle_event("intake_preview", _params, socket), do: {:noreply, refuse_intake(socket)}
+
+  # Any client "preview" is ignored: only the server-held preview counts.
+  def handle_event("intake_commit", _params, socket) do
+    %{preview: preview, intake_params: params} = socket.assigns
+
+    cond do
+      not owner_now?(socket) ->
+        {:noreply, refuse_intake(socket)}
+
+      is_nil(preview) or is_nil(params) ->
+        {:noreply, assign(socket, intake_error: :no_preview)}
+
+      true ->
+        commit(socket, params, preview)
+    end
+  end
+
+  defp commit(socket, params, preview) do
+    case OwnerIntake.commit(params, preview, socket.assigns.current_scope.user) do
+      {:ok, mode, %{lead_id: lead_id}} when mode in [:created, :replay] ->
+        flash = if mode == :created, do: "Prospect saved.", else: "This prospect was already saved."
+        {:noreply, socket |> put_flash(:info, flash) |> push_navigate(to: ~p"/leads/#{lead_id}")}
+
+      {:error, code} ->
+        {:noreply, assign(socket, intake_error: code, preview: nil, intake_params: nil)}
+    end
+  end
+
+  # The owner check is re-run on every event; socket assigns may be stale.
+  defp owner_now?(socket), do: Scope.hosted_owner?(socket.assigns.current_scope)
+
+  defp refuse_intake(socket),
+    do: socket |> reset_intake(false) |> assign(owner?: false, intake_error: nil)
+
+  defp reset_intake(socket, open?) do
+    assign(socket,
+      intake_open?: open?,
+      intake_form: to_form(%{}, as: :intake),
+      source_rows: [0],
+      preview: nil,
+      intake_params: nil,
+      intake_error: nil
+    )
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -78,7 +174,25 @@ defmodule SdrAgentWeb.LeadLive.Index do
           Fictional accounts and contacts (synthetic <code class="font-mono text-xs">.test</code>
           domains). Open a lead to see the research evidence behind its qualification.
         </:subtitle>
+        <:actions :if={@owner? and not @intake_open?}>
+          <button
+            id="add-prospect"
+            type="button"
+            phx-click="intake_open"
+            class="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:-translate-y-px hover:bg-teal-800 focus-visible:outline-2 focus-visible:outline-teal-600"
+          >
+            <.icon name="hero-plus" class="size-4" /> Add prospect
+          </button>
+        </:actions>
       </.page_header>
+
+      <OwnerIntakePanel.panel
+        :if={@owner? and @intake_open?}
+        form={@intake_form}
+        source_rows={@source_rows}
+        preview={@preview}
+        error={@intake_error}
+      />
 
       <nav aria-label="Filter by status" class="mb-4 flex flex-wrap gap-1.5">
         <.link
