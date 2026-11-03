@@ -1,6 +1,6 @@
 #+TITLE: Website prospect search using Exa
 #+DATE: 2026-11-03
-#+STATUS: APPROVED; ADR-0027 accepted; implementation starting with synthetic RED tests
+#+STATUS: IMPLEMENTED; activation held by new authentication advisory; patch approval required
 
 * Request and minimum useful outcome
 Owner: "it needs to be able to search for new companies and contacts ... get it
@@ -256,3 +256,34 @@ Architecture changed: dedicated supervision subtree and Exa API integration.
 Runtime diagram added; no Ash domain/resource change or migration.
 This records synthetic backend verification only; no paid API calls, key
 provisioning or hosted deployment has occurred at this checkpoint.
+
+* Final-source readiness and new external security blocker (2026-11-03)
+- Final source55c91e0f36dec35a190c0c103f0b627c21851fdf: backend and web source
+  PASS, F1 temporary-root-child hardening and repeated-open cancellation included.
+- Clean exact-source focused run c3-20261103T200454Z-32370 PASS160/160,
+  manifest verified; includes36 containment/setup controls with clean child env.
+  Ordinary final prod WAE passes. Runtime diagrams and accepted ADR-0027 current.
+- Inactive hosted artifact /root/sdr_agent-build.S2reMrIY/release.tar.gz,
+  sha2565bd1eba7a4f839d7429d29d9864cb63abc8446c18ace7e903e235794aeddf799.
+  Hosted WAE/assets/release and24 ELF/library checks pass; no application startup.
+- Superseded b314 full gate c3-20261103T193647Z-96731 retained FAIL50: exact
+  baseline14 plus36 OTEL-name setup failures, not an application-body failure.
+  Root tool environment had4 ambient telemetry names, not scrubbed by the runner.
+  No assertion/production/harness change: final launch clears only child env.
+- Final exact-source gate c6-20261103T200415Z-28877 stopped at audit before any
+  database effect or suite run: EEF-CVE-2026-110826 / GHSA-j6f8-qcj9-gh4r,
+  ash_authentication4.15.0, medium. Published2026-11-03T19:19:26.188Z; now in
+  refreshed audit metadata, unlike the earlier root audit. Not baseline-only.
+- Official OSV record independently read: affected4.5.0..<4.15.1; fixed4.15.1.
+  Password resets/non-atomic changes may leave prior sessions valid. User enables
+  log_out_everywhere and non-atomic OnPasswordChange actions, so relevant.
+  The existing live542fc2f5 release has the same dependency exposure.
+- No upgrade, advisory exclusion, gate bypass, secret provisioning, release
+  activation, real-data write, model call, outreach or Exa API request performed.
+  Both source branches are frozen/pushed; current manual site remains unchanged.
+- Owner decision required: approve the narrow ash_authentication4.15.0->4.15.1
+  security patch, revocation regression tests, reviewed dependency-record update,
+  rebuild/full verification and SDR deployment. Prior D-271 accepts an exact older
+  amendment and explicitly grants no security waiver; it is not blanket authority
+  to silently change this authentication pin. Existing Exa allowance remains3
+  unattended backend requests plus2 explicit owner-browser validation requests.
