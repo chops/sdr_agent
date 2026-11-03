@@ -1,6 +1,6 @@
 #+TITLE: Website prospect search using Exa
 #+DATE: 2026-11-03
-#+STATUS: INITIAL DEPLOYMENT LIVE; nested dates fix GREEN231; replacement gate/rollout pending
+#+STATUS: DEPLOYED bd4c5c72; GREEN231; inherited-only full-gate FAIL; owner browser validation pending
 
 * Request and minimum useful outcome
 Owner: "it needs to be able to search for new companies and contacts ... get it
@@ -321,3 +321,14 @@ static/prod controls pass. Fix plan notes/fixes/exa-work-history-dates-20261103.
 New artifact/full gate/SDR-only rollout follow; no further provider calls allowed
 under the exhausted3-request unattended budget. Live/browser matched prefill
 remains unproven, including whether current roles omit the optional end-date key.
+
+* Final corrected release
+bd4c5c72cc8dfb10d27f7149a39f8f3386cfd3bc deployed after source/driver/ops
+review and qualified exact-head gate:6387/6401, exactly inherited14,0new,
+FAIL retained. Artifact9bbed753; ordered fresh preflight/stage/readonly
+bootcheck/SDR-only rollout pass. Postcheck2026-11-03T22:14:03Z: livecorrected
+revision active, health/sign-in200, anonymousleads302. Existing key/schema39/
+grants unchanged; no additional API request, model, save, assignment or outreach.
+The initial3-call smoke is not a live retest of this correction. Full final
+receipt: notes/fixes/exa-work-history-dates-20261103.org. Owner browser evidence
+still owed; missing employment dates remain unknown, email remains manual.

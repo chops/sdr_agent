@@ -1,6 +1,6 @@
 #+TITLE: Correct Exa employment-history date nesting
 #+DATE: 2026-11-03
-#+STATUS: GREEN231; final gate, replacement build and rollout pending
+#+STATUS: DEPLOYED bd4c5c72; GREEN231; inherited-only full-gate FAIL retained
 
 * Summary and authority
 Existing owner-approved website search must normalize Exa's actual entity schema.
@@ -55,7 +55,8 @@ unchanged; existing runtime diagram remains valid.
 - [X] Past, wrong-name and ambiguous roles remain unconfirmed.
 - [X] Real LiveView/facade/client HTTP seam reaches cited prefill, email blank,
   no persistence/model/outreach, using the SDK-shaped fixture.
-- [ ] Focused integrated regressions/static/full gate/review and SDR rollout.
+- [X] Run focused integrated regressions/static/full gate/review and SDR rollout;
+  retain the inherited-only full-gate FAIL rather than reporting PASS.
 
 * RED evidence
 c3-20261103T213921Z-98543:18/23 pass,5 intended assertion failures (nested
@@ -74,3 +75,70 @@ no-start refusal/test-seam-absence controls rc0. Static log:
 /Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/exa-dates-static-20261103.log
 SHA256a740f1fc07c8e0a0803de303178b387113484c735c5bfbc097e9dd83982971e0.
 Architecture unchanged. Existing key retained; no further paid requests.
+
+* Final qualified gate and deployment receipt
+Deployed executablebd4c5c72cc8dfb10d27f7149a39f8f3386cfd3bc, clean/pushed
+on both source branches before freeze. These final receipt edits are docs only.
+Independent source/driver PASS m_1793742302555229075_c71765b8; final ops-byte
+conditional GO m_1793742775245060271_41de51f7; final gate/rollout ruling
+m_1793743888852857882_155a4c0d.
+
+Exact-head gate c6-20261103T214455Z-22632, manifest39d7931bd549e15df95f927224648206e5916c79b318c0eab6fc6bd6b5b9ee7f:
+workflow/format/WAE/codegen/Credo/audit rc0;6387/6401 passed,14failed,
+1skipped,42excluded. Measured verdict remains FAIL, qualified rollout approved.
+All14 failure names exactly match baseline c6-20261103T064835Z-83695,
+0new/0resolved; sorted-name SHA256
+79ae83a88403cd3e0f58104a8068639a97990fb870f5dbebce9c70198ed2d2b1.
+Root independently verified the full evidence manifest and exact14-name diff;
+owned database pair dropped and leases released. Runner rc0 is not test PASS.
+
+Artifact/root/sdr_agent-build.gJCFsx9i/release.tar.gz, SHA256
+9bbed753346351a4be057c7b12fdf2136fa621c6c1b66000f801dc0e231041d9.
+Build driver5dab8133294380f901eacb20330231ea99d1d8b975cb62889f5098faffdffd24;
+hosted WAE/assets/release,24ELF, embedded authentication4.15.1 and authority/
+search BEAM checks pass. Private tool roots, unchanged mix.lock1aa772b9 and
+unchanged root shared-tool metadata; no application startup during build.
+Build log exa-dates-build-bd4c5c72-20261103.log SHA256
+2d35b691f2ddf4991ebfa83efa8ed8dc01c002fbfa527126c051a81d8ceece13.
+
+Ops/Users/charles/.local/state/sdr-agent/exa-dates-rollout-20261103.JIvEVvgx,
+4-file SHA256SUMS060a59de3d2db4d69fdc523b23e95781274f1565d6f429004068365aec254ab8.
+Fresh preflight2026-11-03T22:12:20Z verified live0edfb9f7, artifact hash,
+available new paths and absent locks. Stage4files rc0 with
+EXA_DATES_OPERATION_FILES_STAGED_NO_SECRET_NO_RESTART, then rollout rc0:
+app-role READ ONLY schema39/exact-privilege bootcheck PASS, CA148,
+SCHEMA39_PASS, SDR_HEALTH_PASS and
+SDR_EXA_SEARCH_RELEASE_ACTIVE_SIGNIN_HEALTH_ANON_DENIAL_PASS.
+Only sdr-agent.service restarted, no AgentBuilder/config/schema/grant/account/
+prospect action. Existing key/flag/env retained unchanged; no provision step.
+Previous0edfb9f7 executable retained at
+/opt/sdr_agent_hosted-previous-exa-dates-20261103 for recovery.
+
+Postcheck2026-11-03T22:14:03Z: livebd4c5c72 active; health200/ok,
+sign-in200, anonymous/leads302 to sign-in, locks absent; secret file still
+root root0600 and12lines; initial backend ledger still3lines.
+EXA_DATES_READONLY_POSTCHECK_PASS_NO_PAID_CALL.
+
+All deployment logs below are in
+/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/:
+| File | SHA256 |
+|------+--------|
+| exa-dates-preflight-20261103.log | 1fdeeae5a9431494f63eda1303df7dd5ede876c0a6f5f96fe6cf726f56a8da30 |
+| exa-dates-stage-20261103.log | 0d002ba929d75cfb9ae75750caf90da4228af75a9ddc2c9dad74273692dbc6a9 |
+| exa-dates-rollout-20261103.log | 5e30585bb1de834675ed2f56c6bad81264fd788aee2269fe9caaef63b04f0c6a |
+| exa-dates-postcheck-20261103.log | 7a2693a50218b72c8ba7c2a74d0a8d91587ac5ca87b8c782bae8c836b08447dd |
+
+* Owner handoff and remaining evidence limitation
+https://sdr.a-z.bot/leads -> Find prospects; refresh/reconnect to the new view.
+Company/people/contents backend smoke3/3 succeeded on initial0edfb9f7 before
+this fix, provider-reported total0.015USD. NO provider request after that smoke:
+unattended validation3/3 exhausted. No model call, assignment or outreach.
+The fixed artifact's nested-schema matched-prefill is proven by the real
+LiveView/facade/client synthetic HTTP-seam test, NOT by a paid live retest.
+Charles retains the2 explicitly reserved browser-validation requests, spent only
+by his actions; no owner session minted or impersonated. Unknown employment,
+including an absent end-date key, remains unconfirmed. Real matched-prefill/
+authenticated browser E2E still needs owner validation; email remains manual.
+No promise that this correct nesting alone guarantees a live match. The initial
+receipt is notes/features/website-prospect-search-receipt-20261103.org;
+the schema defect is fixed, while optional-wire-date semantics remain unverified.

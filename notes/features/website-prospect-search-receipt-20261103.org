@@ -1,6 +1,13 @@
 #+TITLE: Deployed website prospect search -- qualified delivery receipt
 #+DATE: 2026-11-03
-#+STATUS: INITIAL RELEASE DEPLOYED; matcher schema fix in progress; browser E2E not performed
+#+STATUS: HISTORICAL INITIAL RELEASE; matcher correction now deployed; browser E2E not performed
+
+* Subsequent correction
+The initial0edfb9f7 facts below remain historical. The nested-dates matcher
+correction is now deployed atbd4c5c72, with no additional paid call. Final
+gate/rollout/postcheck receipt: notes/fixes/exa-work-history-dates-20261103.org.
+The schema bug below is resolved; optional current-role wire dates and live
+matched-prefill/browser evidence remain unverified, not silently waived.
 
 * Delivered and owner workflow
 https://sdr.a-z.bot/leads -> Find prospects -> Search companies -> Use this
@@ -110,9 +117,9 @@ All paths below are under
 
 * Remaining work and constraints
 - Matcher schema bug confirmed against official SDKs: code/fixtures used flat
-  workHistory[].to instead of workHistory[].dates.to. Codex owns the narrow
-  RED/GREEN correction, independent review and redeployment with no extra paid
-  calls. The prior smoke's0/10 cannot be treated as only a provider-data fact.
+  workHistory[].to instead of workHistory[].dates.to. Codex completed the narrow
+  RED/GREEN correction, independent review and redeployment atbd4c5c72 with no
+  extra paid calls. The prior smoke's0/10 cannot be treated as only a provider-data fact.
   SDK Optional dates cannot establish whether real current roles use explicit
   null or an omitted end date; retain explicit-null-only behavior until evidence.
 - Owner browser validation, including a matched-person prefill if a source
