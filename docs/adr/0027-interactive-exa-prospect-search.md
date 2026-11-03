@@ -58,7 +58,7 @@ sent to Exa only by the owner's explicit action; unrelated CRM data is not.
 
 Candidates are ephemeral, session/owner/request-bound and visibly unverified.
 Names/company affiliations may be stale. An employer match requires provider
-history to=null and exact NFC/trim/casefold company-name equality; it is a
+history dates.to explicitly null and exact NFC/trim/casefold company-name equality; it is a
 provider assertion, not independent verification. Nonmatches cannot prefill an
 employer. Unknown values remain blank. Email is intentionally never prefilled
 in v1; owner enters it, not a guessed/automatically enriched address. A

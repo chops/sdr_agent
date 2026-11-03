@@ -162,7 +162,7 @@ defmodule SdrAgent.Discovery.ExaClient do
   defp current_history(history, company) when is_list(history) do
     matches =
       Enum.filter(history, fn
-        %{"to" => nil, "company" => %{"name" => name}} ->
+        %{"dates" => %{"to" => nil}, "company" => %{"name" => name}} ->
           case Candidate.field(name) do
             nil -> false
             value -> normalized(value) == normalized(company)

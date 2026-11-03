@@ -1,6 +1,6 @@
 #+TITLE: Correct Exa employment-history date nesting
 #+DATE: 2026-11-03
-#+STATUS: RED VERIFIED; independent GREEN GO pending
+#+STATUS: GREEN231; final gate, replacement build and rollout pending
 
 * Summary and authority
 Existing owner-approved website search must normalize Exa's actual entity schema.
@@ -49,11 +49,11 @@ unchanged; existing runtime diagram remains valid.
    browser validation back to Charles. Backend allowance remains3/3 exhausted.
 
 * Required checks
-- [ ] Nested explicit-null current job matches exact company and exposes role.
-- [ ] Missing/malformed dates or absent to stays unconfirmed.
-- [ ] Flat to=null cannot claim current employment, including nested ended role.
-- [ ] Past, wrong-name and ambiguous roles remain unconfirmed.
-- [ ] Real LiveView/facade/client HTTP seam reaches cited prefill, email blank,
+- [X] Nested explicit-null current job matches exact company and exposes role.
+- [X] Missing/malformed dates or absent to stays unconfirmed.
+- [X] Flat to=null cannot claim current employment, including nested ended role.
+- [X] Past, wrong-name and ambiguous roles remain unconfirmed.
+- [X] Real LiveView/facade/client HTTP seam reaches cited prefill, email blank,
   no persistence/model/outreach, using the SDK-shaped fixture.
 - [ ] Focused integrated regressions/static/full gate/review and SDR rollout.
 
@@ -62,3 +62,15 @@ c3-20261103T213921Z-98543:18/23 pass,5 intended assertion failures (nested
 current roles including NFC/case match, flat false positive, real integration
 prefill button absent). No setup/compile/runtime failure. Manifest verified,
 owned database pair dropped. lib/ and policy code unchanged in RED.
+GREEN GO: Claude m_1793742030349363375_d219dcdc, confirmed flat false-positive
+RED expectation in m_1793742048451424311_035835c0. Production delta one nested
+pattern only; no matching relaxation or additional provider request.
+
+* GREEN evidence
+c3-20261103T214146Z-9463 PASS231/231, including23/23 SDK-shape + real
+HTTP-seam prefill tests. Manifest verified, owned database pair dropped.
+Test/prod WAE, format, Credo, blocking audit, workflow receipt and ordinary
+no-start refusal/test-seam-absence controls rc0. Static log:
+/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/exa-dates-static-20261103.log
+SHA256a740f1fc07c8e0a0803de303178b387113484c735c5bfbc097e9dd83982971e0.
+Architecture unchanged. Existing key retained; no further paid requests.

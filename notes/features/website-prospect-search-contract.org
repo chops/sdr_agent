@@ -72,7 +72,9 @@ ExaClient.normalize_contents(decoded_response, CompanyContext, received_on)
 Companies use entity type company/properties.name (no company-name-from-title).
 People use entity type person/properties.firstName,lastName,workHistory. A role
 and employer are selected only for one exact normalized company-name match with
-to=nil; ambiguous multiple matches or absent match yield employer_match? false
+workHistory[].dates.to explicitly nil; missing dates or a missing to key stays
+unconfirmed, as do flat to=nil and ambiguous multiple matches. Absent matches
+yield employer_match? false
 and nil role. This is provider evidence, never verification of current employment.
 No synthesized source excerpt: use text if nonempty, else one highlight; prefix
 <=2000 bytes at UTF-8 boundary. Retain provider date separately; receipt UTC date

@@ -1,6 +1,6 @@
 #+TITLE: Website prospect search using Exa
 #+DATE: 2026-11-03
-#+STATUS: DEPLOYED; backend smoke PASS; qualified inherited-only gate FAIL; owner browser validation pending
+#+STATUS: INITIAL DEPLOYMENT LIVE; nested dates fix GREEN231; replacement gate/rollout pending
 
 * Request and minimum useful outcome
 Owner: "it needs to be able to search for new companies and contacts ... get it
@@ -58,7 +58,7 @@ below were explored only after this PASS.
   unknown. Owner must complete unavailable required fields before saving.
 - Company-first source path: select/confirm the company's official HTTPS URL
   and domain, then an explicit people search at that company; provider employment
-  match is exact normalized company name and to=null, not proof of a current job.
+  match is exact normalized company name and dates.to explicitly null, not proof of a current job.
   Explicit Get company page invokes /contents for exactly that confirmed URL,
   which must pass the existing public/company host rules. A directory/profile
   result never silently supplies the company domain. No global people mode in v1.
@@ -311,3 +311,13 @@ current-employer matches, so those results stay unconfirmed and cannot prefill.
 No live matched-person prefill or authenticated owner browser E2E claimed.
 No real save, assignment, model invocation or outreach; research_harness unchanged.
 Receipt: notes/features/website-prospect-search-receipt-20261103.org.
+
+* Matcher correction (2026-11-03)
+Live smoke0/10 employer matches prompted a public SDK schema crosscheck: the
+date path is workHistory[].dates.to, not the flat field in our original fixtures.
+One-pattern correction, explicit-null requirement retained, missing dates unknown.
+Independent RED/GREEN GO,5 intended RED assertions and231/231 integrated GREEN;
+static/prod controls pass. Fix plan notes/fixes/exa-work-history-dates-20261103.org.
+New artifact/full gate/SDR-only rollout follow; no further provider calls allowed
+under the exhausted3-request unattended budget. Live/browser matched prefill
+remains unproven, including whether current roles omit the optional end-date key.
