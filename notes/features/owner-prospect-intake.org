@@ -134,4 +134,11 @@ the passing run. No hosted migration has run.
 - Open: Claude T3 actual owner-cited draft/review test, R1 stale preview clearing,
   R2 accurate hosted subtitle, N1 effective reused-Account website presentation;
   final source review/gate, migration/ACL deployment review and pinned cutover.
+- Test-only direct artifact controls c4-20261103T060418Z-98913 PASS12/12
+  (five new owner controls plus seven legacy dossier controls); MANIFEST checked.
+  Confirms forced eight-key metadata/provider/trust/time semantics despite
+  dossier impersonation, wrong bytes and URL refuse without artifact/payload/
+  event writes, exact replay writes nothing, and one Account's distinct lead
+  cannot substitute the other contact's excerpt. Format/WAE/configured Credo
+  pass. No production code changed for these regression controls.
 
