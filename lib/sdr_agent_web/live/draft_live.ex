@@ -144,7 +144,7 @@ defmodule SdrAgentWeb.DraftLive do
          {:ok, contact} <- Sales.fetch(Sales.Contact, draft.recipient_contact_id, opts),
          {:ok, account} <- Sales.fetch(Sales.Account, contact.account_id, opts),
          {:ok, campaign} <- Sales.fetch(Sales.Campaign, draft.campaign_id, opts),
-         {:ok, step} <- Sales.fetch(Sales.SequenceStep, draft.sequence_step_id, opts),
+         {:ok, step} <- step(draft, opts),
          {:ok, approvals} <-
            Outreach.list_records(
              Outreach.Approval,
@@ -197,6 +197,17 @@ defmodule SdrAgentWeb.DraftLive do
       :error -> {:error, :not_found}
       {:error, %Ash.Error.Query.NotFound{}} -> {:error, :not_found}
       other -> other
+    end
+  end
+
+  # The sequence step is display-only metadata (position and channel). A
+  # reader the step policy does not admit (the hosted owner) gets it as
+  # :unavailable; every other error still withholds the page.
+  defp step(draft, opts) do
+    case Sales.fetch(Sales.SequenceStep, draft.sequence_step_id, opts) do
+      {:ok, step} -> {:ok, step}
+      {:error, %Ash.Error.Query.NotFound{}} -> {:ok, :unavailable}
+      error -> error
     end
   end
 
@@ -487,7 +498,11 @@ defmodule SdrAgentWeb.DraftLive do
           <.badge status={@draft.status} class="ml-2 align-middle" />
           <:subtitle>
             <span class="font-mono text-xs">{to_string(@contact.email)}</span>
-            · {@contact.title} · step {@step.position + 1} ({humanize(@step.channel)})
+            · {@contact.title} ·
+            <span :if={@step == :unavailable} id="draft-step-unavailable">step unavailable</span>
+            <span :if={@step != :unavailable}>
+              step {@step.position + 1} ({humanize(@step.channel)})
+            </span>
             <.link navigate={~p"/leads/#{@draft.lead_id}"} class="ml-1 text-teal-700 hover:underline">
               Lead & evidence →
             </.link>
