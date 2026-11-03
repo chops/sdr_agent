@@ -14,7 +14,12 @@ defmodule SdrAgent.Audit.Checks.DossierSourceScope do
       authoritative run, lead, entry and sources it re-read;
     * the scope's tenant is the actor's;
     * the requested `sha256` is one of the scope's `sha256s` (those sources'
-      `content_sha256`).
+      `content_sha256`);
+    * re-read at consumption in the actor's tenant (owner intake T2): the
+      scope's run is running for the scope's lead, the scope's entry is that
+      lead's entry in the live binding, and the requested hash is one of that
+      entry's `DossierSource` content hashes. A hand-built context naming
+      another lead's run, entry or hash is refused.
 
   `purpose/0` is the fixed AuditAccess purpose of a scoped read.
 
@@ -32,24 +37,57 @@ defmodule SdrAgent.Audit.Checks.DossierSourceScope do
     do: "the agent runtime reads a source hash of its run's lead entry in the live binding"
 
   if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    require Ash.Query
+
+    alias SdrAgent.Audit.Kernel
+    alias SdrAgent.Research.DossierEntry
+    alias SdrAgent.Research.DossierSource
+    alias SdrAgent.Research.DossierSourceRead
+
     @impl true
     def match?(
-          %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id},
+          %SdrAgent.Actor{type: :agent_runtime, tenant_id: tenant_id} = actor,
           %{subject: %Ash.ActionInput{context: context, arguments: arguments}},
           _opts
         )
         when is_binary(tenant_id) and is_map(context) do
       with :prototype <- SdrAgent.Prototype.Authority.runtime(),
-           {:ok, %{tenant_id: ^tenant_id}} <- SdrAgent.Prototype.Authority.binding(),
+           {:ok, %{id: binding_id, tenant_id: ^tenant_id}} <-
+             SdrAgent.Prototype.Authority.binding(),
            :ok <- SdrAgent.Prototype.Authority.check_live(),
-           {:ok, %{tenant_id: ^tenant_id, sha256s: sha256s}} <- fetch(context) do
-        Map.get(arguments, :sha256) in sha256s
+           {:ok, %{tenant_id: ^tenant_id, sha256s: sha256s} = scope} <- fetch(context),
+           sha256 = Map.get(arguments, :sha256),
+           true <- sha256 in sha256s do
+        authoritative?(scope, sha256, binding_id, actor)
       else
         _refused -> false
       end
     end
 
     def match?(_actor, _authorizer, _opts), do: false
+
+    # The scope's run, entry and hash, re-read now; any mismatch or read
+    # error refuses.
+    defp authoritative?(scope, sha256, binding_id, actor) do
+      %{tenant_id: tenant_id, agent_run_id: run_id, lead_id: lead_id, entry_id: entry_id} = scope
+
+      with {:ok, %{status: :running, lead_id: ^lead_id, tenant_id: ^tenant_id}} <-
+             SdrAgent.Agents.get_run(run_id, actor: actor),
+           {:ok, %DossierEntry{lead_id: ^lead_id, tenant_id: ^tenant_id} = entry} <-
+             Ash.get(DossierEntry, entry_id, Kernel.opts(tenant_id)),
+           true <- DossierSourceRead.in_binding?(entry, tenant_id, binding_id),
+           {:ok, [_ | _]} <-
+             DossierSource
+             |> Ash.Query.for_read(:read, %{}, Kernel.opts(tenant_id))
+             |> Ash.Query.filter(
+               tenant_id == ^tenant_id and entry_id == ^entry_id and content_sha256 == ^sha256
+             )
+             |> Ash.read() do
+        true
+      else
+        _refused -> false
+      end
+    end
   else
     @impl true
     def match?(_actor, _authorizer, _opts), do: false
