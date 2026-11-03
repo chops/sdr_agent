@@ -237,3 +237,22 @@ bundled Exa/key/credits/smoke/deployment ask and accepts ADR-0027 and this plan.
 Earlier pending/proposed paragraphs above are historical, not current holds.
 Proceed with synthetic TDD and peer gates, then the reviewed scoped activation.
 No additional model allowance, enrichment, auto-save, assignment or outreach.
+
+* Backend implementation evidence (2026-11-03)
+Pure normalization source PASS: Claude m_1793733361258874000_281d7b16.
+Transport GREEN GO and lifecycle GREEN GO: m_1793733361231978000_77c21282,
+m_1793733361282467000_7736ea01; reviewer additions T1-T3/L1-L2 included
+before GREEN. Expanded RED33: c3-20261103T191729Z-4146.
+Execute composition GO: m_1793734088000000000_6ef86b7f; E1 exact source URL
+and E2 empty-key refusal included in RED5 c3-20261103T192846Z-56708.
+Combined backend GREEN33: c3-20261103T192936Z-61045. Full backend including
+normalization and ordinary-branch BEAM/refusal controls GREEN55:
+c3-20261103T193033Z-65661 (outer rc0, verdict PASS, manifest verified).
+One fixture correction: raw-spawn simulated socket lacked inherited test-clock
+authority seams and was denied before any request. Task.async/await inherits
+the explicit fixture callers; real worker-death assertion retained and passing.
+Test WAE and scoped strict Credo12 files pass; ordinary prod WAE passes.
+Architecture changed: dedicated supervision subtree and Exa API integration.
+Runtime diagram added; no Ash domain/resource change or migration.
+This records synthetic backend verification only; no paid API calls, key
+provisioning or hosted deployment has occurred at this checkpoint.

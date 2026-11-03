@@ -1,6 +1,6 @@
 #+TITLE: Exa website search shared implementation contract v1
 #+DATE: 2026-11-03
-#+STATUS: Proposed implementation contract within accepted ADR-0027; peer ACK pending
+#+STATUS: ACKed implementation contract within accepted ADR-0027
 
 * Ownership
 Codex: lib/sdr_agent/discovery/**, prototype/prospect_search.ex, config,
@@ -19,6 +19,8 @@ than structs so web RED compiles before backend GREEN. No new persisted entity.
   process only. Permit released by worker-monitor DOWN, never a result message.
 - authorized?(actor) :: boolean: fresh owner check without feature/key check,
   used before handling any result, context selection or prefill event.
+- company_context(actor, candidate, inputs): fresh owner check then pure
+  Candidate.company_context/2. No direct unguarded web-to-candidate boundary.
 - Result message: {:prospect_search_result, request_id, outcome} where outcome
   is {:ok, Result} or {:error, code}. UI accepts only the active request id and
   rechecks authorized? before using any data. No data ever sent to browser for
@@ -86,6 +88,8 @@ Closed codes: :forbidden, :unavailable, :invalid_input, :busy, :cooldown,
 :timeout, :cancelled, :rate_limited, :quota_exceeded, :provider_auth,
 :provider_unavailable, :invalid_response, :too_large, :unsafe_url,
 :source_mismatch, :internal. Never display/log provider error bodies.
+Prefill additionally returns :source_missing or :employer_unconfirmed. Missing
+first/last names prefill as empty strings for explicit owner completion.
 
 * Web prefill builder (Claude)
 SdrAgentWeb.LeadLive.IntakePrefill.build(person, company, source)
