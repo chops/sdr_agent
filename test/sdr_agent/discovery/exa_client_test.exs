@@ -36,7 +36,14 @@ defmodule SdrAgent.Discovery.ExaClientTest do
 
   defp person_row(history \\ nil) do
     history =
-      history || [%{"title" => "Founder", "company" => %{"name" => "Cedar Tools"}, "to" => nil}]
+      history ||
+        [
+          %{
+            "title" => "Founder",
+            "company" => %{"name" => "Cedar Tools"},
+            "dates" => %{"to" => nil}
+          }
+        ]
 
     %{
       "id" => "provider-person",
@@ -138,10 +145,20 @@ defmodule SdrAgent.Discovery.ExaClientTest do
   test "ended, absent-date and mismatched employer histories are unconfirmed" do
     for history <- [
           [
-            %{"title" => "Founder", "company" => %{"name" => "Cedar Tools"}, "to" => "2024-01-01"}
+            %{
+              "title" => "Founder",
+              "company" => %{"name" => "Cedar Tools"},
+              "dates" => %{"to" => "2024-01-01"}
+            }
           ],
           [%{"title" => "Founder", "company" => %{"name" => "Cedar Tools"}}],
-          [%{"title" => "Founder", "company" => %{"name" => "Other Tools"}, "to" => nil}]
+          [
+            %{
+              "title" => "Founder",
+              "company" => %{"name" => "Other Tools"},
+              "dates" => %{"to" => nil}
+            }
+          ]
         ] do
       assert {:ok, %{candidates: [c]}} = search([person_row(history)], :people, company())
       refute c.employer_match?
@@ -152,15 +169,51 @@ defmodule SdrAgent.Discovery.ExaClientTest do
   test "ambiguous current employer matches do not select a job title" do
     history =
       for title <- ["Founder", "Advisor"],
-          do: %{"title" => title, "company" => %{"name" => "Cedar Tools"}, "to" => nil}
+          do: %{
+            "title" => title,
+            "company" => %{"name" => "Cedar Tools"},
+            "dates" => %{"to" => nil}
+          }
 
     assert {:ok, %{candidates: [c]}} = search([person_row(history)], :people, company())
     refute c.employer_match?
     assert c.role == nil
   end
 
+  test "missing or malformed nested dates and an absent end marker remain unconfirmed" do
+    for dates <- [nil, %{}, %{"from" => "2020-01-01"}, [], "unknown", %{"to" => ""}] do
+      history = [
+        %{"title" => "Founder", "company" => %{"name" => "Cedar Tools"}, "dates" => dates}
+      ]
+
+      assert {:ok, %{candidates: [c]}} = search([person_row(history)], :people, company())
+      refute c.employer_match?
+      assert c.role == nil
+      assert c.company_name == nil
+    end
+  end
+
+  test "a flat null end marker cannot assert a current job or override a nested past job" do
+    for extra <- [%{}, %{"dates" => %{"to" => "2024-01-01"}}] do
+      entry = %{"title" => "Founder", "company" => %{"name" => "Cedar Tools"}, "to" => nil}
+      history = [Map.merge(entry, extra)]
+
+      assert {:ok, %{candidates: [c]}} = search([person_row(history)], :people, company())
+      refute c.employer_match?
+      assert c.role == nil
+      assert c.company_name == nil
+    end
+  end
+
   test "employer equality ignores surrounding space and Unicode-normalized case only" do
-    history = [%{"title" => "Founder", "company" => %{"name" => " CEDAR TOOLS "}, "to" => nil}]
+    history = [
+      %{
+        "title" => "Founder",
+        "company" => %{"name" => " CEDAR TOOLS "},
+        "dates" => %{"to" => nil}
+      }
+    ]
+
     assert {:ok, %{candidates: [c]}} = search([person_row(history)], :people, company())
     assert c.employer_match?
   end
@@ -224,7 +277,7 @@ defmodule SdrAgent.Discovery.ExaClientTest do
       %{
         "title" => "Founder",
         "company" => %{"name" => String.normalize(" CAFÉ TOOLS ", :nfd)},
-        "to" => nil
+        "dates" => %{"to" => nil}
       }
     ]
 

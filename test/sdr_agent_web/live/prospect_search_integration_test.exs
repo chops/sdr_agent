@@ -95,7 +95,7 @@ defmodule SdrAgentWeb.ProspectSearchIntegrationTest do
                         "lastName" => "Synthetic",
                         "workHistory" => [
                           %{
-                            "to" => nil,
+                            "dates" => %{"to" => nil},
                             "title" => "Founder",
                             "company" => %{"name" => "Cedar Tools"}
                           }

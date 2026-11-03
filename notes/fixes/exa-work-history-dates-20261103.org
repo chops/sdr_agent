@@ -1,0 +1,64 @@
+#+TITLE: Correct Exa employment-history date nesting
+#+DATE: 2026-11-03
+#+STATUS: RED VERIFIED; independent GREEN GO pending
+
+* Summary and authority
+Existing owner-approved website search must normalize Exa's actual entity schema.
+Initial smoke3/3 succeeded but people10/named10 matched0 employers. No raw response
+retained. Public SDK source confirms our flat workHistory[].to assumption is
+wrong: workHistory[].dates.to is the provider's documented SDK field path.
+Correct only this nesting; do not infer current employment from a missing date.
+Owner's existing Exa implementation/deployment authorization covers this routine
+correctness fix. Peer plan PASS / RED GO m_1793741830768793541_4f04cbcf.
+
+* Entity Model and architecture
+Entity Model trigger: no
+Reason: correct provider-field decoding within the approved ephemeral candidate
+contract; unchanged explicit-null end-date requirement, exact company name,
+ownership, lifecycle, persistence and public actions. No new entity or policy.
+No new ADR: bug fix within ADR-0027, clarify its date-field path. Architecture
+unchanged; existing runtime diagram remains valid.
+
+* Evidence and caveat
+- https://github.com/exa-labs/exa-py/blob/8ca7b446a18f3c6db52327c5544e868ca628d599/exa_py/api.py
+  parse_date_range lines286-292 reads from/to, parse_work_history_entry302-307
+  reads data.get("dates"); EntityPersonPropertiesWorkHistoryEntry1009-1015
+  declares dates, not a top-level to.
+- https://github.com/exa-labs/exa-js/blob/53d3539006c0fad341e42c821b6d36ff144c4eb9/src/index.ts
+  EntityDateRange788-792, WorkHistoryEntry800-806: dates?: EntityDateRange|null.
+- Peer independently fetched exa-py and confirmed the same path. Optional
+  SDK values collapse missing and null; wire form of real current roles remains
+  unverified. Explicit-null-only stays a safe product limitation. No claim that
+  this alone proves live matched prefill; owner-browser evidence still required.
+- Debug bundle: tmp/ai/debug/bundle_20261103-143717; source/context, workHistory
+  references, compile/dependency state. No key or raw live result captured.
+
+* Minimal steps
+1. RED: correct provider fixtures to nested dates.to in pure and real HTTP-seam
+   UI integration tests. Cover explicit current null, historical end date,
+   wrong company, ambiguous roles, missing/malformed dates, missing to and flat
+   false-positive history. No production changes in RED.
+2. Peer RED review / GREEN GO, then change current_history pattern only to
+   dates.to=nil. Preserve exact normalized company-name and ambiguity checks.
+3. Focused full search/intake/auth regression; static and ordinary controls.
+   Freeze/push, peer source review, exact-head full gate; retain inherited FAIL.
+4. Build reviewed patched artifact; new SDR-only rollout bundle with fresh
+   next/previous paths and current old revision0edfb9f7. Reuse existing key,
+   schema39, read-only bootcheck. No provision step, no paid smoke rerun.
+5. Verify health/sign-in/anonymous denial, record/push receipt and hand owner
+   browser validation back to Charles. Backend allowance remains3/3 exhausted.
+
+* Required checks
+- [ ] Nested explicit-null current job matches exact company and exposes role.
+- [ ] Missing/malformed dates or absent to stays unconfirmed.
+- [ ] Flat to=null cannot claim current employment, including nested ended role.
+- [ ] Past, wrong-name and ambiguous roles remain unconfirmed.
+- [ ] Real LiveView/facade/client HTTP seam reaches cited prefill, email blank,
+  no persistence/model/outreach, using the SDK-shaped fixture.
+- [ ] Focused integrated regressions/static/full gate/review and SDR rollout.
+
+* RED evidence
+c3-20261103T213921Z-98543:18/23 pass,5 intended assertion failures (nested
+current roles including NFC/case match, flat false positive, real integration
+prefill button absent). No setup/compile/runtime failure. Manifest verified,
+owned database pair dropped. lib/ and policy code unchanged in RED.
