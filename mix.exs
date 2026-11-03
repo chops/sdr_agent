@@ -52,7 +52,7 @@ defmodule SdrAgent.MixProject do
       {:oban, "== 2.24.0"},
       {:picosat_elixir, "~> 0.2"},
       {:ash_authentication_phoenix, "== 2.17.4"},
-      {:ash_authentication, "== 4.15.0"},
+      {:ash_authentication, "== 4.15.1"},
       # EEF-CVE-2026-117656 (ADR-0008 amendment 2026-10-31): stable
       # ash_authentication 4.x caps assent below 0.3; the fixed 0.3.2 is
       # overridden. Password-only strategy; the OAuth/Apple path is unused.

@@ -1060,3 +1060,69 @@ advisory: a fix exists and it is a patch release.
 Lock `jsv` at **0.26.2**. Only the `jsv` entry in `mix.lock` changes;
 `mix.exs` is unchanged and no other package moves (`mix deps.unlock jsv`
 then `mix deps.get`, checked by a lock diff). No `ignore_advisories` entry.
+
+## Amendment (2026-11-03, accepted): EEF-CVE-2026-110826
+
+**Status: accepted** by Charles: "approve. contniue." in response to the
+request for the narrow `ash_authentication` 4.15.0 → 4.15.1 patch,
+session-revocation regressions, this dependency-record amendment, rebuild,
+full verification and SDR deployment. Approval relayed to Claude in
+`m_1793739252815789833_067afa06`; independent plan PASS / RED GO in
+`m_1793739344358612273_4988606c`, RED ACCEPTED / GREEN GO in
+`m_1793739488408429483_082b8fc9`. Earlier approvals are not treated as a
+blanket dependency waiver. The audit remains blocking, with no ignore list.
+
+### Advisory and app exposure
+
+- **EEF-CVE-2026-110826 / GHSA-j6f8-qcj9-gh4r**, published
+  2026-11-03T19:19:26Z; OSV record independently read on 2026-11-03.
+  Affected stable releases: `>= 4.5.0, < 4.15.1`; fixed in **4.15.1**.
+- The generated log-out-everywhere watcher evaluates
+  `where: changing(hashed_password)` before the password hash is assigned in
+  a `before_action` hook. A non-atomic password update can therefore leave
+  old sessions valid. An attacker would already need a victim's session.
+- `SdrAgent.Accounts.User` enables this add-on and requires stored tokens.
+  However, this app already compensates with explicit unconditional
+  `OnPasswordChange` hooks in password-change/set, hosted password setup,
+  owner-link reissue, and disable actions. Preserve those hooks. App-level
+  controls passed on 4.15.0; no app exploit or actual compromise was shown.
+- Public password reset remains disabled. The upstream reset fix is not a
+  reason to enable it or to reset any real user's password during rollout.
+
+### Decision and verification contract
+
+Pin only `ash_authentication` to **4.15.1** in `mix.exs`, unlock only that
+package, then resolve and inspect the single changed `mix.lock` entry.
+Preserve the reviewed `assent` override, every other dependency pin and all
+authorization/session settings. Run `mix usage_rules.sync` and review its
+generated diff, without manual edits to generated dependency guidance.
+
+The upstream patch `954697f168d55112b5050acddcd936b8bc1fba2b` was read:
+the global hook now checks the hash in `after_action`, while explicit
+unconditional hooks retain their behavior. Library password reset spends
+its reset token in the transaction's `before_action`. The app's explicit
+and generated hooks can now both run; real action controls must verify
+success, all earlier target sessions revoked, unrelated sessions preserved,
+and one audit event. Non-password and refused updates must preserve sessions.
+
+The dependency-contract RED is the missing unguarded global watcher with
+`hashed_password_field: :hashed_password`; it is not a fabricated app-level
+exploit. RED `c3-20261103T205657Z-17606` measured that assertion failure and
+four passing app controls. GREEN includes those tests, hosted owner
+setup/reissue/disable, existing authentication and the integrated search
+checks. The exact-head full gate must rerun the blocking audit. Evidence and
+deployment receipts are recorded in
+`notes/fixes/authentication-session-revocation-20261103.org`.
+
+The inactive Exa artifact built from `55c91e0f` is superseded: rebuild from
+the patched, reviewed source and repin/review operational bytes before
+activation. No migration, grants, account changes or additional API budget.
+
+### Entity model and revisit trigger
+
+Entity Model trigger: no. This restores an existing invariant through a
+dependency bug fix; no schema, ownership, policy, action or lifecycle delta.
+Architecture unchanged; no diagram trigger. Revisit for any new advisory,
+removal of compensating hooks, enabling public reset/OAuth, or changes to
+stored-token/session validation. The prior password-only invariant and
+`assent` override conditions remain in force.

@@ -1,6 +1,6 @@
 #+TITLE: Authentication 4.15.1 session-revocation security patch
 #+DATE: 2026-11-03
-#+STATUS: APPROVED; RED verified, awaiting peer GREEN GO
+#+STATUS: IMPLEMENTED; focused GREEN, final gate and deployment pending
 
 * Summary and authority
 Patch ash_authentication 4.15.0 to 4.15.1 for EEF-CVE-2026-110826 /
@@ -39,14 +39,14 @@ OnPasswordChange hooks remain untouched. Public password reset stays disabled.
 6. Record evidence, live revision, API attempts and limitations; push receipt.
 
 * Required tests
-- [ ] Generated OnPasswordChange global hook checks hashed_password after hooks,
+- [X] Generated OnPasswordChange global hook checks hashed_password after hooks,
   without the early where changing(hashed_password) condition (RED then GREEN).
-- [ ] Own password change invalidates multiple earlier sessions, permits a new
+- [X] Own password change invalidates multiple earlier sessions, permits a new
   sign-in and leaves another user's session valid.
-- [ ] Admin password set invalidates multiple target sessions, not the admin's.
-- [ ] Wrong-current-password refusal preserves sessions and old credentials.
-- [ ] Non-password update preserves sessions; each password action audits once.
-- [ ] Existing hosted enrollment/reissue, owner-intake and search regressions.
+- [X] Admin password set invalidates multiple target sessions, not the admin's.
+- [X] Wrong-current-password refusal preserves sessions and old credentials.
+- [X] Non-password update preserves sessions; each password action audits once.
+- [X] Existing hosted enrollment/reissue, owner-intake and search regressions.
 - [ ] Exact-head full gate including blocking audit; names compared to baseline.
 
 * Risks and ADR
@@ -69,3 +69,25 @@ Final RED c3-20261103T205657Z-17606: 1 intended assertion failure, 4 behavior
 controls PASS on 4.15.0, including non-password preservation and once-only
 audit. Both owned database pairs dropped; evidence manifest verified.
 No deployment or Exa requests made for this patch.
+
+GREEN authorized by Claude m_1793739488408429483_082b8fc9. The lock delta is
+exactly1 ash_authentication entry (4.15.1, inner dbc2a4c3, outer c4fdf867,
+matching Hex metadata); all dependency requirements and other entries unchanged.
+User actions/explicit hooks and the RED tests are byte-unchanged in GREEN.
+Focused c3-20261103T210135Z-37803 PASS218/218; hosted owner disable/authorization
+c3-20261103T210243Z-42784 PASS11/11. Owned database pairs dropped and evidence
+manifests verified. WAE(test), format, audit and Credo all rc0:
+handoff tmp/auth4151-static-20261103.log SHA256
+e9037220d90fa2d37aaf517fdfc0a49d1be4964bd6e51d71d758869cc1ae6839.
+
+Usage-rules sync preview found2 auth OAuth-example sensitive?:true additions
+and unrelated pre-existing Jido generated-guidance drift. No supported
+path-selection flag exists. No generated files written or hand-edited. Per
+independent review m_1793739644327533315_e404ca5c, defer generated sync rather
+than widen this security patch. Tracked follow-up owner: Codex, refresh generated
+guidance in a separate scoped workflow change. This does not skip the workflow
+gate: bin/verify-workflow passed after the dry-run. Preview+workflow log:
+/Users/charles/.local/state/sdr-agent/handoff-20261008/tmp/auth4151-usage-preview-20261103.log
+SHA256 fcbe56fadfe9b1f0858efe92bb001bb48c7aa770b09c082a12784834191240c9.
+The earlier noninteractive sync preview refused its prompt without writing.
+Architecture unchanged by this patch; existing Exa diagram remains current.
