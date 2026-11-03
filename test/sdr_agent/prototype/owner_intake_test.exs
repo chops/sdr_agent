@@ -260,4 +260,45 @@ defmodule SdrAgent.Prototype.OwnerIntakeTest do
              |> Ash.Changeset.for_create(:record, %{}, actor: ctx.user)
              |> Ash.create()
   end
+
+  test "archived company is refused without reactivation or duplicate company", ctx do
+    assert :ok = PrototypeFixtures.leave_runtime()
+    admin = human(:admin, ctx.fx.tenant)
+
+    assert {:ok, account} =
+             SdrAgent.Sales.create_account(
+               %{name: "Archived", domain: "intake.test", source: :manual}, actor: admin)
+
+    assert {:ok, _} = SdrAgent.Sales.update(account, :archive, %{}, actor: admin)
+    H.enter!(ctx)
+    before = counts()
+    assert {:error, :account_inactive} = preview(params(), ctx.user)
+    assert counts() == before
+  end
+
+  test "existing domain suppression prevents owner intake", ctx do
+    assert :ok = PrototypeFixtures.leave_runtime()
+    admin = human(:admin, ctx.fx.tenant)
+
+    assert {:ok, _} =
+             SdrAgent.Outreach.suppress(%{scope: :domain, value: "intake.test", reason: :manual},
+               actor: admin
+             )
+
+    H.enter!(ctx)
+    before = counts()
+    assert {:error, :suppressed} = preview(params(), ctx.user)
+    assert counts() == before
+  end
+
+  test "four contacts at one company are permitted without a lifetime quota", ctx do
+    for index <- 1..4 do
+      input = %{params("person#{index}@intake.test") | "first_name" => "Person#{index}"}
+      save!(input, ctx.user)
+    end
+
+    assert count("accounts") == 1
+    assert count("contacts") == 4
+    assert count("leads") == 4
+  end
 end
