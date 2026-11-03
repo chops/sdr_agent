@@ -98,3 +98,40 @@ Generated migration uses one prepared SQL command per function/trigger statement
 the first disposable setup caught a multi-command declaration, corrected before
 the passing run. No hosted migration has run.
 
+2026-11-03 integration/inventory progress:
+- Claude domain/resource slice PASS at 54ac11c0 (not feature/deploy PASS),
+  review 19c0cdbca4c1a6d2b2cc1a59d9581dd3014473a84f4c4815069aaadef81113e0.
+  Clean peer run c6-20261103T054424Z-2136 binds the resource commit: 60/60.
+- Read slice 3cdbd3dc merged; scoped Codex source PASS. Research/Payload and
+  DossierSourceBinding integration is now Claude-owned, overlap explicitly
+  accepted. Formatting-only 79749137 merged, including the generated migration.
+- Exact AuthorityCore migration/table pins updated for the additive owner
+  schema. Existing checks first failed on the missing inventory (nine relevant
+  failures plus the inherited credential failure). The ordered-tail test
+  retains all seven d237 names and four offline-Mac names before the appended
+  owner migration; no exact/tamper assertion was removed.
+- GREEN inventory/intake/reader c4-20261103T055616Z-62101: measured FAIL 61/62,
+  sole Setup credential not_implemented failure. MANIFEST verified. Same
+  credential test/error exists in pre-intake ad208847 run
+  c4-20261101T154249Z-13069 (MANIFEST verified); do not count it as new or
+  present the measured FAIL as PASS. Final combined exact-head gate pending.
+- Format check, warnings-as-errors compile, configured mix credo all pass;
+  hosted_prototype warnings-as-errors compile also passes. Dependency warnings
+  and the known enterShell Hex pipe error are not application compile failures.
+- Canonical infrastructure inventory aligned in the separate infra worktree:
+  two SELECT/INSERT-only tables, four non-executable trigger functions, seven
+  triggers, migration 20261103053320. Isolated synthetic ACL fixture 256/256;
+  real fresh-schema migration under the non-superuser maintenance role and exact
+  schema/grant/trigger attestation 39/39. No hosted SQL mutation occurred.
+- Live read-only SQL confirmed hosted app and maintenance roles already have
+  lead SELECT/UPDATE, dossier INSERT and both Payload conflict-key column
+  UPDATEs. Runtime has no whole-table Payload UPDATE. Owner/import actions
+  share the hosted SQL app principal; there is no new SQL import role.
+  Owner tables receive no UPDATE or future-object grants.
+- Architecture generator evaluated in temporary preview; maintained domain
+  wrapper/source updated together and new owner-prospect-intake flow documents
+  conditional runtime/source boundaries, explicit assignment, no auto model/run.
+- Open: Claude T3 actual owner-cited draft/review test, R1 stale preview clearing,
+  R2 accurate hosted subtitle, N1 effective reused-Account website presentation;
+  final source review/gate, migration/ACL deployment review and pinned cutover.
+

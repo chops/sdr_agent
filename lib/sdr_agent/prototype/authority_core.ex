@@ -1148,7 +1148,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       {20_261_031_001_212, "d270_01_relocation_chain"},
       {20_261_031_022_459, "d270_02_relocation_event_position"},
       {20_261_031_064_445, "d270_03_remote_calls"},
-      {20_261_031_072_755, "d270_10_hosted_owner"}
+      {20_261_031_072_755, "d270_10_hosted_owner"},
+      {20_261_103_053_320, "owner_prospect_intake"}
     ]
 
     # IF-2 phase 1 (Codex dd9c0f20 F1): the fixed public base-table
@@ -1166,6 +1167,7 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       mac_workers model_call_allocations model_call_grants model_invocations
       model_profile_settings model_profile_switches model_result_releases
       model_server_counters model_server_starts oban_jobs oban_peers operations
+      owner_prospect_intakes owner_prospect_sources
       payloads prototype_database_bindings prototype_delegations
       prototype_relocation_events prototype_relocations
       provenance_snapshots qualification_evidences qualifications
