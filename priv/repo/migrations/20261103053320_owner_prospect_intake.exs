@@ -24,7 +24,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
     end
 
     create unique_index(:owner_prospect_intakes, [:tenant_id, :submission_sha256],
@@ -39,7 +40,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :relocation_id,
           references(:prototype_relocations,
@@ -48,7 +50,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :owner_user_id,
           references(:users,
@@ -57,7 +60,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :account_id,
           references(:accounts,
@@ -66,7 +70,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :contact_id,
           references(:contacts,
@@ -75,7 +80,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :lead_id,
           references(:leads,
@@ -84,7 +90,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
     end
 
     create unique_index(:owner_prospect_intakes, [:tenant_id, :lead_id],
@@ -181,7 +188,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :lead_id,
           references(:leads,
@@ -190,7 +198,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
 
       add :intake_id,
           references(:owner_prospect_intakes,
@@ -199,7 +208,8 @@ defmodule SdrAgent.Repo.Migrations.OwnerProspectIntake do
             type: :uuid,
             prefix: "public",
             on_delete: :restrict
-          ), null: false
+          ),
+          null: false
     end
 
     create unique_index(:owner_prospect_sources, [:intake_id, :source_key],
