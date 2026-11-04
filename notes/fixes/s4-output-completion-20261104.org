@@ -1,0 +1,81 @@
+#+TITLE: Complete the accepted D-237 S4 output and credential functions
+#+DATE: 2026-11-04
+#+STATUS: PLANNED; original RED reproduced before GREEN
+
+* Approval and scope
+Owner instruction: "complete those functions right now" (2026-11-03 local).
+This executes the existing D-249 / interfaces r6 IF-2 and IF-5 contract,
+not a new architecture. Existing tests originate at 272e6222/8ee3c3b6.
+Complete Output.view/3, Output.write_bundle/3, Authority.write_credential/1
+and their existing review/approve adapters. Claude owns the command module
+and a new command test file in a separate worktree; Codex owns Output,
+credential and boundary tests. Cross-review is mandatory.
+Home Journey G4 visibility conflict, other operator commands, API/model
+calls, real data, deployment and generated-guidance refresh are OUT.
+
+* Entity Model
+Entity Model trigger: yes
+Reason: completing existing backend output/file and command contracts;
+the accepted entities, attributes, policies and Ash actions stay unchanged.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+| Output DTO | Existing contract | labelled operator review | schema d237-output/2, four closed kinds, IF-5 fields | existing same-tenant run/draft/revision/contact/approval/receipt reads | live binding; separate canonical revision and rendered MIME digests; errors contain no content | passed live prototype operator, existing review_read actions only | none |
+| Private bundle | Existing file contract | content-bearing channel | UUID identity, assurance block, item DTOs | contains checked DTOs; no DB relationship | exclusive 0600 file in 0700 directory; never overwrite or follow links; failures leave no published content; real bundles not read by Codex | existing operator and owner provider scope | none |
+| Auditor credential | Existing file contract | bootstrap password | 32 random bytes, 43-char unpadded base64url | feeds existing create_prototype_auditor | exclusive 0600 file, occupied path refused; no password logging; stale failed-bootstrap file remains disclosed by existing caller | existing setup path | none |
+| Approval command | Existing adapter | approve exactly reviewed inputs | revision UUID, hex digest, exact reviewed recipient email | existing Approval :approve and BindApproval | no refill; stale email/revision refused; no new mutation contract | existing operator policies and live binding | peer continuity recheck pending |
+existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
+Receipt view uses existing scoped Payload action and records AuditAccess;
+this existing side effect is retained, not replaced with a kernel read.
+Reviewer: Claude via ap, ai_pair=true, codex_review=true.
+View/bundle/credential ENTITY PASS: m_1793755783789947000_1b65c316,
+evidence s4-entity-review.org SHA256
+16d89dedf08af4558b5f25c5535d08474bbdeb298953e50fe3af242701300b58.
+Command continuation requires correlated peer PASS before GREEN.
+
+* Affected modules
+- lib/sdr_agent/prototype/output.ex: authorized closed views/private bundle.
+- lib/sdr_agent/prototype/authority_core.ex: exclusive credential writer.
+- lib/mix/tasks/sdr.prototype.op.ex: review/approve execute and dispatch,
+  no queue startup except existing assign; existing terminal guard unchanged.
+- Focused output/setup and new boundary/command tests; no policy changes.
+
+* Implementation steps
+1. Reproduce the 13 intended stub failures with the isolated lane runner;
+   add synthetic malformed/path/foreign-row controls and verify RED.
+2. Reuse passed-actor domain reads, fresh binding/operator checks and scoped
+   Payload action; produce only IF-5 fields and typed checked digests.
+3. Write bundle/credential exclusively, make private before writing bytes,
+   reject symlink paths, check/close/sync handles, return only fixed errors.
+4. Integrate peer-reviewed review/approve adapters and test CLI routing.
+5. Run focused tests, format, WAE, Credo, ordinary production controls and
+   full precommit gate; expected remaining failure is Journey G4 only.
+6. Independent source review, record exact evidence, commit explicit paths
+   and push; no live activation required or claimed.
+
+* Required tests
+- [ ] Existing 12 OutputTest and one SetupTest stub failures pass.
+- [ ] Ordinary-runtime refusal; fresh/wrong/stale/foreign actor and row denial.
+- [ ] Tampered revision/approval/receipt digests refuse; scoped audit read.
+- [ ] Exact DTO fields; content absent from stdout/stderr/log/errors.
+- [ ] Bundle occupied/symlink/invalid ID, invalid item and failed-read refusal.
+- [ ] Credential randomness, exclusive file, symlink and failed-write refusal.
+- [ ] Review/approve adapters and CLI routing under peer-owned tests.
+- [ ] Full gate measured honestly; no exclusions or weakened assertions.
+
+* Risks and architecture
+No ADR required: existing accepted interfaces and private-file pattern;
+no new resource, policy, dependency, endpoint or integration.
+Architecture unchanged — no diagram update needed, unless implementation
+reveals a changed boundary (stop and evaluate before widening scope).
+Do not claim a passing full gate while Journey G4 remains unresolved.
+Only synthetic fixtures; no owner session minted, real bundle read,
+model/API call, outreach, hosted write or credential rotation.
+
+* Verification and review
+RED c3-20261104T013138Z-60567: 37/50 pass, 13 intended assertion
+failures from original stubs. Pair dropped, leases released.
+Boundary RED c3-20261104T013449Z-75870: 5/13 controls pass, 8 intended
+assertion failures from stubs. Pair dropped, leases released. Earlier
+c3-20261104T013356Z-71048 was a missing test helper compile error, not RED;
+corrected the test before the valid boundary RED.
+The reused runner protects isolated worktree/build/database provenance;
+its rc0 means disposal completed, not passing tests.
