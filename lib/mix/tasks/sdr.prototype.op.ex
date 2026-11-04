@@ -153,6 +153,22 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     def execute(_parsed, _actor), do: {:error, :not_implemented}
 
     @doc """
+    How `command` enters Session: `:enqueue` (the insert-only Oban),
+    `:plain` (no Oban) or `:not_implemented`.
+    """
+    @spec session_mode(atom()) :: :enqueue | :plain | :not_implemented
+    def session_mode(:assign), do: :enqueue
+    def session_mode(:seed), do: :plain
+    def session_mode(_command), do: :not_implemented
+
+    @doc """
+    Maps one `execute/2` result of `parsed` to `{:say, :op_result, refs}`,
+    the id being the command's subject input, or `{:abort, value}`.
+    """
+    @spec op_outcome(map(), term()) :: {:say, :op_result, keyword()} | {:abort, term()}
+    def op_outcome(_parsed, _result), do: {:abort, :not_implemented}
+
+    @doc """
     Maps one `seed` stage result (`:arguments`, `:session`, `:read` or
     `:seed`) to `{:say, :seed_result | :seed_refused, refs}` or
     `{:abort, {stage, value}}`. Only a returned Session code of the six
