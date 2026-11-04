@@ -1,6 +1,6 @@
 #+TITLE: Complete the accepted D-237 S4 output and credential functions
 #+DATE: 2026-11-04
-#+STATUS: IMPLEMENTED; combined focused GREEN; final gate pending
+#+STATUS: IMPLEMENTED AND PUSHED; focused GREEN; full gate BLOCKED
 
 * Approval and scope
 Owner instruction: "complete those functions right now" (2026-11-03 local).
@@ -90,7 +90,8 @@ existing scoped-Ash-action pattern of receipt review, no new technology.
 - [X] Bundle occupied/symlink/invalid ID, invalid item and failed-read refusal.
 - [X] Credential randomness, exclusive file, symlink and failed-write refusal.
 - [X] Review/approve adapters and CLI routing under peer-owned tests.
-- [ ] Full gate measured honestly; no exclusions or weakened assertions.
+- [X] Full gate measured honestly; no added exclusions or weakened assertions.
+  Gate is FAIL at inherited dependency audit; separate full suite is FAIL.
 
 * Risks and architecture
 No ADR required: existing accepted interfaces and private-file pattern;
@@ -159,4 +160,58 @@ Configured Credo, format and test WAE PASS:
 Delta r2 independent PASS m_1793757690000000003_434da682; operator source
 PASS sent to m_1793756646562191792_0eb2981c. Public moduledocs reviewed;
 no secrets or broader audit/payload rights found in final diff review.
-Full exact-committed-head gate remains pending; no full-suite PASS claimed.
+Final source PASS m_1793758064000000005_b6f600f2 at committed/pushed
+7e89b077e7d083a95a9df501e6d087baeaae82ec. N1: the foreign-tenant grant
+test uses established AuditCase.tamper! (replica-role UPDATE audit_events)
+as a tamper control for an unreachable state, not as a legacy-state fixture.
+
+* Final exact-head verification (source 7e89b077)
+All evidence directories below are under
+/Users/charles/.local/state/sdr-agent/lane-runs/.
+
+Gate c6-20261104T020703Z-17472: FAIL at hex.audit, before any database
+effect or suite run. Workflow, format, warnings-as-errors compile,
+ash.codegen --check and configured Credo all rc0. Audit rc1:
+ash_sql 0.8.4 is retired for security (Ecto query-cache issue causing
+unpredictable query returns); registry recommends 0.8.6. The lockfile is
+unchanged in S4. Peer ACK m_1793758097000000006_759c7d26 confirms this
+is inherited from main. Gate FAIL is retained; no audit override or
+dependency edit. A separate patch-upgrade approval was requested.
+Manifest independently verified; no database created and leases released.
+
+Full-suite regression measurement c6-20261104T020805Z-22709:
+FAIL, 6399/6436 passed, 37 failures, 1 skipped, 42 excluded.
+The skip/exclusion counts equal baseline c6-20261103T214455Z-22632;
+S4 adds no exclusion. The 37 failures are exactly:
+- 29 ContainmentGuardTest and 7 TaskBoundaryEntryTokenTest setup refusals:
+  precondition "an OTEL_ name".
+- JourneyTest G4, journey_test.exs:208: Home refuses auditor with
+  {:error, :withheld}, at refute_on_home!/2 line193 / test line236.
+None of the original 12 OutputTest or one SetupTest stub failures remains.
+Both owned databases dropped, leases released; MANIFEST.sha256 verified.
+This run is not a passing full gate and must not be relabelled as one.
+
+Environmental diagnosis, peer-reviewed m_1793759179000000007_e2b72b8a
+and m_1793759206000000008_0350f947:
+The launch removed six endpoint/header/resource OTEL variables but left
+these observed host names (names only; no values recorded):
+OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_LOG_TOOL_INVOCATIONS,
+OTEL_LOG_USER_PROMPTS. Guard setup requires no OTEL_ name at all.
+The exact 36 failed test names match baseline c3-20261030T155006Z-41786
+(positive counts 36/36 and normalized sorted name diff empty).
+
+Diagnostic clean-environment rerun c3-20261104T023523Z-37064:
+PASS36/36, no skipped/excluded tests, same exact source head; only the
+two precondition files rerun. Removed all observed host OTEL names with
+explicit env -u arguments, adding the three names above to the original
+six. No source, runner, guard, assertion or policy changes. Both owned
+databases dropped, leases released; MANIFEST.sha256 verified. This
+establishes clean targeted controls; it does not turn the failed full
+suite into PASS. Any permanent runner scrub is a separate reviewed change.
+
+Final state: source implemented, peer-reviewed and pushed on
+codex/s4-output-completion. No real data, model/search calls, outreach,
+hosted writes, restart, dependency change or migration. No architecture
+change and no new diagram required. Release/full-gate blockers remain
+the inherited ash_sql security retirement and the separate Journey G4
+visibility contract. No full-suite PASS or deployment readiness claimed.
