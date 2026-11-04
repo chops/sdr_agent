@@ -1,6 +1,6 @@
 #+TITLE: ash_sql 0.8.6 query-planning security patch
 #+DATE: 2026-11-04
-#+STATUS: IMPLEMENTED; validation in progress; Ecto audit blocker retained
+#+STATUS: IMPLEMENTED AND PUSHED; full verification BLOCKED by Ecto advisory
 
 * Summary and authority
 Owner Charles approved the previously requested minimal ash_sql 0.8.4 to
@@ -106,8 +106,25 @@ aggregate privacy/totals/page/query-plan, import tenant propagation and
 read-deadline classification. All synthetic; both owned test databases
 dropped, leases released, MANIFEST.sha256 independently verified.
 
-Full verification is not complete: exact-committed-head gate next, with
-expected Ecto audit refusal before tests. The new HIGH Ecto finding needs
-owner authority, not an audit bypass. Defer another expensive full-suite
-run until that dependency scope is resolved; retain the current gate FAIL
+Source committed/pushed as bc49048a9885a2b4ff82dc0e6cc20c41b011b5de.
+Exact-head gate c6-20261104T174540Z-85721: FAIL at hex.audit, rc1, with
+ONLY ecto 3.14.2 / EEF-CVE-2026-118391 (HIGH). The ash_sql retirement is
+absent. Workflow, format, WAE compilation, codegen and configured Credo
+all rc0. The run stopped before any database effect or full-suite test;
+leases released, no database created, MANIFEST.sha256 independently verified.
+Runner rc0 means orderly disposition, not a passing gate.
+
+Full verification is not complete. The new HIGH Ecto finding needs owner
+authority, not an audit bypass. Defer another expensive full-suite run
+until that dependency scope is resolved, then measure both patches in one
+full suite; peer ACK m_1793814336919222000_aaadc66c. Retain the gate FAIL
 and do not claim fully verified or deployment-ready. No hosted effects.
+
+* Next steps (separate authority/scope)
+1. Owner approves minimal Ecto 3.14.2 to 3.14.3, with its own dependency
+   amendment and separate commit. No Ecto change made under this grant.
+2. Re-run the combined exact-head full gate and address any new regression.
+3. Resolve Journey G4's Home filter-vs-refuse visibility contract through
+   entity/security review, not by weakening a test or exposing withheld data.
+4. Integrate the reviewed source and separately authorize/verify any hosted
+   rollout. Current website is unchanged by this source-only slice.
