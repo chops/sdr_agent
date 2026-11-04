@@ -167,5 +167,30 @@ defmodule SdrAgent.Prototype.OpOutputCommandsTest do
       assert {:abort, _} = @op.op_outcome(parsed, {:error, :something_else})
       assert {:abort, _} = @op.op_outcome(parsed, :ok)
     end
+
+    # Codex N1 (m_1793756864654181042_bc15221a): a success is reported only
+    # for the command's own success shape.
+    test "a success of the wrong shape is an outer abort, never an ok line" do
+      review = %{command: :review, agent: :claude_code, draft: @draft}
+      approve = approve_parsed(@revision, String.duplicate("a", 64), "a@example.test")
+      assign = %{command: :assign, agent: :claude_code, lead: @draft, campaign: @revision}
+
+      malformed = [%{}, %{id: @draft}, %{bundle_id: "not-a-uuid", items: 2}, %{bundle_id: @draft}]
+
+      for value <- malformed,
+          do: assert(match?({:abort, _}, @op.op_outcome(review, {:ok, value})), inspect(value))
+
+      for value <- [%{}, %{id: "not-a-uuid"}, %{bundle_id: @draft, items: 2}, :approved],
+          do: assert(match?({:abort, _}, @op.op_outcome(approve, {:ok, value})), inspect(value))
+
+      assert {:abort, _} = @op.op_outcome(assign, {:ok, %{}})
+      assert {:abort, _} = @op.op_outcome(review, {:ok, %{bundle_id: @draft, items: -1}})
+
+      assert {:say, :op_result, [command: :approve, id: @revision, result: :ok, reason: :none]} =
+               @op.op_outcome(approve, {:ok, %{id: @draft}})
+
+      assert {:say, :op_result, [command: :assign, id: @draft, result: :ok, reason: :none]} =
+               @op.op_outcome(assign, {:ok, %{id: @revision}})
+    end
   end
 end
