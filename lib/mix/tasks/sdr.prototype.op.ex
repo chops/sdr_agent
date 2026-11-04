@@ -236,9 +236,12 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     malformed result.
     """
     @spec op_outcome(map(), term()) :: {:say, :op_result, keyword()} | {:abort, term()}
-    def op_outcome(%{command: command} = parsed, {:ok, _value})
-        when is_map_key(@subjects, command),
-        do: op_line(parsed, :ok, :none)
+    def op_outcome(%{command: command} = parsed, {:ok, value})
+        when is_map_key(@subjects, command) do
+      if success?(command, value),
+        do: op_line(parsed, :ok, :none),
+        else: {:abort, {:op, :unexpected}}
+    end
 
     def op_outcome(%{command: command} = parsed, {:error, code})
         when is_map_key(@subjects, command) and code in @refusal_codes,
@@ -382,6 +385,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
           tagged
       end
     end
+
+    # Each command's own success shape (Codex N1).
+    defp success?(:review, %{bundle_id: id, items: n}) when is_integer(n) and n >= 0,
+      do: uuid?(id)
+
+    defp success?(command, %{id: id}) when command in [:assign, :approve], do: uuid?(id)
+    defp success?(_command, _value), do: false
+
+    defp uuid?(id), do: is_binary(id) and match?({:ok, ^id}, Ecto.UUID.cast(id))
 
     defp op_line(parsed, result, reason) do
       id = Map.fetch!(parsed, Map.fetch!(@subjects, parsed.command))
