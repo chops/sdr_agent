@@ -47,23 +47,21 @@ defmodule SdrAgent.Prototype.OpOutputCommandsTest do
       recipient_email: email
     }
 
+  # Runs `fun` once with stdout, the log and stderr each captured; returns
+  # its result and all three channels joined. One capture per helper keeps
+  # the nesting flat (Credo).
   defp captured(fun) do
-    stderr =
-      capture_io(:stderr, fn ->
-        log =
-          capture_log(fn ->
-            out = capture_io(fn -> send(self(), {:result, fun.()}) end)
-            send(self(), {:stdout, out})
-          end)
-
-        send(self(), {:log, log})
-      end)
+    stderr = capture_io(:stderr, fn -> send(self(), {:log, logged(fun)}) end)
 
     assert_received {:result, result}
     assert_received {:stdout, out}
     assert_received {:log, log}
     {result, out <> stderr <> log}
   end
+
+  defp logged(fun), do: capture_log(fn -> send(self(), {:stdout, stdout(fun)}) end)
+
+  defp stdout(fun), do: capture_io(fn -> send(self(), {:result, fun.()}) end)
 
   describe "execute review" do
     test "prints the bundle UUID and item count once, and nothing else of the bundle" do
