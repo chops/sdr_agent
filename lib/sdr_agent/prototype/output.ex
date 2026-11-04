@@ -44,9 +44,16 @@ defmodule SdrAgent.Prototype.Output do
   operator checks. Every `run/1` clause of every other task of `lib/mix/tasks` begins
   with this terminal check, outside any rescue.
 
-  Bounded stage (D-237 S4, Codex 9086e6a8): the prototype-runtime views and
-  the bundle are not implemented yet and return `{:error, :not_implemented}`
-  in prototype runtime.
+  Every view resolves the operator and live binding afresh. Receipt bytes
+  are read through the scoped Payload action, which records AuditAccess.
+  Bundle input is validated in full before creating a file. A failed I/O
+  attempt may leave its private, exclusively created file; it is never
+  reported as a successful bundle or overwritten on retry.
+
+  The run's `release_decision` is `"not_in_review_scope"`: IF-5 names
+  the field, but supplement 2 r2 explicitly excludes model-release reads
+  from operator review authority. This is not a claim that no release
+  exists. `stop_reason` is the run's existing `status_reason`.
   """
 
   alias SdrAgent.Audit.Canonical
@@ -80,17 +87,285 @@ defmodule SdrAgent.Prototype.Output do
   @spec allowed_tasks() :: [String.t()]
   def allowed_tasks, do: @allowed_tasks
 
-  @doc "One labelled view of `kind` for record `id`, read as `actor`."
-  @spec view(kind(), Ecto.UUID.t(), SdrAgent.Actor.t()) :: {:ok, map()} | {:error, view_error()}
-  def view(_kind, _id, _actor) do
-    with :ok <- prototype_runtime(), do: red({:error, :not_implemented})
-  end
+  if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
+    alias SdrAgent.Actor
+    alias SdrAgent.Agents
+    alias SdrAgent.Audit
+    alias SdrAgent.Audit.Checks.PrototypeReviewScope
+    alias SdrAgent.Audit.Payload
+    alias SdrAgent.Outreach
+    alias SdrAgent.Outreach.Draft
+    alias SdrAgent.Sales
 
-  @doc "Writes the private labelled bundle `bundle_id` holding the views of `items`."
-  @spec write_bundle([{kind(), Ecto.UUID.t()}], SdrAgent.Actor.t(), Ecto.UUID.t()) ::
-          {:ok, %{bundle_id: Ecto.UUID.t(), items: non_neg_integer()}} | {:error, term()}
-  def write_bundle(_items, _actor, _bundle_id) do
-    with :ok <- prototype_runtime(), do: red({:error, :not_implemented})
+    @doc "One labelled view of `kind` for record `id`, read as `actor`."
+    @spec view(kind(), Ecto.UUID.t(), SdrAgent.Actor.t()) :: {:ok, map()} | {:error, view_error()}
+    def view(kind, id, actor) do
+      with :ok <- authorized(actor),
+           :ok <- view_identity(kind, id),
+           {:ok, fields} <- fields(kind, id, actor),
+           :ok <- authorized(actor),
+           {:ok, assurance} <- Prototype.assurance() do
+        {:ok,
+         %{
+           "schema" => "d237-output/2",
+           "prototype" => assurance,
+           "kind" => Atom.to_string(kind),
+           "id" => id,
+           "fields" => fields
+         }}
+      else
+        {:error, error} -> {:error, view_reason(error)}
+      end
+    end
+
+    @doc "Writes the private labelled bundle `bundle_id` holding the views of `items`."
+    @spec write_bundle([{kind(), Ecto.UUID.t()}], SdrAgent.Actor.t(), Ecto.UUID.t()) ::
+            {:ok, %{bundle_id: Ecto.UUID.t(), items: non_neg_integer()}} | {:error, term()}
+    def write_bundle(items, actor, bundle_id) do
+      with :ok <- authorized(actor),
+           true <- canonical_uuid?(bundle_id),
+           {:ok, views} <- views(items, actor),
+           :ok <- authorized(actor),
+           {:ok, assurance} <- Prototype.assurance(),
+           {:ok, bytes} <- Jason.encode(%{"prototype" => assurance, "items" => views}),
+           {:ok, directory} <- bundle_directory(),
+           :ok <- private_directory(directory),
+           :ok <- write_private(Path.join(directory, bundle_id <> ".json"), bytes) do
+        {:ok, %{bundle_id: bundle_id, items: length(views)}}
+      else
+        {:error, error} when error in [:binding_mismatch, :not_prototype_runtime] ->
+          {:error, error}
+
+        {:error, error} when error in [:forbidden, :not_found, :digest_mismatch] ->
+          {:error, error}
+
+        _ ->
+          {:error, :bundle_write_failed}
+      end
+    end
+
+    defp authorized(actor) do
+      with :ok <- prototype_runtime(),
+           :ok <- Prototype.check_live() do
+        if match?(%Actor{type: :prototype_operator}, actor) and Prototype.operator?(actor),
+          do: :ok,
+          else: {:error, :forbidden}
+      end
+    end
+
+    defp view_identity(kind, id) do
+      if kind in @kinds and canonical_uuid?(id), do: :ok, else: {:error, :not_found}
+    end
+
+    defp canonical_uuid?(id) when is_binary(id), do: Ecto.UUID.cast(id) == {:ok, id}
+    defp canonical_uuid?(_id), do: false
+
+    defp fields(:pending_revision, id, actor) do
+      with {:ok, draft} <- Outreach.fetch(Draft, id, actor: actor),
+           :ok <- pending(draft),
+           {:ok, revision} <-
+             Outreach.fetch(DraftRevision, draft.current_revision_id, actor: actor),
+           true <- revision.draft_id == draft.id,
+           :ok <- check_revision(revision),
+           {:ok, contact} <- Sales.fetch(Sales.Contact, draft.recipient_contact_id, actor: actor) do
+        {:ok,
+         %{
+           "revision_id" => revision.id,
+           "draft_id" => draft.id,
+           "revision_number" => revision.revision_number,
+           "subject" => revision.subject,
+           "body_text" => revision.body_text,
+           "revision_content_sha256" => hex(revision.content_sha256),
+           "canonicalization_version" => revision.canonicalization_version,
+           "recipient_contact_id" => contact.id,
+           "recipient_email" => to_string(contact.email),
+           "state" => "pending_review"
+         }}
+      else
+        false -> {:error, :digest_mismatch}
+        error -> error
+      end
+    end
+
+    defp fields(:approval, id, actor) do
+      with {:ok, approval} <- Outreach.fetch(Approval, id, actor: actor),
+           {:ok, revision} <-
+             Outreach.fetch(DraftRevision, approval.draft_revision_id, actor: actor),
+           :ok <- check_approval(approval, revision),
+           {:ok, metadata} <- approval_metadata(approval, actor) do
+        {:ok,
+         %{
+           "id" => approval.id,
+           "verdict" => text(approval.verdict),
+           "approval_mode" => metadata["approval_mode"],
+           "delegation_id" => metadata["delegation_id"],
+           "draft_revision_id" => revision.id,
+           "revision_content_sha256" => hex(approval.revision_content_sha256)
+         }}
+      end
+    end
+
+    defp fields(:receipt, id, actor) do
+      with {:ok, receipt} <- Outreach.fetch(DeliveryReceipt, id, actor: actor),
+           {:ok, bytes} <- receipt_bytes(receipt, actor),
+           :ok <- check_receipt(receipt, bytes) do
+        {:ok,
+         %{
+           "id" => receipt.id,
+           "status" => text(receipt.kind),
+           "operation_id" => receipt.delivery_operation_id,
+           "rendered_sha256" => hex(receipt.rendered_sha256),
+           "rendered_bytes" => bytes
+         }}
+      end
+    end
+
+    defp fields(:run, id, actor) do
+      with {:ok, run} <- Agents.get_run(id, actor: actor) do
+        {:ok,
+         %{
+           "id" => run.id,
+           "status" => text(run.status),
+           "stop_reason" => text(run.status_reason),
+           "release_decision" => "not_in_review_scope"
+         }}
+      end
+    end
+
+    defp approval_metadata(approval, actor) do
+      with {:ok, binding} <- Prototype.binding(),
+           true <-
+             approval.verdict == :approved and approval.approver_id == binding.operator_user_id do
+        scope = %{
+          tenant_id: actor.tenant_id,
+          delegation_id: actor.id,
+          approval_id: approval.id,
+          anchor_id: binding.operator_user_id
+        }
+
+        Audit.read_prototype_approval_grant(approval.id,
+          actor: actor,
+          context: %{sdr_prototype_approval_grant_scope: scope}
+        )
+      else
+        _ -> {:error, :not_found}
+      end
+    end
+
+    defp receipt_bytes(%DeliveryReceipt{rendered_sha256: <<_::256>> = sha}, actor) do
+      context =
+        PrototypeReviewScope.context(%{
+          tenant_id: actor.tenant_id,
+          delegation_id: actor.id,
+          sha256s: [sha]
+        })
+
+      Payload
+      |> Ash.ActionInput.for_action(:read_prototype_review_content, %{sha256: sha},
+        actor: actor,
+        context: context
+      )
+      |> Ash.run_action()
+    end
+
+    defp receipt_bytes(_receipt, _actor), do: {:error, :digest_mismatch}
+
+    defp pending(%Draft{status: :pending_review}), do: :ok
+    defp pending(_draft), do: {:error, :forbidden}
+
+    defp views([_ | _] = items, actor), do: collect_views(items, actor, [])
+    defp views(_items, _actor), do: {:error, :forbidden}
+
+    defp collect_views([], _actor, acc), do: {:ok, Enum.reverse(acc)}
+
+    defp collect_views([{kind, id} | rest], actor, acc) do
+      with {:ok, view} <- view(kind, id, actor), do: collect_views(rest, actor, [view | acc])
+    end
+
+    defp collect_views(_malformed, _actor, _acc), do: {:error, :forbidden}
+
+    defp bundle_directory do
+      default =
+        Path.join([System.user_home!(), ".local", "state", "sdr-agent", "d237", "bundles"])
+
+      directory =
+        Application.get_env(:sdr_agent, __MODULE__, []) |> Keyword.get(:bundle_dir, default)
+
+      if is_binary(directory) and Path.type(directory) == :absolute and
+           Path.expand(directory) == directory,
+         do: {:ok, directory},
+         else: {:error, :bundle_write_failed}
+    end
+
+    defp private_directory(directory) do
+      with :ok <- File.mkdir_p(Path.dirname(directory)) do
+        case File.mkdir(directory) do
+          :ok -> File.chmod(directory, 0o700)
+          {:error, :eexist} -> check_directory(directory)
+          _ -> {:error, :bundle_write_failed}
+        end
+      end
+    end
+
+    defp check_directory(directory) do
+      case File.lstat(directory) do
+        {:ok, %File.Stat{type: :directory, mode: mode}} ->
+          if Bitwise.band(mode, 0o777) == 0o700,
+            do: :ok,
+            else: {:error, :bundle_write_failed}
+
+        _ ->
+          {:error, :bundle_write_failed}
+      end
+    end
+
+    # Only this exclusively created handle receives bytes, after the empty
+    # file is private. Neither an existing file nor a symlink can be opened.
+    defp write_private(path, bytes) do
+      case :file.open(String.to_charlist(path), [:raw, :binary, :write, :exclusive]) do
+        {:ok, handle} ->
+          result =
+            with :ok <- File.chmod(path, 0o600),
+                 :ok <- :file.write(handle, bytes),
+                 do: :file.sync(handle)
+
+          closed = :file.close(handle)
+          if result == :ok and closed == :ok, do: :ok, else: {:error, :bundle_write_failed}
+
+        _ ->
+          {:error, :bundle_write_failed}
+      end
+    end
+
+    defp view_reason(error)
+         when error in [
+                :not_prototype_runtime,
+                :binding_mismatch,
+                :forbidden,
+                :not_found,
+                :digest_mismatch
+              ],
+         do: error
+
+    defp view_reason(%Ash.Error.Query.NotFound{}), do: :not_found
+    defp view_reason(_error), do: :forbidden
+
+    defp hex(bytes), do: Base.encode16(bytes, case: :lower)
+    defp text(nil), do: nil
+    defp text(value) when is_atom(value), do: Atom.to_string(value)
+
+    defp prototype_runtime do
+      if prototype_runtime?(), do: :ok, else: {:error, :not_prototype_runtime}
+    end
+  else
+    @doc "Refused: no prototype output authority in an ordinary production build."
+    @spec view(kind(), Ecto.UUID.t(), SdrAgent.Actor.t()) :: {:error, :not_prototype_runtime}
+    def view(_kind, _id, _actor), do: {:error, :not_prototype_runtime}
+
+    @doc "Refused: no private bundle can be written in an ordinary production build."
+    @spec write_bundle([{kind(), Ecto.UUID.t()}], SdrAgent.Actor.t(), Ecto.UUID.t()) ::
+            {:error, :not_prototype_runtime}
+    def write_bundle(_items, _actor, _bundle_id), do: {:error, :not_prototype_runtime}
   end
 
   @doc "The revision-content digest check (see the moduledoc)."
@@ -147,10 +422,6 @@ defmodule SdrAgent.Prototype.Output do
     prototype_runtime?() or Enum.any?(@switch, &(System.get_env(&1) != nil))
   end
 
-  defp prototype_runtime do
-    if prototype_runtime?(), do: :ok, else: {:error, :not_prototype_runtime}
-  end
-
   # `runtime/0` is `:ordinary | :prototype`. Asking "not ordinary" is the same
   # question, and the production build (whose facade is always `:ordinary`)
   # compiles it without a comparison the type checker knows is always false.
@@ -162,8 +433,4 @@ defmodule SdrAgent.Prototype.Output do
       _ -> false
     end
   end
-
-  # RED stub result for the not-yet-bounded prototype-runtime views, typed
-  # dynamic() so callers compile against it; nothing sets the key.
-  defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
 end

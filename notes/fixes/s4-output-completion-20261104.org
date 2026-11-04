@@ -1,6 +1,6 @@
 #+TITLE: Complete the accepted D-237 S4 output and credential functions
 #+DATE: 2026-11-04
-#+STATUS: PLANNED; original RED reproduced before GREEN
+#+STATUS: IMPLEMENTED; combined focused GREEN; final gate pending
 
 * Approval and scope
 Owner instruction: "complete those functions right now" (2026-11-03 local).
@@ -21,7 +21,7 @@ the accepted entities, attributes, policies and Ash actions stay unchanged.
 | Output DTO | Existing contract | labelled operator review | schema d237-output/2, four closed kinds, IF-5 fields | existing same-tenant run/draft/revision/contact/approval/receipt reads | live binding; separate canonical revision and rendered MIME digests; errors contain no content | passed live prototype operator, existing review_read actions only | none |
 | Private bundle | Existing file contract | content-bearing channel | UUID identity, assurance block, item DTOs | contains checked DTOs; no DB relationship | exclusive 0600 file in 0700 directory; never overwrite or follow links; failures leave no published content; real bundles not read by Codex | existing operator and owner provider scope | none |
 | Auditor credential | Existing file contract | bootstrap password | 32 random bytes, 43-char unpadded base64url | feeds existing create_prototype_auditor | exclusive 0600 file, occupied path refused; no password logging; stale failed-bootstrap file remains disclosed by existing caller | existing setup path | none |
-| Approval command | Existing adapter | approve exactly reviewed inputs | revision UUID, hex digest, exact reviewed recipient email | existing Approval :approve and BindApproval | no refill; stale email/revision refused; no new mutation contract | existing operator policies and live binding | peer continuity recheck pending |
+| Approval command | Existing adapter | approve exactly reviewed inputs | revision UUID, hex digest, exact reviewed recipient email | existing Approval :approve and BindApproval | no refill; stale email/revision refused; existing grant queues draft, DeliveryOperation and insert-only delivery job | existing operator policies and live binding | none |
 existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
 Receipt view uses existing scoped Payload action and records AuditAccess;
 this existing side effect is retained, not replaced with a kernel read.
@@ -29,14 +29,45 @@ Reviewer: Claude via ap, ai_pair=true, codex_review=true.
 View/bundle/credential ENTITY PASS: m_1793755783789947000_1b65c316,
 evidence s4-entity-review.org SHA256
 16d89dedf08af4558b5f25c5535d08474bbdeb298953e50fe3af242701300b58.
-Command continuation requires correlated peer PASS before GREEN.
+Command ENTITY PASS and PLAN PASS: m_1793756286511234000_dc9badd1.
+Output/credential RED verified and GREEN GO: m_1793756286562407000_0f240490.
 
 * Affected modules
 - lib/sdr_agent/prototype/output.ex: authorized closed views/private bundle.
 - lib/sdr_agent/prototype/authority_core.ex: exclusive credential writer.
 - lib/mix/tasks/sdr.prototype.op.ex: review/approve execute and dispatch,
-  no queue startup except existing assign; existing terminal guard unchanged.
-- Focused output/setup and new boundary/command tests; no policy changes.
+  insert-only Oban for assign and approve; review none; terminal guard unchanged.
+- Focused output/setup and new boundary/command tests. The sole action/
+  authorization addition is the metadata-only projection below; no generic
+  event or payload read is granted.
+
+* Discovered approval-metadata source delta (separate RED)
+Approval.approval_mode and delegation_id are action arguments recorded in
+the grant audit event, NOT Approval attributes. A current operator cannot
+stand in for the historical grant actor. A general AuditEvent read would
+expose more than the accepted DTO, so the completion needs a metadata-only
+custom action, not a normal event-row read or a new column/migration.
+Entity Model trigger: yes -- narrowly bounded action/authorization delta.
+| Entity | New / Existing | Purpose | Attributes | Relationships | Invariants / Lifecycle | Policy/Actor | Open Questions |
+| AuditEvent grant metadata | Existing; new map-returning action | two historical IF-5 approval fields | approval_id UUID input; only approval_mode and delegation_id output | exact one granted event for same-tenant Approval id; no FK change | event actor prototype_operator, args mode delegated_machine, args delegation equals original event actor; no match/ambiguity refuses; no raw event/payload returned | fresh bound prototype operator plus exact private tenant/delegation/approval/anchor scope; ordinary/production and generic reads stay denied | none |
+| ApprovalGrantScope | New transient authorization value | confine metadata read | tenant/delegation/approval/anchor UUIDs from re-read Approval and binding | no persistence or new relationship | consumed against action approval_id, live actor and binding; no caller-supplied actor substitution | existing Output authorizes/re-reads Approval; Audit check revalidates scope | none |
+existing dependency: unchanged — relationship/policy/lifecycle impact checked, none found
+No new data in output beyond original IF-5; no general event or payload
+access. Audit owns its internal ledger lookup; Output never calls kernel.
+ENTITY/PLAN security PASS m_1793756698107454000_de46c1a8 (C1-C8);
+GREEN GO m_1793756903728970000_463a2e62. Audit facade and ambient-transaction
+convention acknowledged m_1793757023863088000_41710ea5.
+AuditAccess record_view uses purpose d237_prototype_approval_grant in the
+same transaction as the lookup. Existing ambient transactions are joined:
+a later caller rollback removes the access after the caller saw the
+metadata, as for existing receipt reads. CLI review is outside a caller
+transaction. Recording failure returns no metadata.
+Tests: allowed exact projection and original delegation across a second
+session; deny absent/wrong scope, wrong id/tenant/anchor/delegation,
+ordinary/production/non-operator; absent/ambiguous/inconsistent grant;
+direct generic event read stays forbidden. Separate behavioral RED before
+implementing the new action/check. No architecture alternative: use the
+existing scoped-Ash-action pattern of receipt review, no new technology.
 
 * Implementation steps
 1. Reproduce the 13 intended stub failures with the isolated lane runner;
@@ -44,7 +75,7 @@ Command continuation requires correlated peer PASS before GREEN.
 2. Reuse passed-actor domain reads, fresh binding/operator checks and scoped
    Payload action; produce only IF-5 fields and typed checked digests.
 3. Write bundle/credential exclusively, make private before writing bytes,
-   reject symlink paths, check/close/sync handles, return only fixed errors.
+   reject symlink destinations, check/close/sync handles, return fixed errors.
 4. Integrate peer-reviewed review/approve adapters and test CLI routing.
 5. Run focused tests, format, WAE, Credo, ordinary production controls and
    full precommit gate; expected remaining failure is Journey G4 only.
@@ -52,23 +83,29 @@ Command continuation requires correlated peer PASS before GREEN.
    and push; no live activation required or claimed.
 
 * Required tests
-- [ ] Existing 12 OutputTest and one SetupTest stub failures pass.
-- [ ] Ordinary-runtime refusal; fresh/wrong/stale/foreign actor and row denial.
-- [ ] Tampered revision/approval/receipt digests refuse; scoped audit read.
-- [ ] Exact DTO fields; content absent from stdout/stderr/log/errors.
-- [ ] Bundle occupied/symlink/invalid ID, invalid item and failed-read refusal.
-- [ ] Credential randomness, exclusive file, symlink and failed-write refusal.
-- [ ] Review/approve adapters and CLI routing under peer-owned tests.
+- [X] Existing 12 OutputTest and one SetupTest stub failures pass.
+- [X] Ordinary-runtime refusal; fresh/wrong/stale/foreign actor and row denial.
+- [X] Tampered revision/approval/receipt digests refuse; scoped audit read.
+- [X] Exact DTO fields; content absent from stdout/stderr/log/errors.
+- [X] Bundle occupied/symlink/invalid ID, invalid item and failed-read refusal.
+- [X] Credential randomness, exclusive file, symlink and failed-write refusal.
+- [X] Review/approve adapters and CLI routing under peer-owned tests.
 - [ ] Full gate measured honestly; no exclusions or weakened assertions.
 
 * Risks and architecture
 No ADR required: existing accepted interfaces and private-file pattern;
-no new resource, policy, dependency, endpoint or integration.
+no new resource, dependency, endpoint or integration. The one new scoped
+action/check is the independently reviewed metadata projection above.
 Architecture unchanged — no diagram update needed, unless implementation
 reveals a changed boundary (stop and evaluate before widening scope).
 Do not claim a passing full gate while Journey G4 remains unresolved.
 Only synthetic fixtures; no owner session minted, real bundle read,
 model/API call, outreach, hosted write or credential rotation.
+IF-5's run release_decision has no authorized read source: supplement 2 r2
+explicitly excludes ModelInvocation and ModelResultRelease. Per independent
+ruling m_1793756286539604000_c2ae3dc4 use "not_in_review_scope", never nil
+or a guessed release; stop_reason is AgentRun.status_reason. Showing release
+metadata is a separate owner follow-up requiring entity/security review.
 
 * Verification and review
 RED c3-20261104T013138Z-60567: 37/50 pass, 13 intended assertion
@@ -79,3 +116,47 @@ c3-20261104T013356Z-71048 was a missing test helper compile error, not RED;
 corrected the test before the valid boundary RED.
 The reused runner protects isolated worktree/build/database provenance;
 its rc0 means disposal completed, not passing tests.
+Projection RED c3-20261104T014658Z-29069: 11 missing-action assertions,
+one source control; stronger c3-20261104T014953Z-43235: 12 assertions
+(added exact error facade/source check). Earlier 014553 was a test syntax
+error, not RED. Original Output/setup and boundary REDs remain separate.
+First combined GREEN c3-20261104T015204Z-52119: 158/165, 7 failures.
+Six were fixture prerequisites (one discarded fixture job, then bootstrap
+failures), not reached output assertions. They did not recur; cause is
+UNPROVEN. One new test expected Forbidden from a list read, but Ash read
+policies filter to empty results. Corrected to exact empty results with
+populated authorized controls; no production policy changed for this.
+Debug bundle: tmp/ai/debug/bundle_20261103-185445; full failing log retained
+under that lane run. Do not reclassify the failed run as passing.
+Combined c3-20261104T015622Z-70291: PASS166/166, original 13 resolved,
+owned pair dropped and leases released. Includes op N1 success-shape
+regression and all grant-scoped allow/deny controls then present.
+Test and ordinary-prod WAE pass after conditional-compilation correction;
+log /Users/charles/.local/state/sdr-agent/triage-20261104/s4-warnings-as-errors.log.
+Ordinary no-app-start pure view/bundle and scope/reader refusal checks pass;
+log /Users/charles/.local/state/sdr-agent/triage-20261104/s4-ordinary-refusals.log.
+SOURCE PASS (conditional measured checks) m_1793757226266388000_8f681ba0.
+S1 stale RED comment removed. S2 credential parent is owner-private;
+lstat regular after exclusive open, private before bytes, sync/close checked,
+handle cleanup on failure. S3 a pending draft/revision relationship mismatch
+maps to digest_mismatch within the accepted closed error set.
+Configured Credo found one new test nesting issue in Claude's capture
+helper; resolved by extracting capture_logged/1 and capture_stdout/1.
+Codex's extraction is used instead of peer commit 56aef3b1, not combined
+with it (ownership ACK m_1793757762000000004_8e1e64e2).
+An exploratory strict Credo run also reports
+legacy low-priority findings; it is not the configured enforcement level.
+Final source adds a foreign-tenant grant-event denial control and encloses
+positive Output code in the existing prototype compile flag; final focused
+and gate evidence follows below.
+
+Latest combined GREEN c3-20261104T020229Z-98309: PASS167/167, no skipped
+or excluded tests; owned pair dropped. MANIFEST.sha256 independently
+verified after completion. Includes final conditional compilation, capture
+helper extraction and foreign-tenant grant-event denial control.
+Configured Credo, format and test WAE PASS:
+/Users/charles/.local/state/sdr-agent/triage-20261104/s4-final-static.log.
+Delta r2 independent PASS m_1793757690000000003_434da682; operator source
+PASS sent to m_1793756646562191792_0eb2981c. Public moduledocs reviewed;
+no secrets or broader audit/payload rights found in final diff review.
+Full exact-committed-head gate remains pending; no full-suite PASS claimed.

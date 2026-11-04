@@ -225,6 +225,25 @@ defmodule SdrAgent.Audit do
     |> Ash.read()
   end
 
+  @doc """
+  S4 operator-only historical grant metadata, under Output's private scope.
+  Returns only approval_mode/delegation_id, or closed forbidden/not_found;
+  never exposes the underlying audit event or payload. Records AuditAccess.
+  """
+  def read_prototype_approval_grant(approval_id, opts) do
+    AuditEvent
+    |> Ash.ActionInput.for_action(:read_prototype_approval_grant, %{approval_id: approval_id},
+      actor: Keyword.get(opts, :actor),
+      context: Keyword.get(opts, :context, %{})
+    )
+    |> Ash.run_action()
+    |> case do
+      {:ok, metadata} -> {:ok, metadata}
+      {:error, %Ash.Error.Forbidden{}} -> {:error, :forbidden}
+      _ -> {:error, :not_found}
+    end
+  end
+
   @doc "Payload metadata of the actor's tenant (content hidden)."
   def list_payloads(opts) do
     actor = Keyword.get(opts, :actor)

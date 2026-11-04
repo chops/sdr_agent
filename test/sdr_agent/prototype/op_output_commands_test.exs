@@ -48,21 +48,22 @@ defmodule SdrAgent.Prototype.OpOutputCommandsTest do
     }
 
   defp captured(fun) do
-    stderr =
-      capture_io(:stderr, fn ->
-        log =
-          capture_log(fn ->
-            out = capture_io(fn -> send(self(), {:result, fun.()}) end)
-            send(self(), {:stdout, out})
-          end)
-
-        send(self(), {:log, log})
-      end)
+    stderr = capture_io(:stderr, fn -> capture_logged(fun) end)
 
     assert_received {:result, result}
     assert_received {:stdout, out}
     assert_received {:log, log}
     {result, out <> stderr <> log}
+  end
+
+  defp capture_logged(fun) do
+    log = capture_log(fn -> capture_stdout(fun) end)
+    send(self(), {:log, log})
+  end
+
+  defp capture_stdout(fun) do
+    out = capture_io(fn -> send(self(), {:result, fun.()}) end)
+    send(self(), {:stdout, out})
   end
 
   describe "execute review" do

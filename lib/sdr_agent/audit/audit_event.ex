@@ -17,7 +17,10 @@ defmodule SdrAgent.Audit.AuditEvent do
   Actions: `:append` — authorized only for the audit kernel
   (`SdrAgent.Audit.Kernel`), never called directly; `:read` (ADM, REV, AUR,
   AUD); `:verify_chain` (ADM, AUR, AUD) — runs the verifier and records an
-  AuditAccess. No update or destroy; the table is append-only (trigger).
+  AuditAccess. `:read_prototype_approval_grant` returns only the original
+  delegated grant's mode/delegation for a live operator's private scope,
+  recording AuditAccess; it grants no event-row read. No update or destroy;
+  the table is append-only (trigger).
   """
   use Ash.Resource,
     otp_app: :sdr_agent,
@@ -79,6 +82,16 @@ defmodule SdrAgent.Audit.AuditEvent do
         SdrAgent.Audit.Kernel.verify_and_record(context.actor)
       end
     end
+
+    action :read_prototype_approval_grant, :map do
+      description "Scoped OPR: original approval mode/delegation only, with record-view access."
+      transaction? false
+      argument :approval_id, :uuid, allow_nil?: false
+
+      run fn input, context ->
+        SdrAgent.Audit.PrototypeApprovalGrant.read(input, context.actor)
+      end
+    end
   end
 
   policies do
@@ -95,6 +108,10 @@ defmodule SdrAgent.Audit.AuditEvent do
     policy action(:verify_chain) do
       authorize_if {Checks.ActorRole, roles: [:admin, :auditor]}
       authorize_if {Checks.ActorType, types: [:auditor_cli]}
+    end
+
+    policy action(:read_prototype_approval_grant) do
+      authorize_if Checks.PrototypeApprovalGrantScope
     end
 
     policy action_type(:read) do

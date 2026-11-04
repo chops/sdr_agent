@@ -27,8 +27,8 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     - `resolve_delegation/2`: resolver steps 3-7 of IF-1 for a boot snapshot
       and a delegation row (or nil);
     - setup phase 0/1 checks: `check_repo_target/1`, `check_app_stopped/0,1`
-      with `app_names/0`, `write_credential/1` (still a stub; the credential
-      is owner-held), `check_fresh/0`, `check_resumable/0`,
+      with `app_names/0`, `write_credential/1` (exclusive private file;
+      credential is owner-held), `check_fresh/0`, `check_resumable/0`,
       `public_tables/0` and `pinned_migrations/0`; and phase 0's
       `maintenance_target/0`, `maintenance_identity/0` and
       `maintenance_result/1` (S1 I4 r3; fixed target, monitored helper,
@@ -1104,9 +1104,42 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     defp alive?(_malformed), do: true
 
-    @doc "Creates the auditor credential file exclusively (0600) and returns its password."
+    @doc """
+    Creates the auditor credential file exclusively (0600) and returns its
+    password. The setup caller supplies an owner-private parent directory.
+    The empty new file is checked and made private before password bytes
+    are written. A failed attempt is never overwritten on retry.
+    """
     @spec write_credential(Path.t()) :: {:ok, String.t()} | {:error, atom()}
-    def write_credential(_path), do: red({:error, :not_implemented})
+    def write_credential(path) when is_binary(path) do
+      password = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+      case :file.open(String.to_charlist(path), [:raw, :binary, :write, :exclusive]) do
+        {:ok, handle} ->
+          result =
+            try do
+              with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
+                   :ok <- File.chmod(path, 0o600),
+                   :ok <- :file.write(handle, password),
+                   :ok <- :file.sync(handle),
+                   do: :file.close(handle)
+            after
+              :file.close(handle)
+            end
+
+          if result == :ok,
+            do: {:ok, password},
+            else: {:error, :credential_write_failed}
+
+        {:error, :eexist} ->
+          {:error, :credential_path_exists}
+
+        _ ->
+          {:error, :credential_write_failed}
+      end
+    end
+
+    def write_credential(_path), do: {:error, :credential_write_failed}
 
     # The exact migration set setup runs (`priv/repo/migrations`, in
     # version order); a new migration must be added here, or resume refuses.
@@ -1347,11 +1380,6 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp hex(digest), do: Base.encode16(digest, case: :lower)
-
-    # RED stub result, typed dynamic() so callers compile against the stub
-    # (Elixir 1.20 infers literal returns). Read-only: nothing writes the key
-    # (ruling e); removed in GREEN.
-    defp red(default), do: :persistent_term.get({__MODULE__, :red_stub}, default)
   end
 
   # The hermetic test seam (interfaces r6 ruling a): only in builds that also
