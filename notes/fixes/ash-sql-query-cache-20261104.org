@@ -1,0 +1,113 @@
+#+TITLE: ash_sql 0.8.6 query-planning security patch
+#+DATE: 2026-11-04
+#+STATUS: IMPLEMENTED; validation in progress; Ecto audit blocker retained
+
+* Summary and authority
+Owner Charles approved the previously requested minimal ash_sql 0.8.4 to
+0.8.6 patch (2026-11-04 in this Codex conversation):
+#+begin_quote
+[ORG/TELEGRAPHIC] approve updrade.
+
+what's next?
+#+end_quote
+This is not permission for 0.8.7,
+unrelated dependency changes, deployment, G4 behavior or a runner change.
+Branch codex/ash-sql-086-20261104, base a3fe90904051372a909602fe2357d3e756f91c9c.
+
+* Entity Model
+Entity Model trigger: no
+Reason: patch of an existing dependency; no application persisted concept,
+attribute, relationship, ownership, policy, action contract or lifecycle changes.
+
+* Affected files
+- mix.exs: explicit == 0.8.6 pin alongside existing Ash pins; latest is
+  0.8.7, so an unpinned unlock/get would exceed the approved version.
+- mix.lock: resolver-generated ash_sql entry only; no other package/version.
+- docs/adr/0008-dependency-security-baseline.md: accepted narrow amendment.
+- This note: approval, review, exact verification and any remaining blockers.
+- Dependency-generated guidance only if a scoped sync produces relevant changes.
+
+* Plan and required checks
+1. Preserve prior audit FAIL and reproduce a fresh audit at the base.
+   No invented app exploit or duplicated lock-string test; this is an
+   audit-driven dependency patch, not new application behavior.
+2. Read upstream 0.8.4 to 0.8.6 changes and exact Hex package metadata.
+   Add the approved direct pin, unlock only ash_sql, deps.get; stop if any
+   other lock entry changes. Do not hand-seed checksums or take 0.8.7.
+3. Run usage_rules.sync, review generated output; do not hand-edit it or
+   absorb unrelated pre-existing drift. Record any deferred output.
+4. Run test/prod WAE, format, configured Credo, relevant SQL/policy-focused
+   synthetic checks, peer source review, and clean-env exact-head full gate.
+   Every observed OTEL_ name is explicitly unset for isolated test launches.
+5. Preserve audit/test FAILs; no waivers, exclusions or assertions weakened.
+   Record exact findings and stop for authority if another dependency is needed.
+6. Commit explicit paths and push; no hosted effects or deployment claimed.
+
+* Architecture and decision record
+Amend existing accepted ADR-0008 under its established security-patch pattern;
+no new ADR or technology decision. The explicit transitive-package pin is
+necessary to enforce the owner's approved version while 0.8.7 exists.
+Architecture unchanged -- no diagram update needed.
+
+* Read-only findings and RED
+Plan PASS / RED GO: Claude m_1793813905921662000_40b72dc6; exact-version
+resolution ruling m_1793813936320583000_d8776e12 favors durable direct pin
+and resolver-generated lock. Earlier advice to unlock without a pin is
+not followed because the latest-version precondition is false.
+Prior RED c6-20261104T020703Z-17472: ash_sql 0.8.4 retired (security),
+Ecto query cache issue causes unpredictable query returns; upgrade 0.8.6.
+Fresh 2026-11-04 base hex.info confirms latest 0.8.7, locked 0.8.4;
+hex.audit rc1 reproduces the retirement. It ALSO reports a new inherited
+ecto 3.14.2 HIGH advisory EEF-CVE-2026-118391; outside this approval.
+Audit remains blocking even if the ash_sql retirement is removed.
+
+Exact Hex 0.8.6 tarball SHA256:
+5c06ff9482854892e4c9e637733ca099adeac79baae020cbc9af96fa488847b0
+(matches release API checksum); inner CHECKSUM read from verified archive.
+Requirements admit existing ash 3.37.2, ecto/ecto_sql 3.14.2 and jason pins.
+Upstream fix e25c921a28fac1a03ea113de2a66e97ebdc589cd prevents joining
+tenant-variable-prefix relationships directly, retaining subqueries to
+avoid Ecto planning/cache confusion. Intermediate 0.8.5 also changes
+aggregate collection per path. No app-level exploit or compromise shown.
+
+RED ACCEPTED / GREEN GO: m_1793814069182679000_cb0db269.
+ADR text PASS: m_1793814101168816000_0a013a24 (nonblocking citation added).
+The durable direct pin was added; mix deps.unlock ash_sql then mix deps.get
+generated exactly one changed lock entry, ash_sql 0.8.6. Hex revalidated
+the exact archive/inner checksums; no handwritten lock or other version move.
+Post-resolution hex.audit still rc1: ONLY ecto 3.14.2 EEF-CVE-2026-118391;
+the ash_sql retirement is gone. Source 0.8.7 was not selected.
+Fresh RED log: /Users/charles/.local/state/sdr-agent/triage-20261104/ash-sql-fresh-red.log.
+Resolve/audit log: /Users/charles/.local/state/sdr-agent/triage-20261104/ash-sql-resolve-and-audit.log.
+The Ecto advisory was published 2026-11-04T13:57:29.762Z, fixed in 3.14.3;
+owner approval requested while the approved ash_sql work continues.
+A source search found no direct json_extract_path/splice calls in lib/;
+that is not proof dependency-generated SQL cannot reach the affected path.
+
+* GREEN measurements and review
+Source PASS: m_1793814193522300000_f5cf83d8 at mix.exs SHA256
+0cedd717284e80477f9398ba95e2fa4a0f81f5e2a8849f2358916f259807a6a7,
+mix.lock 50bf11e3c55cc47e9d4bf4c465fe1897e356382c9ffefdf6487191803b595c99,
+ADR-0008 9001776fd8cbe9b9e6f55b54c29b6cddf1b44ac1fb4af197b2bb88b3c225d199.
+
+MIX_ENV=test and MIX_ENV=prod compile --warnings-as-errors, format
+--check-formatted, configured Credo and git diff --check PASS (serial run rc0).
+Log: /Users/charles/.local/state/sdr-agent/triage-20261104/ash-sql-static-and-usage-preview.log.
+
+mix usage_rules.sync --dry-run was executed in the selected dev environment.
+It previews only unrelated existing auth/Jido generated-guidance drift;
+verified ash_sql 0.8.6 has no usage_rules files. No generated write or
+manual generated edit. Defer the unrelated refresh to its existing owned
+follow-up, as in the 4.15.1 slice; peer ACK m_1793814233594686000_1ad5cf40.
+
+Focused c3-20261104T174353Z-78141: PASS84/84, no skipped/excluded tests.
+Includes dependency-security, domain/outreach/audit policies, Inbox
+aggregate privacy/totals/page/query-plan, import tenant propagation and
+read-deadline classification. All synthetic; both owned test databases
+dropped, leases released, MANIFEST.sha256 independently verified.
+
+Full verification is not complete: exact-committed-head gate next, with
+expected Ecto audit refusal before tests. The new HIGH Ecto finding needs
+owner authority, not an audit bypass. Defer another expensive full-suite
+run until that dependency scope is resolved; retain the current gate FAIL
+and do not claim fully verified or deployment-ready. No hosted effects.

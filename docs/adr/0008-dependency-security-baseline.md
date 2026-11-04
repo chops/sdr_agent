@@ -1126,3 +1126,67 @@ Architecture unchanged; no diagram trigger. Revisit for any new advisory,
 removal of compensating hooks, enabling public reset/OAuth, or changes to
 stored-token/session validation. The prior password-only invariant and
 `assent` override conditions remain in force.
+
+## Amendment (2026-11-04, accepted scope): ash_sql query-planning retirement
+
+### Authority and scope
+
+Charles approved the previously requested minimal `ash_sql` 0.8.4 → 0.8.6
+upgrade in the Codex conversation on 2026-11-04:
+
+> [ORG/TELEGRAPHIC] approve updrade.
+>
+> what's next?
+
+This is a narrow patch grant, not a blanket dependency waiver, an audit
+exception, or deployment permission. Peer plan PASS / RED GO:
+`m_1793813905921662000_40b72dc6`; exact-version resolution review:
+`m_1793813936320583000_d8776e12`; RED ACCEPTED / GREEN GO:
+`m_1793814069182679000_cb0db269`; amendment text PASS:
+`m_1793814101168816000_0a013a24`. Technical source review and
+verification evidence are recorded in
+`notes/fixes/ash-sql-query-cache-20261104.org`.
+
+### Finding and upstream delta
+
+The blocking audit at `c6-20261104T020703Z-17472` reports `ash_sql 0.8.4`
+retired for **security**: "Ecto query cache issue causes unpredictable query
+returns. Upgrade to 0.8.6." A fresh audit at base `a3fe9090` reproduces the
+retirement; no advisory identifier is invented for a registry retirement.
+
+Upstream fix `e25c921a28fac1a03ea113de2a66e97ebdc589cd` preserves a subquery
+instead of joining directly when a relationship's SQL prefix varies by
+tenant. The 0.8.4 → 0.8.6 delta also includes 0.8.5's per-path aggregate
+collection change. This is not proof of a reachable application exploit or
+an actual data disclosure; existing policy and tenant-isolation tests stay
+in force. Verification must cover the SQL/aggregate/policy paths.
+
+### Decision and verification contract
+
+Add a durable `{:ash_sql, "== 0.8.6"}` constraint alongside the existing
+exact Ash pins. `ash_sql` was already transitive through `ash_postgres`;
+this adds no package. Hex already offers 0.8.7, so plain unlock/get would
+not enforce the owner's approved version. Do not take 0.8.7 implicitly.
+Unlock only `ash_sql`, run `mix deps.get`, and require the resolver-generated
+lock diff to contain only its entry. Do not hand-seed a lock or change any
+other package, `assent` override, policy, schema, or action.
+
+Read and verify the exact Hex tarball's checksum and requirements. Run
+`mix usage_rules.sync` and review generated output without manual edits or
+unrelated drift. Measure test/prod warnings-as-errors compilation, format,
+configured Credo, SQL-heavy synthetic tests, independent source review, and
+the exact-head full gate in a clean environment. No exclusions, weakened
+assertions, or audit ignore entries. A permanent runner scrub is out of scope.
+
+The fresh audit also reports **EEF-CVE-2026-118391 / GHSA-cxjx-vmm2-qr8r**
+against existing `ecto 3.14.2` (HIGH; fixed in 3.14.3). That separate patch
+needs its own owner authority. Removing the `ash_sql` retirement alone does
+not make the audit or full gate pass. Preserve all failures and report them.
+
+### Entity model and revisit triggers
+
+Entity Model trigger: no (dependency patch, no application schema,
+ownership, policy, action contract or lifecycle change). Architecture
+unchanged; no diagram update needed. Revisit the explicit `ash_sql` pin on
+a later `ash_postgres` upgrade or new advisory. Journey G4's Home visibility
+contract and any hosted rollout remain separate decisions.
