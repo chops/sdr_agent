@@ -29,11 +29,24 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     absolute seed path and four seed digests; anything else is
     `{:error, :invalid_arguments}`.
 
-    `execute/2` implements `assign` only (D-268 M7): the lead is read as the
-    operator, then `SdrAgent.SDR.assign_lead/2` runs with the operator and
-    the campaign and never an `owner_user_id`; it returns the new AgentRun's
-    id. Its job is only inserted, inside the action's transaction; it runs
-    only in serve. Every other command returns `{:error, :not_implemented}`.
+    `execute/2` implements `assign`, `review` and `approve`:
+
+      * `assign` (D-268 M7): the lead is read as the operator, then
+        `SdrAgent.SDR.assign_lead/2` runs with the operator and the campaign
+        and never an `owner_user_id`; it returns the new AgentRun's id. Its
+        job is only inserted, inside the action's transaction; it runs only
+        in serve.
+      * `review` (IF-5, S4): the draft is read as the operator, then
+        `SdrAgent.Prototype.Output.write_bundle/3` writes the pending-revision
+        and origin-run views under a new bundle UUID; the UUID and item
+        count are printed once, as `bundle_written`.
+      * `approve` (IF-5 Q1): the revision and its draft are read as the
+        operator, then `SdrAgent.Outreach.approve/3` gets the three reviewed
+        inputs unchanged; BindApproval's stale refusals are `:stale_review`.
+        The grant inserts its delivery job in the same transaction, so
+        `approve` enters Session with the insert-only Oban, as `assign` does.
+
+    `reject`, `revoke` and `status` return `{:error, :not_implemented}`.
 
     `seed` (the separate retry for a bound, unseeded target; delta 8b34f015)
     runs in the body itself: Session without Oban, the real op guard, then
@@ -47,16 +60,21 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     Mix loads app.config through the requirement before SafeLog attaches and
     the terminal launch (ADR-0022). The body starts only OpenTelemetry,
     parses argv, enters `SdrAgent.Prototype.Session` (with the insert-only
-    Oban for `assign`), then checks the real op guard before the action.
-    The one `assign` result line is SafeLog's closed `op_result` with the lead id.
+    Oban for `assign` and `approve`, without it for `review`), then checks
+    the real op guard before the action. The one result line is SafeLog's
+    closed `op_result` with the subject id (lead, draft or revision).
     An invalid argument, an unimplemented command, a Session code outside
     the op reasons and every non-success guard result are returned tagged
     to TaskBoundary for its one fixed abort line; nothing else is printed.
     """
     use Mix.Task
 
+    alias SdrAgent.Outreach
+    alias SdrAgent.Outreach.Draft
+    alias SdrAgent.Outreach.DraftRevision
     alias SdrAgent.Prototype.BootCheck
     alias SdrAgent.Prototype.ContainmentGuard
+    alias SdrAgent.Prototype.Output
     alias SdrAgent.Prototype.SafeLog
     alias SdrAgent.Prototype.Seed
     alias SdrAgent.Prototype.SeedDir
@@ -90,6 +108,25 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     }
 
     @reasons ["not_a_fit", "content", "recipient"]
+
+    # Each implemented command's subject input, the id of its op_result line.
+    @subjects %{assign: :lead, review: :draft, approve: :revision}
+
+    # The op_result refusal reasons (SafeLog's op reasons less `:none` and
+    # the seed-only codes).
+    @refusal_codes [
+      :invalid_arguments,
+      :binding_mismatch,
+      :not_prototype_runtime,
+      :forbidden,
+      :not_found,
+      :stale_review,
+      :digest_mismatch,
+      :op_failed
+    ]
+
+    # BindApproval's stale-review refusals (bind_approval.ex:98-101,170).
+    @stale_fields [:draft_revision_id, :content_sha256, :recipient_email]
 
     # Session and action codes printed as themselves; every other code is
     # an outer abort, never relabelled.
@@ -136,9 +173,11 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
 
     @doc """
     Runs one parsed command as the resolved operator `actor`: `assign`
-    returns `{:ok, %{id: run_id}}` or `{:error, :forbidden | :not_found |
-    :binding_mismatch | :not_prototype_runtime | :op_failed}`; every other
-    command is `{:error, :not_implemented}`.
+    returns `{:ok, %{id: run_id}}`, `review` `{:ok, %{bundle_id: id, items:
+    n}}` and `approve` `{:ok, %{id: approval_id}}`, or `{:error, :forbidden |
+    :not_found | :binding_mismatch | :not_prototype_runtime | :stale_review |
+    :digest_mismatch | :op_failed}`; `reject`, `revoke` and `status` are
+    `{:error, :not_implemented}`.
     """
     @spec execute(map(), SdrAgent.Actor.t()) :: {:ok, map()} | {:error, atom()}
     def execute(%{command: :assign, lead: lead_id, campaign: campaign_id}, actor) do
@@ -150,23 +189,62 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    def execute(%{command: :review, draft: draft_id}, actor) do
+      with {:ok, draft} <- Outreach.fetch(Draft, draft_id, actor: actor),
+           items = [{:pending_revision, draft.id}, {:run, draft.origin_agent_run_id}],
+           {:ok, %{bundle_id: bundle_id, items: count} = written} <-
+             Output.write_bundle(items, actor, Ecto.UUID.generate()) do
+        :ok = SafeLog.say(:bundle_written, bundle_id: bundle_id, items: count)
+        {:ok, written}
+      else
+        {:error, error} -> {:error, reason(error)}
+      end
+    end
+
+    def execute(%{command: :approve} = parsed, actor) do
+      binding = %{
+        draft_revision_id: parsed.revision,
+        content_sha256: parsed.revision_sha256,
+        recipient_email: parsed.recipient_email
+      }
+
+      with {:ok, revision} <- Outreach.fetch(DraftRevision, parsed.revision, actor: actor),
+           {:ok, draft} <- Outreach.fetch(Draft, revision.draft_id, actor: actor),
+           {:ok, approval} <- Outreach.approve(draft, binding, actor: actor) do
+        {:ok, %{id: approval.id}}
+      else
+        {:error, error} -> {:error, reason(error)}
+      end
+    end
+
     def execute(_parsed, _actor), do: {:error, :not_implemented}
 
     @doc """
-    How `command` enters Session: `:enqueue` (the insert-only Oban),
+    How `command` enters Session: `:enqueue` (the insert-only Oban; the
+    `approve` grant inserts its delivery job in the same transaction),
     `:plain` (no Oban) or `:not_implemented`.
     """
     @spec session_mode(atom()) :: :enqueue | :plain | :not_implemented
-    def session_mode(:assign), do: :enqueue
-    def session_mode(:seed), do: :plain
+    def session_mode(command) when command in [:assign, :approve], do: :enqueue
+    def session_mode(command) when command in [:review, :seed], do: :plain
     def session_mode(_command), do: :not_implemented
 
     @doc """
     Maps one `execute/2` result of `parsed` to `{:say, :op_result, refs}`,
-    the id being the command's subject input, or `{:abort, value}`.
+    the id being the command's subject input (the lead, draft or
+    revision), or `{:abort, value}` for a code outside the op reasons or a
+    malformed result.
     """
     @spec op_outcome(map(), term()) :: {:say, :op_result, keyword()} | {:abort, term()}
-    def op_outcome(_parsed, _result), do: {:abort, :not_implemented}
+    def op_outcome(%{command: command} = parsed, {:ok, _value})
+        when is_map_key(@subjects, command),
+        do: op_line(parsed, :ok, :none)
+
+    def op_outcome(%{command: command} = parsed, {:error, code})
+        when is_map_key(@subjects, command) and code in @refusal_codes,
+        do: op_line(parsed, :refused, code)
+
+    def op_outcome(_parsed, _result), do: {:abort, {:op, :unexpected}}
 
     @doc """
     Maps one `seed` stage result (`:arguments`, `:session`, `:read` or
@@ -224,18 +302,19 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
       end
     end
 
+    # Session without Oban (seed and review); the raw Session result.
+    defp plain_session(parsed, correlation) do
+      Session.enter(
+        agent: Atom.to_string(parsed.agent),
+        session_correlation: correlation,
+        enqueue?: false
+      )
+    end
+
     # The separate seed retry: Session without Oban, the op guard, then the
     # pinned seed directory read and Seed's own top-level transaction.
     defp seed(parsed, correlation) do
-      with {:ok, %{actor: actor}} <-
-             seed_at(
-               :session,
-               Session.enter(
-                 agent: Atom.to_string(parsed.agent),
-                 session_correlation: correlation,
-                 enqueue?: false
-               )
-             ),
+      with {:ok, %{actor: actor}} <- seed_at(:session, plain_session(parsed, correlation)),
            {:guard, :ok} <- {:guard, ContainmentGuard.guard(:op)},
            [offering_profile, writing_guide, campaign, provenance] = parsed.seed_sha256,
            {:ok, seed} <-
@@ -256,41 +335,57 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     end
 
     defp command(parsed_result, correlation) do
-      with {:ok, %{command: :assign} = parsed} <- parsed_result,
-           {:ok, %{actor: actor}} <- enter(parsed, correlation),
+      with {:ok, parsed} <- parsed_result,
+           {:mode, mode} when mode in [:enqueue, :plain] <- {:mode, session_mode(parsed.command)},
+           {:ok, %{actor: actor}} <- enter(parsed, correlation, mode),
            {:guard, :ok} <- {:guard, ContainmentGuard.guard(:op)} do
         result(parsed, execute(parsed, actor))
       else
         {:guard, _result} = guard_refusal -> guard_refusal
         {:refuse, parsed, code} -> result(parsed, {:error, code})
-        {:ok, _other_command} -> {:op, :not_implemented}
+        {:mode, :not_implemented} -> {:op, :not_implemented}
         {:error, :invalid_arguments} -> {:op, :invalid_arguments}
         {:session, _code} = session_refusal -> session_refusal
       end
     end
 
-    defp enter(parsed, correlation) do
-      case Session.enter(
-             agent: Atom.to_string(parsed.agent),
-             session_correlation: correlation,
-             enqueue?: true
-           ) do
+    defp enter(parsed, correlation, mode) do
+      entered =
+        case mode do
+          :enqueue -> enqueue_session(parsed, correlation)
+          :plain -> plain_session(parsed, correlation)
+        end
+
+      case entered do
         {:ok, entered} -> {:ok, entered}
         {:error, code} when code in @passed_codes -> {:refuse, parsed, code}
         {:error, code} -> {:session, code}
       end
     end
 
-    defp result(parsed, {:ok, _value}) do
-      :ok = SafeLog.say(:op_result, command: :assign, id: parsed.lead, result: :ok, reason: :none)
-      :ok
+    # Session with the insert-only Oban (assign and approve).
+    defp enqueue_session(parsed, correlation) do
+      Session.enter(
+        agent: Atom.to_string(parsed.agent),
+        session_correlation: correlation,
+        enqueue?: true
+      )
     end
 
-    defp result(parsed, {:error, code}) do
-      :ok =
-        SafeLog.say(:op_result, command: :assign, id: parsed.lead, result: :refused, reason: code)
+    defp result(parsed, value) do
+      case op_outcome(parsed, value) do
+        {:say, :op_result, refs} ->
+          :ok = SafeLog.say(:op_result, refs)
+          if Keyword.fetch!(refs, :result) == :ok, do: :ok, else: :refused
 
-      :refused
+        {:abort, tagged} ->
+          tagged
+      end
+    end
+
+    defp op_line(parsed, result, reason) do
+      id = Map.fetch!(parsed, Map.fetch!(@subjects, parsed.command))
+      {:say, :op_result, [command: parsed.command, id: id, result: result, reason: reason]}
     end
 
     defp seed_at(_stage, {:ok, value}), do: {:ok, value}
@@ -321,12 +416,15 @@ if Application.compile_env(:sdr_agent, :prototype_authority_compiled, false) do
     defp reason(%Ash.Error.Query.NotFound{}), do: :not_found
 
     defp reason(%Ash.Error.Invalid{errors: errors}) do
-      if Enum.any?(errors, &match?(%Ash.Error.Query.NotFound{}, &1)),
-        do: :not_found,
-        else: :op_failed
+      cond do
+        Enum.any?(errors, &match?(%Ash.Error.Query.NotFound{}, &1)) -> :not_found
+        Enum.any?(errors, &(Map.get(&1, :field) in @stale_fields)) -> :stale_review
+        true -> :op_failed
+      end
     end
 
     defp reason(code) when code in @passed_codes, do: code
+    defp reason(code) when code in [:forbidden, :not_found, :digest_mismatch], do: code
     defp reason(_error), do: :op_failed
 
     defp unique_keys?(opts), do: length(opts) == length(Enum.uniq(Keyword.keys(opts)))
